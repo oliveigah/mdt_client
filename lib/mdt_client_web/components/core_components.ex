@@ -2,18 +2,12 @@ defmodule MDTClientWeb.CoreComponents do
   @moduledoc """
   Provides core UI components.
 
-  At first glance, this module may seem daunting, but its goal is to provide
-  core building blocks for your application, such as tables, forms, and
-  inputs. The components consist mostly of markup and are well-documented
-  with doc strings and declarative assigns. You may customize and style
-  them in any way you want, based on your application growth and needs.
+  The components here are the shared building blocks of the app: flashes,
+  buttons, inputs, tables and so on. They are styled with Tailwind using the
+  design tokens declared in `assets/css/app.css`, which mirror the
+  "Oliveigah Dark" Zed theme.
 
-  The foundation for styling is Tailwind CSS, a utility-first CSS framework,
-  augmented with daisyUI, a Tailwind CSS plugin that provides UI components
-  and themes. Here are useful references:
-
-    * [daisyUI](https://daisyui.com/docs/intro/) - a good place to get
-      started and see the available components.
+  Useful references:
 
     * [Tailwind CSS](https://tailwindcss.com) - the foundational framework
       we build on. You will use it for layout, sizing, flexbox, grid, and
@@ -62,25 +56,29 @@ defmodule MDTClientWeb.CoreComponents do
       id={@id}
       phx-click={JS.push("lv:clear-flash", value: %{key: @kind}) |> hide("##{@id}")}
       role="alert"
-      class="toast toast-top toast-end z-50"
+      class={[
+        "pointer-events-auto flex cursor-pointer items-start gap-2.5 rounded-lg border px-3 py-2.5",
+        "bg-panel text-sm shadow-lg shadow-black/10 transition-colors dark:shadow-black/40",
+        @kind == :info && "border-accent/40 hover:border-accent/70",
+        @kind == :error && "border-bad/40 hover:border-bad/70"
+      ]}
       {@rest}
     >
-      <div class={[
-        "alert w-80 sm:w-96 max-w-80 sm:max-w-96 text-wrap",
-        @kind == :info && "alert-info",
-        @kind == :error && "alert-error"
-      ]}>
-        <.icon :if={@kind == :info} name="hero-information-circle" class="size-5 shrink-0" />
-        <.icon :if={@kind == :error} name="hero-exclamation-circle" class="size-5 shrink-0" />
-        <div>
-          <p :if={@title} class="font-semibold">{@title}</p>
-          <p>{msg}</p>
-        </div>
-        <div class="flex-1" />
-        <button type="button" class="group self-start cursor-pointer" aria-label="close">
-          <.icon name="hero-x-mark" class="size-5 opacity-40 group-hover:opacity-70" />
-        </button>
+      <.icon
+        :if={@kind == :info}
+        name="hero-information-circle"
+        class="mt-px size-4 shrink-0 text-accent"
+      />
+      <.icon
+        :if={@kind == :error}
+        name="hero-exclamation-circle"
+        class="mt-px size-4 shrink-0 text-bad"
+      />
+      <div class="min-w-0 flex-1">
+        <p :if={@title} class="font-semibold">{@title}</p>
+        <p class="text-ink/90">{msg}</p>
       </div>
+      <.icon name="hero-x-mark" class="mt-px size-4 shrink-0 text-faint" />
     </div>
     """
   end
@@ -94,18 +92,27 @@ defmodule MDTClientWeb.CoreComponents do
       <.button phx-click="go" variant="primary">Send!</.button>
       <.button navigate={~p"/"}>Home</.button>
   """
-  attr :rest, :global, include: ~w(href navigate patch method download name value disabled)
-  attr :class, :any
-  attr :variant, :string, values: ~w(primary)
+  attr :rest, :global, include: ~w(href navigate patch method download name value disabled type)
+  attr :class, :any, default: nil
+  attr :variant, :string, default: "secondary", values: ~w(primary secondary ghost danger)
   slot :inner_block, required: true
 
   def button(%{rest: rest} = assigns) do
-    variants = %{"primary" => "btn-primary", nil => "btn-primary btn-soft"}
+    variants = %{
+      "primary" => "bg-accent text-deep font-semibold hover:brightness-110 active:brightness-95",
+      "secondary" => "border border-line bg-panel text-ink hover:border-line hover:bg-hover",
+      "ghost" => "text-muted hover:bg-hover hover:text-ink",
+      "danger" => "border border-bad/40 bg-bad-soft/40 text-bad hover:bg-bad-soft"
+    }
 
     assigns =
-      assign_new(assigns, :class, fn ->
-        ["btn", Map.fetch!(variants, assigns[:variant])]
-      end)
+      assign(assigns, :class, [
+        "inline-flex cursor-pointer items-center justify-center gap-1.5 rounded-md px-3 py-1.5",
+        "text-[13px] leading-none transition-all focus-visible:outline-2 focus-visible:outline-offset-2",
+        "focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-50",
+        Map.fetch!(variants, assigns.variant),
+        assigns.class
+      ])
 
     if rest[:href] || rest[:navigate] || rest[:patch] do
       ~H"""
@@ -211,8 +218,8 @@ defmodule MDTClientWeb.CoreComponents do
       end)
 
     ~H"""
-    <div class="fieldset mb-2">
-      <label for={@id}>
+    <div>
+      <label for={@id} class="flex cursor-pointer items-center gap-2 text-[13px] text-muted">
         <input
           type="hidden"
           name={@name}
@@ -220,17 +227,16 @@ defmodule MDTClientWeb.CoreComponents do
           disabled={@rest[:disabled]}
           form={@rest[:form]}
         />
-        <span class="label">
-          <input
-            type="checkbox"
-            id={@id}
-            name={@name}
-            value="true"
-            checked={@checked}
-            class={@class || "checkbox checkbox-sm"}
-            {@rest}
-          />{@label}
-        </span>
+        <input
+          type="checkbox"
+          id={@id}
+          name={@name}
+          value="true"
+          checked={@checked}
+          class={@class || "size-3.5 cursor-pointer accent-accent"}
+          {@rest}
+        />
+        {@label}
       </label>
       <.error :for={msg <- @errors}>{msg}</.error>
     </div>
@@ -239,20 +245,27 @@ defmodule MDTClientWeb.CoreComponents do
 
   def input(%{type: "select"} = assigns) do
     ~H"""
-    <div class="fieldset mb-2">
-      <label for={@id}>
-        <span :if={@label} class="label mb-1">{@label}</span>
-        <select
-          id={@id}
-          name={@name}
-          class={[@class || "w-full select", @errors != [] && (@error_class || "select-error")]}
-          multiple={@multiple}
-          {@rest}
-        >
-          <option :if={@prompt} value="">{@prompt}</option>
-          {Phoenix.HTML.Form.options_for_select(@options, @value)}
-        </select>
+    <div>
+      <label
+        :if={@label}
+        for={@id}
+        class="mb-1 block text-[11px] font-medium uppercase tracking-wide text-muted"
+      >
+        {@label}
       </label>
+      <select
+        id={@id}
+        name={@name}
+        class={[
+          @class || input_classes(),
+          @errors != [] && (@error_class || "border-bad/70")
+        ]}
+        multiple={@multiple}
+        {@rest}
+      >
+        <option :if={@prompt} value="">{@prompt}</option>
+        {Phoenix.HTML.Form.options_for_select(@options, @value)}
+      </select>
       <.error :for={msg <- @errors}>{msg}</.error>
     </div>
     """
@@ -260,19 +273,23 @@ defmodule MDTClientWeb.CoreComponents do
 
   def input(%{type: "textarea"} = assigns) do
     ~H"""
-    <div class="fieldset mb-2">
-      <label for={@id}>
-        <span :if={@label} class="label mb-1">{@label}</span>
-        <textarea
-          id={@id}
-          name={@name}
-          class={[
-            @class || "w-full textarea",
-            @errors != [] && (@error_class || "textarea-error")
-          ]}
-          {@rest}
-        >{Phoenix.HTML.Form.normalize_value("textarea", @value)}</textarea>
+    <div>
+      <label
+        :if={@label}
+        for={@id}
+        class="mb-1 block text-[11px] font-medium uppercase tracking-wide text-muted"
+      >
+        {@label}
       </label>
+      <textarea
+        id={@id}
+        name={@name}
+        class={[
+          @class || [input_classes(), "font-mono"],
+          @errors != [] && (@error_class || "border-bad/70")
+        ]}
+        {@rest}
+      >{Phoenix.HTML.Form.normalize_value("textarea", @value)}</textarea>
       <.error :for={msg <- @errors}>{msg}</.error>
     </div>
     """
@@ -281,31 +298,46 @@ defmodule MDTClientWeb.CoreComponents do
   # All other inputs text, datetime-local, url, password, etc. are handled here...
   def input(assigns) do
     ~H"""
-    <div class="fieldset mb-2">
-      <label for={@id}>
-        <span :if={@label} class="label mb-1">{@label}</span>
-        <input
-          type={@type}
-          name={@name}
-          id={@id}
-          value={Phoenix.HTML.Form.normalize_value(@type, @value)}
-          class={[
-            @class || "w-full input",
-            @errors != [] && (@error_class || "input-error")
-          ]}
-          {@rest}
-        />
+    <div>
+      <label
+        :if={@label}
+        for={@id}
+        class="mb-1 block text-[11px] font-medium uppercase tracking-wide text-muted"
+      >
+        {@label}
       </label>
+      <input
+        type={@type}
+        name={@name}
+        id={@id}
+        value={Phoenix.HTML.Form.normalize_value(@type, @value)}
+        class={[
+          @class || input_classes(),
+          @errors != [] && (@error_class || "border-bad/70")
+        ]}
+        {@rest}
+      />
       <.error :for={msg <- @errors}>{msg}</.error>
     </div>
     """
   end
 
+  @doc """
+  The shared styling for text-like inputs, so bespoke inputs can match `<.input>`.
+  """
+  def input_classes do
+    [
+      "w-full rounded-md border border-line bg-deep px-2.5 py-1.5 text-[13px] text-ink",
+      "placeholder:text-faint transition-colors outline-none",
+      "focus:border-accent/60 focus:ring-2 focus:ring-accent/15"
+    ]
+  end
+
   # Helper used by inputs to generate form errors
   defp error(assigns) do
     ~H"""
-    <p class="mt-1.5 flex gap-2 items-center text-sm text-error">
-      <.icon name="hero-exclamation-circle" class="size-5" />
+    <p class="mt-1.5 flex items-center gap-1.5 text-xs text-bad">
+      <.icon name="hero-exclamation-circle" class="size-4" />
       {render_slot(@inner_block)}
     </p>
     """
@@ -322,10 +354,10 @@ defmodule MDTClientWeb.CoreComponents do
     ~H"""
     <header class={[@actions != [] && "flex items-center justify-between gap-6", "pb-4"]}>
       <div>
-        <h1 class="text-lg font-semibold leading-8">
+        <h1 class="text-base font-semibold leading-7">
           {render_slot(@inner_block)}
         </h1>
-        <p :if={@subtitle != []} class="text-sm text-base-content/70">
+        <p :if={@subtitle != []} class="text-[13px] text-muted">
           {render_slot(@subtitle)}
         </p>
       </div>
@@ -366,26 +398,30 @@ defmodule MDTClientWeb.CoreComponents do
       end
 
     ~H"""
-    <table class="table table-zebra">
-      <thead>
-        <tr>
-          <th :for={col <- @col}>{col[:label]}</th>
-          <th :if={@action != []}>
+    <table class="w-full text-left text-[13px]">
+      <thead class="text-[11px] uppercase tracking-wide text-muted">
+        <tr class="border-b border-line-soft">
+          <th :for={col <- @col} class="px-3 py-2 font-medium">{col[:label]}</th>
+          <th :if={@action != []} class="px-3 py-2">
             <span class="sr-only">Actions</span>
           </th>
         </tr>
       </thead>
       <tbody id={@id} phx-update={is_struct(@rows, Phoenix.LiveView.LiveStream) && "stream"}>
-        <tr :for={row <- @rows} id={@row_id && @row_id.(row)}>
+        <tr
+          :for={row <- @rows}
+          id={@row_id && @row_id.(row)}
+          class="border-b border-line-soft/60 transition-colors hover:bg-hover/60"
+        >
           <td
             :for={col <- @col}
             phx-click={@row_click && @row_click.(row)}
-            class={@row_click && "hover:cursor-pointer"}
+            class={["px-3 py-2", @row_click && "cursor-pointer"]}
           >
             {render_slot(col, @row_item.(row))}
           </td>
-          <td :if={@action != []} class="w-0 font-semibold">
-            <div class="flex gap-4">
+          <td :if={@action != []} class="w-0 px-3 py-2">
+            <div class="flex gap-3">
               <%= for action <- @action do %>
                 {render_slot(action, @row_item.(row))}
               <% end %>
@@ -413,12 +449,10 @@ defmodule MDTClientWeb.CoreComponents do
 
   def list(assigns) do
     ~H"""
-    <ul class="list">
-      <li :for={item <- @item} class="list-row">
-        <div class="list-col-grow">
-          <div class="font-bold">{item.title}</div>
-          <div>{render_slot(item)}</div>
-        </div>
+    <ul class="divide-y divide-line-soft text-[13px]">
+      <li :for={item <- @item} class="flex gap-4 py-2">
+        <span class="w-40 shrink-0 text-muted">{item.title}</span>
+        <span class="min-w-0 flex-1 break-words">{render_slot(item)}</span>
       </li>
     </ul>
     """
@@ -456,21 +490,20 @@ defmodule MDTClientWeb.CoreComponents do
   def show(js \\ %JS{}, selector) do
     JS.show(js,
       to: selector,
-      time: 300,
+      time: 200,
       transition:
-        {"transition-all ease-out duration-300",
-         "opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95",
-         "opacity-100 translate-y-0 sm:scale-100"}
+        {"transition-all ease-out duration-200", "opacity-0 translate-y-2",
+         "opacity-100 translate-y-0"}
     )
   end
 
   def hide(js \\ %JS{}, selector) do
     JS.hide(js,
       to: selector,
-      time: 200,
+      time: 150,
       transition:
-        {"transition-all ease-in duration-200", "opacity-100 translate-y-0 sm:scale-100",
-         "opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95"}
+        {"transition-all ease-in duration-150", "opacity-100 translate-y-0",
+         "opacity-0 translate-y-2"}
     )
   end
 

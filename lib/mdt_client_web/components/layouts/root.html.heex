@@ -1,14 +1,17 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" class="h-full">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="csrf-token" content={get_csrf_token()} />
-    <.live_title default="MDTClient" suffix=" · Phoenix Framework" phx-no-format>{assigns[:page_title]}</.live_title>
+    <.live_title default="MDT" suffix=" · MDT">{assigns[:page_title]}</.live_title>
     <link phx-track-static rel="stylesheet" href={~p"/assets/css/app.css"} />
     <script defer phx-track-static type="text/javascript" src={~p"/assets/js/app.js"}>
     </script>
     <script>
+      // Applies the theme and the panel sizes before the first paint, so the app
+      // never flashes the wrong colors or layout. See Layouts.theme_toggle/1 and
+      // the ".Resize" hook in MDTClientWeb.HttpClientLive.
       (() => {
         const systemTheme = () => matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
 
@@ -34,10 +37,15 @@
             document.documentElement.setAttribute("data-theme", systemTheme());
           }
         });
+
+        for (const [key, variable] of [["mdt:zoom", "--zoom"], ["mdt:history-width", "--history-width"], ["mdt:request-height", "--request-height"]]) {
+          const size = localStorage.getItem(key);
+          if (size) { document.documentElement.style.setProperty(variable, size); }
+        }
       })();
     </script>
   </head>
-  <body>
+  <body class="h-full">
     {@inner_content}
   </body>
 </html>

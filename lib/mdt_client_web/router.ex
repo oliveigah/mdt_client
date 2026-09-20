@@ -17,7 +17,13 @@ defmodule MDTClientWeb.Router do
   scope "/", MDTClientWeb do
     pipe_through :browser
 
-    live "/", HomeLive
+    live "/", LoginLive
+
+    live_session :app, on_mount: {MDTClientWeb.UserAuth, :mock_user} do
+      live "/tools", ToolsLive
+      live "/tools/http", HttpClientLive
+      live "/tools/git", GitLive
+    end
   end
 
   # Other scopes may use custom stacks.

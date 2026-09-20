@@ -5,6 +5,8 @@ defmodule MDTClientWeb.Layouts do
   """
   use MDTClientWeb, :html
 
+  alias MDTClient.Tools
+
   # Embed all files in layouts/* within this module.
   # The default root.html.heex file contains the HTML
   # skeleton of your application, namely HTML headers
@@ -12,15 +14,14 @@ defmodule MDTClientWeb.Layouts do
   embed_templates "layouts/*"
 
   @doc """
-  Renders your app layout.
+  Renders the app shell: a thin title bar plus a full height work area.
 
-  This function is typically invoked from every template,
-  and it often contains your application menu, sidebar,
-  or similar.
+  Pass `chrome={false}` for standalone screens (like the login page) that own
+  the whole window.
 
   ## Examples
 
-      <Layouts.app flash={@flash}>
+      <Layouts.app flash={@flash} current_scope={@current_scope} tool={@tool}>
         <h1>Content</h1>
       </Layouts.app>
 
@@ -31,44 +32,151 @@ defmodule MDTClientWeb.Layouts do
     default: nil,
     doc: "the current [scope](https://phoenix.hexdocs.pm/scopes.html)"
 
+  attr :tool, :map, default: nil, doc: "the tool currently open, see `MDTClient.Tools`"
+  attr :chrome, :boolean, default: true, doc: "renders the title bar"
+
   slot :inner_block, required: true
 
   def app(assigns) do
     ~H"""
-    <header class="navbar px-4 sm:px-6 lg:px-8">
-      <div class="flex-1">
-        <a href="/" class="flex-1 flex w-fit items-center gap-2">
-          <img src={~p"/images/logo.svg"} width="36" />
-          <span class="text-sm font-semibold">v{Application.spec(:phoenix, :vsn)}</span>
-        </a>
-      </div>
-      <div class="flex-none">
-        <ul class="flex flex-column px-1 space-x-4 items-center">
-          <li>
-            <a href="https://phoenixframework.org/" class="btn btn-ghost">Website</a>
-          </li>
-          <li>
-            <a href="https://github.com/phoenixframework/phoenix" class="btn btn-ghost">GitHub</a>
-          </li>
-          <li>
-            <.theme_toggle />
-          </li>
-          <li>
-            <a href="https://phoenix.hexdocs.pm/overview.html" class="btn btn-primary">
-              Get Started <span aria-hidden="true">&rarr;</span>
-            </a>
-          </li>
-        </ul>
-      </div>
-    </header>
+    <div class="relative flex h-full flex-col overflow-hidden bg-app text-ink">
+      <header
+        :if={@chrome}
+        class="flex h-9 shrink-0 items-center gap-2 border-b border-line-soft bg-panel px-2.5"
+      >
+        <.link
+          navigate={~p"/tools"}
+          class="flex items-center gap-2 rounded px-1.5 py-1 text-accent transition-colors hover:bg-hover"
+          title="All tools"
+        >
+          <.logo class="size-4" />
+          <span class="text-[13px] font-semibold tracking-wide text-ink">MDT</span>
+        </.link>
 
-    <main class="px-4 py-20 sm:px-6 lg:px-8">
-      <div class="mx-auto max-w-2xl space-y-4">
+        <%= if @tool do %>
+          <span class="text-faint">/</span>
+          <span class="flex items-center gap-1.5 text-xs text-muted">
+            <.icon name={@tool.icon} class="size-3.5" />
+            {@tool.name}
+          </span>
+        <% end %>
+
+        <div class="flex-1"></div>
+
+        <nav class="flex items-center gap-0.5">
+          <.link
+            :for={tool <- Tools.all()}
+            navigate={tool.path}
+            title={tool.name}
+            class={[
+              "flex size-7 items-center justify-center rounded transition-colors",
+              if(@tool && @tool.id == tool.id,
+                do: "bg-active text-ink",
+                else: "text-muted hover:bg-hover hover:text-ink"
+              )
+            ]}
+          >
+            <.icon name={tool.icon} class="size-4" />
+          </.link>
+        </nav>
+
+        <div class="mx-1 h-4 w-px bg-line"></div>
+
+        <.theme_toggle />
+
+        <div class="mx-1 h-4 w-px bg-line"></div>
+
+        <div :if={@current_scope} class="flex items-center gap-2">
+          <span class="flex size-6 items-center justify-center rounded-full bg-accent-soft text-[10px] font-semibold text-accent">
+            {@current_scope.user.initials}
+          </span>
+          <span class="hidden text-xs text-muted sm:inline">{@current_scope.user.email}</span>
+          <.link
+            navigate={~p"/"}
+            title="Sign out"
+            class="flex size-7 items-center justify-center rounded text-muted transition-colors hover:bg-hover hover:text-bad"
+          >
+            <.icon name="hero-arrow-left-start-on-rectangle" class="size-4" />
+          </.link>
+        </div>
+      </header>
+
+      <main class="flex min-h-0 flex-1 flex-col">
         {render_slot(@inner_block)}
-      </div>
-    </main>
+      </main>
 
-    <.flash_group flash={@flash} />
+      <.flash_group flash={@flash} />
+    </div>
+    """
+  end
+
+  @doc """
+  Switches between the dark theme, the light theme and the system preference.
+
+  The choice is applied and persisted by the script in `root.html.heex`; which
+  segment reads as active is derived from the `data-theme` and
+  `data-theme-source` attributes it sets on `<html>`.
+  """
+  attr :class, :any, default: nil
+
+  def theme_toggle(assigns) do
+    assigns =
+      assign(assigns, :themes, [
+        {"system", "hero-computer-desktop-micro", "Follow the system theme",
+         "[[data-theme-source=system]_&]:bg-active [[data-theme-source=system]_&]:text-ink"},
+        {"light", "hero-sun-micro", "Light theme",
+         "[[data-theme-source=user][data-theme=light]_&]:bg-active [[data-theme-source=user][data-theme=light]_&]:text-ink"},
+        {"dark", "hero-moon-micro", "Dark theme",
+         "[[data-theme-source=user][data-theme=dark]_&]:bg-active [[data-theme-source=user][data-theme=dark]_&]:text-ink"}
+      ])
+
+    ~H"""
+    <div class={["flex items-center gap-0.5 rounded-md border border-line bg-deep p-0.5", @class]}>
+      <button
+        :for={{theme, icon, label, active_class} <- @themes}
+        type="button"
+        phx-click={JS.dispatch("phx:set-theme")}
+        data-phx-theme={theme}
+        title={label}
+        aria-label={label}
+        class={[
+          "flex size-5 cursor-pointer items-center justify-center rounded text-faint transition-colors hover:text-ink",
+          active_class
+        ]}
+      >
+        <.icon name={icon} class="size-3.5" />
+      </button>
+    </div>
+    """
+  end
+
+  @doc """
+  The MDT mark: a terminal prompt inside a rounded square.
+  """
+  attr :class, :any, default: "size-5"
+
+  def logo(assigns) do
+    ~H"""
+    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true" class={@class}>
+      <rect
+        x="1.25"
+        y="1.25"
+        width="21.5"
+        height="21.5"
+        rx="6"
+        stroke="currentColor"
+        stroke-opacity="0.45"
+        stroke-width="1.5"
+      />
+      <path
+        d="M7 9l2.75 3L7 15"
+        stroke="currentColor"
+        stroke-width="1.75"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+      />
+      <path d="M12.75 15.25H17" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" />
+    </svg>
     """
   end
 
@@ -84,14 +192,18 @@ defmodule MDTClientWeb.Layouts do
 
   def flash_group(assigns) do
     ~H"""
-    <div id={@id} aria-live="polite">
+    <div
+      id={@id}
+      aria-live="polite"
+      class="pointer-events-none fixed bottom-3 right-3 z-50 flex w-80 flex-col gap-2"
+    >
       <.flash kind={:info} flash={@flash} />
       <.flash kind={:error} flash={@flash} />
 
       <.flash
         id="client-error"
         kind={:error}
-        title="We can't find the internet"
+        title="We can't reach the app"
         phx-disconnected={
           show(".phx-client-error #client-error")
           |> JS.remove_attribute("hidden", to: ".phx-client-error #client-error")
@@ -117,43 +229,6 @@ defmodule MDTClientWeb.Layouts do
         Attempting to reconnect
         <.icon name="hero-arrow-path" class="ml-1 size-3 motion-safe:animate-spin" />
       </.flash>
-    </div>
-    """
-  end
-
-  @doc """
-  Provides dark vs light theme toggle based on themes defined in app.css.
-
-  See <head> in root.html.heex which applies the theme before page load.
-  """
-  def theme_toggle(assigns) do
-    ~H"""
-    <div class="card relative flex flex-row items-center border-2 border-base-300 bg-base-300 rounded-full">
-      <div class="absolute w-1/3 h-full rounded-full border-1 border-base-200 bg-base-100 brightness-200 left-0 [[data-theme=light]_&]:left-1/3 [[data-theme=dark]_&]:left-2/3 [[data-theme-source=system]_&]:!left-0 transition-[left]" />
-
-      <button
-        class="flex p-2 cursor-pointer w-1/3"
-        phx-click={JS.dispatch("phx:set-theme")}
-        data-phx-theme="system"
-      >
-        <.icon name="hero-computer-desktop-micro" class="size-4 opacity-75 hover:opacity-100" />
-      </button>
-
-      <button
-        class="flex p-2 cursor-pointer w-1/3"
-        phx-click={JS.dispatch("phx:set-theme")}
-        data-phx-theme="light"
-      >
-        <.icon name="hero-sun-micro" class="size-4 opacity-75 hover:opacity-100" />
-      </button>
-
-      <button
-        class="flex p-2 cursor-pointer w-1/3"
-        phx-click={JS.dispatch("phx:set-theme")}
-        data-phx-theme="dark"
-      >
-        <.icon name="hero-moon-micro" class="size-4 opacity-75 hover:opacity-100" />
-      </button>
     </div>
     """
   end
