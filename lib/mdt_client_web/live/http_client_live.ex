@@ -27,8 +27,11 @@ defmodule MDTClientWeb.HttpClientLive do
      |> assign(:active_id, hd(tabs).id)
      |> assign(:sidebar?, true)
      |> assign(:collapsed, MapSet.new())
+     |> assign(:selected, MapSet.new())
      |> assign(:dialog, nil)
-     |> assign(:import_error, nil)
+     |> assign(:dialog_targets, [])
+     |> assign(:dialog_value, "")
+     |> assign(:dialog_error, nil)
      |> assign(:term, "")
      |> assign_history()
      |> sync_tab()}
@@ -49,6 +52,7 @@ defmodule MDTClientWeb.HttpClientLive do
           term={@term}
           count={@count}
           collapsed={@collapsed}
+          selected={@selected}
           active_source={@tab && @tab.source_id}
         />
 
@@ -98,37 +102,51 @@ defmodule MDTClientWeb.HttpClientLive do
       </div>
 
       <.curl_dialog
-        :if={@dialog}
+        :if={@dialog in ~w(export_curl import_curl)}
         dialog={@dialog}
         tab={@tab}
-        import_error={@import_error}
+        error={@dialog_error}
+      />
+
+      <.metadata_dialog
+        :if={@dialog in ~w(add_tag set_description)}
+        dialog={@dialog}
+        targets={@dialog_targets}
+        value={@dialog_value}
+        error={@dialog_error}
       />
     </Layouts.app>
     """
   end
 
-  ## curl import and export
+  ## Dialogs
 
-  attr :dialog, :string, required: true
-  attr :tab, :map, default: nil
-  attr :import_error, :string, default: nil
+  # The shared chrome: a dimmed backdrop, a titled header, and whatever the
+  # caller puts in the body.
+  attr :id, :string, required: true
+  attr :icon, :string, required: true
+  attr :title, :string, required: true
+  attr :width, :string, default: "max-w-2xl"
+  slot :inner_block, required: true
 
-  defp curl_dialog(assigns) do
+  defp dialog(assigns) do
     ~H"""
     <div
-      id="curl-dialog"
+      id={@id}
       class="fixed inset-0 z-40 flex items-center justify-center p-6"
       phx-window-keydown="close_dialog"
       phx-key="Escape"
     >
       <div class="absolute inset-0 bg-black/50" phx-click="close_dialog"></div>
 
-      <div class="relative flex max-h-full w-full max-w-2xl flex-col overflow-hidden rounded-xl border border-line bg-panel shadow-2xl shadow-black/20 dark:shadow-black/50">
+      <div class={[
+        "relative flex max-h-full w-full flex-col overflow-hidden rounded-xl border border-line",
+        "bg-panel shadow-2xl shadow-black/20 dark:shadow-black/50",
+        @width
+      ]}>
         <div class="flex h-9 shrink-0 items-center gap-2 border-b border-line-soft px-3">
-          <.icon name="hero-command-line" class="size-4 text-accent" />
-          <span class="text-xs font-semibold">
-            {if @dialog == "export_curl", do: "Export as curl", else: "Import from curl"}
-          </span>
+          <.icon name={@icon} class="size-4 text-accent" />
+          <span class="text-xs font-semibold">{@title}</span>
           <div class="flex-1"></div>
           <button
             type="button"
@@ -140,57 +158,116 @@ defmodule MDTClientWeb.HttpClientLive do
           </button>
         </div>
 
-        <%= if @dialog == "export_curl" do %>
-          <pre
-            id="curl-export"
-            class="max-h-80 overflow-auto whitespace-pre-wrap break-all bg-deep px-3 py-2.5 font-mono text-xs leading-5 text-ink"
-          >{Curl.to_curl(@tab)}</pre>
-
-          <div class="flex shrink-0 items-center justify-end gap-2 border-t border-line-soft px-3 py-2.5">
-            <.button type="button" phx-click="close_dialog" variant="secondary">Close</.button>
-            <.button
-              type="button"
-              id="copy-curl"
-              phx-hook=".Copy"
-              data-copy={Curl.to_curl(@tab)}
-              variant="primary"
-            >
-              <.icon name="hero-clipboard-document" class="size-4" />
-              <span data-label>Copy</span>
-            </.button>
-          </div>
-        <% else %>
-          <form phx-submit="import_curl" class="flex min-h-0 flex-col">
-            <textarea
-              id="curl-import"
-              name="command"
-              rows="9"
-              spellcheck="false"
-              phx-mounted={JS.focus()}
-              placeholder="curl https://api.example.com/v1/users -H 'Accept: application/json'"
-              class="min-h-0 flex-1 resize-none bg-deep px-3 py-2.5 font-mono text-xs leading-5 text-ink outline-none placeholder:text-faint focus:ring-1 focus:ring-inset focus:ring-accent/30"
-            ></textarea>
-
-            <div class="flex shrink-0 items-center gap-2 border-t border-line-soft px-3 py-2.5">
-              <p
-                :if={@import_error}
-                id="curl-import-error"
-                class="flex items-center gap-1.5 text-xs text-bad"
-              >
-                <.icon name="hero-exclamation-circle" class="size-4" />
-                {@import_error}
-              </p>
-              <p :if={!@import_error} class="text-[11px] text-faint">
-                The command opens as a new request tab.
-              </p>
-              <div class="flex-1"></div>
-              <.button type="button" phx-click="close_dialog" variant="secondary">Cancel</.button>
-              <.button type="submit" variant="primary">Import</.button>
-            </div>
-          </form>
-        <% end %>
+        {render_slot(@inner_block)}
       </div>
     </div>
+    """
+  end
+
+  attr :dialog, :string, required: true
+  attr :tab, :map, default: nil
+  attr :error, :string, default: nil
+
+  defp curl_dialog(assigns) do
+    ~H"""
+    <.dialog
+      id="curl-dialog"
+      icon="hero-command-line"
+      title={if @dialog == "export_curl", do: "Export as curl", else: "Import from curl"}
+    >
+      <%= if @dialog == "export_curl" do %>
+        <pre
+          id="curl-export"
+          class="max-h-80 overflow-auto whitespace-pre-wrap break-all bg-deep px-3 py-2.5 font-mono text-xs leading-5 text-ink"
+        >{Curl.to_curl(@tab)}</pre>
+
+        <div class="flex shrink-0 items-center justify-end gap-2 border-t border-line-soft px-3 py-2.5">
+          <.button type="button" phx-click="close_dialog" variant="secondary">Close</.button>
+          <.button
+            type="button"
+            id="copy-curl"
+            phx-hook=".Copy"
+            data-copy={Curl.to_curl(@tab)}
+            variant="primary"
+          >
+            <.icon name="hero-clipboard-document" class="size-4" />
+            <span data-label>Copy</span>
+          </.button>
+        </div>
+      <% else %>
+        <form phx-submit="import_curl" class="flex min-h-0 flex-col">
+          <textarea
+            id="curl-import"
+            name="command"
+            rows="9"
+            spellcheck="false"
+            phx-mounted={JS.focus()}
+            placeholder="curl https://api.example.com/v1/users -H 'Accept: application/json'"
+            class="min-h-0 flex-1 resize-none bg-deep px-3 py-2.5 font-mono text-xs leading-5 text-ink outline-none placeholder:text-faint focus:ring-1 focus:ring-inset focus:ring-accent/30"
+          ></textarea>
+
+          <div class="flex shrink-0 items-center gap-2 border-t border-line-soft px-3 py-2.5">
+            <p :if={@error} id="curl-import-error" class="flex items-center gap-1.5 text-xs text-bad">
+              <.icon name="hero-exclamation-circle" class="size-4" />
+              {@error}
+            </p>
+            <p :if={!@error} class="text-[11px] text-faint">
+              The command opens as a new request tab.
+            </p>
+            <div class="flex-1"></div>
+            <.button type="button" phx-click="close_dialog" variant="secondary">Cancel</.button>
+            <.button type="submit" variant="primary">Import</.button>
+          </div>
+        </form>
+      <% end %>
+    </.dialog>
+    """
+  end
+
+  # Tags and descriptions for history entries, applied to one entry or to the
+  # whole selection.
+  attr :dialog, :string, required: true
+  attr :targets, :list, required: true
+  attr :value, :string, default: ""
+  attr :error, :string, default: nil
+
+  defp metadata_dialog(assigns) do
+    ~H"""
+    <.dialog
+      id="metadata-dialog"
+      icon={if @dialog == "add_tag", do: "hero-tag", else: "hero-pencil-square"}
+      title={if @dialog == "add_tag", do: "Add a tag", else: "Set the description"}
+      width="max-w-md"
+    >
+      <form id="metadata-form" phx-submit="save_metadata" class="flex flex-col">
+        <input
+          type="text"
+          id="metadata-value"
+          name="value"
+          value={@value}
+          spellcheck="false"
+          autocomplete="off"
+          phx-mounted={JS.focus()}
+          placeholder={if @dialog == "add_tag", do: "orders", else: "Create an order"}
+          class="bg-deep px-3 py-2.5 font-mono text-xs leading-5 text-ink outline-none placeholder:text-faint focus:ring-1 focus:ring-inset focus:ring-accent/30"
+        />
+
+        <div class="flex shrink-0 items-center gap-2 border-t border-line-soft px-3 py-2.5">
+          <p :if={@error} id="metadata-error" class="flex items-center gap-1.5 text-xs text-bad">
+            <.icon name="hero-exclamation-circle" class="size-4" />
+            {@error}
+          </p>
+          <p :if={!@error} class="text-[11px] text-faint">
+            Applies to {requests(length(@targets))}. {if @dialog == "add_tag",
+              do: "Tags are searchable.",
+              else: "Leave it empty to clear it."}
+          </p>
+          <div class="flex-1"></div>
+          <.button type="button" phx-click="close_dialog" variant="secondary">Cancel</.button>
+          <.button type="submit" variant="primary">Save</.button>
+        </div>
+      </form>
+    </.dialog>
     """
   end
 
@@ -299,6 +376,7 @@ defmodule MDTClientWeb.HttpClientLive do
   attr :term, :string, required: true
   attr :count, :integer, required: true
   attr :collapsed, :any, required: true, doc: "MapSet of collapsed group keys"
+  attr :selected, :any, required: true, doc: "MapSet of selected history entry ids"
   attr :active_source, :string, default: nil
 
   defp history_panel(assigns) do
@@ -362,6 +440,8 @@ defmodule MDTClientWeb.HttpClientLive do
         </form>
       </div>
 
+      <.selection_bar :if={MapSet.size(@selected) > 0} count={MapSet.size(@selected)} />
+
       <div class="min-h-0 flex-1 overflow-y-auto px-1.5 py-2">
         <p :if={@groups == []} class="px-2 py-6 text-center text-xs text-faint">
           <%= if @term == "" do %>
@@ -377,6 +457,7 @@ defmodule MDTClientWeb.HttpClientLive do
           group={key}
           entries={entries}
           collapsed={MapSet.member?(@collapsed, key)}
+          selected={@selected}
           active_source={@active_source}
         />
       </div>
@@ -384,10 +465,71 @@ defmodule MDTClientWeb.HttpClientLive do
     """
   end
 
+  # The bulk actions, shown while at least one history entry is selected.
+  attr :count, :integer, required: true
+
+  defp selection_bar(assigns) do
+    ~H"""
+    <div
+      id="history-selection"
+      class="flex shrink-0 items-center gap-1 border-b border-line-soft bg-accent-soft/50 px-2 py-1.5"
+    >
+      <span class="min-w-0 truncate text-[11px] text-muted">
+        <span class="font-mono text-accent">{@count}</span> selected
+      </span>
+      <div class="flex-1"></div>
+      <button
+        type="button"
+        phx-click="select_all"
+        title="Select every listed request"
+        class={selection_action_class()}
+      >
+        <.icon name="hero-check-circle" class="size-3.5" />
+      </button>
+      <button
+        type="button"
+        phx-click="open_metadata"
+        phx-value-dialog="add_tag"
+        title="Tag the selected requests"
+        class={selection_action_class()}
+      >
+        <.icon name="hero-tag" class="size-3.5" />
+      </button>
+      <button
+        type="button"
+        phx-click="open_metadata"
+        phx-value-dialog="set_description"
+        title="Describe the selected requests"
+        class={selection_action_class()}
+      >
+        <.icon name="hero-pencil-square" class="size-3.5" />
+      </button>
+      <button
+        type="button"
+        phx-click="delete_entries"
+        data-confirm="Delete the selected requests?"
+        title="Delete the selected requests"
+        class={[selection_action_class(), "hover:text-bad"]}
+      >
+        <.icon name="hero-trash" class="size-3.5" />
+      </button>
+      <button
+        type="button"
+        phx-click="clear_selection"
+        title="Clear the selection"
+        class={selection_action_class()}
+      >
+        <.icon name="hero-x-mark" class="size-3.5" />
+      </button>
+    </div>
+    """
+  end
+
   attr :label, :string, required: true
   attr :group, :string, required: true
   attr :entries, :list, required: true
   attr :collapsed, :boolean, required: true
+  attr :selected, :any, required: true
   attr :active_source, :string, default: nil
 
   defp history_group(assigns) do
@@ -410,31 +552,120 @@ defmodule MDTClientWeb.HttpClientLive do
       </button>
 
       <div :if={!@collapsed}>
-        <button
+        <.history_entry
           :for={entry <- @entries}
-          type="button"
-          id={"history-#{entry.id}"}
-          phx-click="open_history"
-          phx-value-id={entry.id}
-          class={[
-            "group flex w-full cursor-pointer flex-col gap-0.5 rounded-md px-2 py-1.5 text-left transition-colors",
-            if(@active_source == entry.id, do: "bg-active", else: "hover:bg-hover")
-          ]}
+          entry={entry}
+          selected={MapSet.member?(@selected, entry.id)}
+          active={@active_source == entry.id}
+        />
+      </div>
+    </div>
+    """
+  end
+
+  attr :entry, :map, required: true
+  attr :selected, :boolean, required: true
+  attr :active, :boolean, required: true
+
+  defp history_entry(assigns) do
+    ~H"""
+    <div class={[
+      "group relative flex items-start gap-1.5 rounded-md pl-1.5 pr-2 transition-colors",
+      if(@active, do: "bg-active", else: "hover:bg-hover")
+    ]}>
+      <button
+        type="button"
+        id={"select-history-#{@entry.id}"}
+        phx-click="toggle_select"
+        phx-value-id={@entry.id}
+        role="checkbox"
+        aria-checked={to_string(@selected)}
+        title="Select this request"
+        class={[
+          "mt-2 flex size-3.5 shrink-0 cursor-pointer items-center justify-center rounded-sm border transition-all",
+          if(@selected,
+            do: "border-accent bg-accent text-deep",
+            else:
+              "border-line text-transparent opacity-0 hover:border-accent focus:opacity-100 group-hover:opacity-100"
+          )
+        ]}
+      >
+        <.icon name="hero-check" class="size-2.5" />
+      </button>
+
+      <button
+        type="button"
+        id={"history-#{@entry.id}"}
+        phx-click="open_history"
+        phx-value-id={@entry.id}
+        class="flex min-w-0 flex-1 cursor-pointer flex-col gap-0.5 py-1.5 text-left"
+      >
+        <span class="flex w-full items-center gap-2">
+          <span class={[
+            "shrink-0 font-mono text-[10px] font-semibold",
+            method_color(@entry.method)
+          ]}>
+            {@entry.method}
+          </span>
+          <span class="min-w-0 flex-1 truncate text-xs text-ink">{@entry.name}</span>
+          <span class="shrink-0 font-mono text-[10px] text-faint">{time(@entry.at)}</span>
+        </span>
+        <span
+          :if={host(@entry.url) != ""}
+          class="w-full truncate font-mono text-[10px] text-faint"
         >
-          <span class="flex w-full items-center gap-2">
-            <span class={["shrink-0 font-mono text-[10px] font-semibold", method_color(entry.method)]}>
-              {entry.method}
-            </span>
-            <span class="min-w-0 flex-1 truncate text-xs text-ink">{entry.name}</span>
-            <span class="shrink-0 font-mono text-[10px] text-faint">{time(entry.at)}</span>
+          {host(@entry.url)}
+        </span>
+        <span class="flex w-full items-center gap-1.5 font-mono text-[10px] text-muted">
+          <span class={status_color(@entry.status)}>{@entry.status}</span>
+          <span class="text-faint">·</span>
+          <span>{@entry.duration_ms}ms</span>
+          <span class="text-faint">·</span>
+          <span class="min-w-0 truncate">{path(@entry.url)}</span>
+        </span>
+        <span :if={@entry.tags != []} class="flex w-full flex-wrap items-center gap-1 pt-0.5">
+          <span
+            :for={tag <- @entry.tags}
+            class="rounded bg-accent-soft px-1 py-px font-mono text-[9px] leading-4 text-accent"
+          >
+            {tag}
           </span>
-          <span class="flex w-full items-center gap-1.5 font-mono text-[10px] text-muted">
-            <span class={status_color(entry.status)}>{entry.status}</span>
-            <span class="text-faint">·</span>
-            <span>{entry.duration_ms}ms</span>
-            <span class="text-faint">·</span>
-            <span class="min-w-0 truncate">{path(entry.url)}</span>
-          </span>
+        </span>
+      </button>
+
+      <div class={[
+        "absolute right-1 top-1 hidden items-center gap-0.5 rounded group-hover:flex",
+        if(@active, do: "bg-active", else: "bg-hover")
+      ]}>
+        <button
+          type="button"
+          phx-click="open_metadata"
+          phx-value-dialog="add_tag"
+          phx-value-id={@entry.id}
+          title="Add a tag"
+          class={entry_action_class()}
+        >
+          <.icon name="hero-tag" class="size-3" />
+        </button>
+        <button
+          type="button"
+          phx-click="open_metadata"
+          phx-value-dialog="set_description"
+          phx-value-id={@entry.id}
+          title="Set the description"
+          class={entry_action_class()}
+        >
+          <.icon name="hero-pencil-square" class="size-3" />
+        </button>
+        <button
+          type="button"
+          phx-click="delete_entries"
+          phx-value-id={@entry.id}
+          data-confirm="Delete this request?"
+          title="Delete this request"
+          class={[entry_action_class(), "hover:text-bad"]}
+        >
+          <.icon name="hero-trash" class="size-3" />
         </button>
       </div>
     </div>
@@ -520,130 +751,193 @@ defmodule MDTClientWeb.HttpClientLive do
 
   defp request_editor(assigns) do
     ~H"""
-    <.form
-      for={@form}
-      id="request-form"
-      phx-change="update"
-      phx-submit="send"
-      class="flex shrink-0 flex-col"
-    >
-      <div class="flex items-center gap-2 px-2.5 py-2">
-        <div class="relative shrink-0">
-          <select
-            name={@form[:method].name}
-            aria-label="Method"
-            class={[
-              "cursor-pointer appearance-none rounded-md border border-line bg-panel py-1.5 pl-2.5 pr-7",
-              "font-mono text-xs font-semibold outline-none transition-colors hover:border-accent/40 focus:border-accent/60",
-              method_color(@tab.method)
-            ]}
-          >
-            <option
-              :for={method <- Utils.methods()}
-              value={method}
-              selected={method == @tab.method}
+    <div class="flex shrink-0 flex-col">
+      <.request_meta tab={@tab} />
+
+      <.form for={@form} id="request-form" phx-change="update" phx-submit="send" class="flex flex-col">
+        <div class="flex items-center gap-2 px-2.5 py-2">
+          <div class="relative shrink-0">
+            <select
+              name={@form[:method].name}
+              aria-label="Method"
+              class={[
+                "cursor-pointer appearance-none rounded-md border border-line bg-panel py-1.5 pl-2.5 pr-7",
+                "font-mono text-xs font-semibold outline-none transition-colors hover:border-accent/40 focus:border-accent/60",
+                method_color(@tab.method)
+              ]}
             >
-              {method}
-            </option>
-          </select>
-          <.icon
-            name="hero-chevron-down"
-            class="pointer-events-none absolute right-1.5 top-1/2 size-3.5 -translate-y-1/2 text-faint"
+              <option
+                :for={method <- Utils.methods()}
+                value={method}
+                selected={method == @tab.method}
+              >
+                {method}
+              </option>
+            </select>
+            <.icon
+              name="hero-chevron-down"
+              class="pointer-events-none absolute right-1.5 top-1/2 size-3.5 -translate-y-1/2 text-faint"
+            />
+          </div>
+
+          <input
+            type="text"
+            name={@form[:url].name}
+            value={@tab.url}
+            id="request-url"
+            placeholder="https://api.example.com/v1/users"
+            spellcheck="false"
+            autocomplete="off"
+            phx-debounce="150"
+            class="min-w-0 flex-1 rounded-md border border-line bg-deep px-2.5 py-1.5 font-mono text-[13px] text-ink outline-none transition-colors placeholder:text-faint focus:border-accent/60 focus:ring-2 focus:ring-accent/15"
           />
+
+          <%= if @tab.state == :sending do %>
+            <.button type="button" phx-click="cancel" variant="secondary" class="shrink-0">
+              <.icon name="hero-stop-circle" class="size-4" /> Cancel
+            </.button>
+          <% else %>
+            <.button
+              type="submit"
+              id="send-request"
+              variant="primary"
+              class="shrink-0"
+              disabled={String.trim(@tab.url) == ""}
+              title="Send (Ctrl+Enter)"
+            >
+              Send <.icon name="hero-paper-airplane" class="size-4" />
+            </.button>
+          <% end %>
         </div>
 
+        <div class="flex items-stretch gap-1 border-b border-line-soft px-2">
+          <.editor_tab
+            tab={@tab}
+            name="params"
+            label="Params"
+            count={Utils.enabled_count(@tab.params)}
+          />
+          <.editor_tab
+            tab={@tab}
+            name="headers"
+            label="Headers"
+            count={Utils.enabled_count(@tab.headers)}
+          />
+          <.editor_tab tab={@tab} name="auth" label="Auth" />
+          <.editor_tab tab={@tab} name="body" label="Body" />
+
+          <div class="flex-1"></div>
+
+          <button
+            :if={@tab.editor_tab == "body" and @tab.body_type == "json"}
+            type="button"
+            phx-click="format_body"
+            class="my-1 cursor-pointer rounded px-2 text-[11px] text-muted transition-colors hover:bg-hover hover:text-accent"
+          >
+            Format JSON
+          </button>
+
+          <div class="my-2 mx-1 w-px bg-line-soft"></div>
+
+          <button
+            type="button"
+            phx-click="open_dialog"
+            phx-value-dialog="import_curl"
+            title="Create a request from a curl command"
+            class="my-1 flex cursor-pointer items-center gap-1 rounded px-1.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-accent"
+          >
+            <.icon name="hero-arrow-down-on-square" class="size-3.5" /> Import curl
+          </button>
+          <button
+            type="button"
+            phx-click="open_dialog"
+            phx-value-dialog="export_curl"
+            title="Copy this request as a curl command"
+            class="my-1 flex cursor-pointer items-center gap-1 rounded px-1.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-accent"
+          >
+            <.icon name="hero-arrow-up-on-square" class="size-3.5" /> Export curl
+          </button>
+        </div>
+
+        <div id="request-editor" class="h-[var(--request-height,34vh)] min-h-24 overflow-y-auto">
+          <%= case @tab.editor_tab do %>
+            <% "params" -> %>
+              <.row_editor kind="param" rows={@tab.params} placeholder="page" />
+            <% "headers" -> %>
+              <.row_editor kind="header" rows={@tab.headers} placeholder="Content-Type" />
+            <% "auth" -> %>
+              <.auth_editor tab={@tab} form={@form} />
+            <% "body" -> %>
+              <.body_editor tab={@tab} form={@form} />
+          <% end %>
+        </div>
+      </.form>
+    </div>
+    """
+  end
+
+  # The description and tags carried into history when the request is sent.
+  # They live outside `#request-form` so that Enter adds a tag instead of
+  # firing the request.
+  attr :tab, :map, required: true
+
+  defp request_meta(assigns) do
+    ~H"""
+    <div class="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-line-soft px-2.5 py-1.5">
+      <form
+        id="request-description"
+        phx-change="update_meta"
+        phx-submit="update_meta"
+        class="flex min-w-40 flex-1 items-center gap-1.5"
+      >
+        <.icon name="hero-pencil-square" class="size-3.5 shrink-0 text-faint" />
         <input
           type="text"
-          name={@form[:url].name}
-          value={@tab.url}
-          id="request-url"
-          placeholder="https://api.example.com/v1/users"
-          spellcheck="false"
+          id="request-description-input"
+          name="description"
+          value={@tab.name}
+          placeholder="Describe this request"
           autocomplete="off"
-          phx-debounce="150"
-          class="min-w-0 flex-1 rounded-md border border-line bg-deep px-2.5 py-1.5 font-mono text-[13px] text-ink outline-none transition-colors placeholder:text-faint focus:border-accent/60 focus:ring-2 focus:ring-accent/15"
+          class={["min-w-0 flex-1", meta_input_class()]}
         />
+      </form>
 
-        <%= if @tab.state == :sending do %>
-          <.button type="button" phx-click="cancel" variant="secondary" class="shrink-0">
-            <.icon name="hero-stop-circle" class="size-4" /> Cancel
-          </.button>
-        <% else %>
-          <.button
-            type="submit"
-            id="send-request"
-            variant="primary"
-            class="shrink-0"
-            disabled={String.trim(@tab.url) == ""}
-            title="Send (Ctrl+Enter)"
+      <div class="flex flex-wrap items-center gap-1">
+        <span
+          :for={tag <- @tab.tags}
+          class="flex items-center gap-1 rounded bg-accent-soft px-1.5 py-0.5 font-mono text-[10px] text-accent"
+        >
+          {tag}
+          <button
+            type="button"
+            phx-click="remove_tag"
+            phx-value-tag={tag}
+            title={"Remove #{tag}"}
+            class="flex cursor-pointer items-center text-accent/60 transition-colors hover:text-bad"
           >
-            Send <.icon name="hero-paper-airplane" class="size-4" />
-          </.button>
-        <% end %>
-      </div>
+            <.icon name="hero-x-mark" class="size-3" />
+          </button>
+        </span>
 
-      <div class="flex items-stretch gap-1 border-b border-line-soft px-2">
-        <.editor_tab
-          tab={@tab}
-          name="params"
-          label="Params"
-          count={Utils.enabled_count(@tab.params)}
-        />
-        <.editor_tab
-          tab={@tab}
-          name="headers"
-          label="Headers"
-          count={Utils.enabled_count(@tab.headers)}
-        />
-        <.editor_tab tab={@tab} name="auth" label="Auth" />
-        <.editor_tab tab={@tab} name="body" label="Body" />
-
-        <div class="flex-1"></div>
-
-        <button
-          :if={@tab.editor_tab == "body" and @tab.body_type == "json"}
-          type="button"
-          phx-click="format_body"
-          class="my-1 cursor-pointer rounded px-2 text-[11px] text-muted transition-colors hover:bg-hover hover:text-accent"
+        <form
+          id="request-tag"
+          phx-change="update_tag_draft"
+          phx-submit="add_tag"
+          class="flex shrink-0 items-center gap-1.5"
         >
-          Format JSON
-        </button>
-
-        <div class="my-2 mx-1 w-px bg-line-soft"></div>
-
-        <button
-          type="button"
-          phx-click="open_dialog"
-          phx-value-dialog="import_curl"
-          title="Create a request from a curl command"
-          class="my-1 flex cursor-pointer items-center gap-1 rounded px-1.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-accent"
-        >
-          <.icon name="hero-arrow-down-on-square" class="size-3.5" /> Import curl
-        </button>
-        <button
-          type="button"
-          phx-click="open_dialog"
-          phx-value-dialog="export_curl"
-          title="Copy this request as a curl command"
-          class="my-1 flex cursor-pointer items-center gap-1 rounded px-1.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-accent"
-        >
-          <.icon name="hero-arrow-up-on-square" class="size-3.5" /> Export curl
-        </button>
+          <.icon name="hero-tag" class="size-3.5 shrink-0 text-faint" />
+          <input
+            type="text"
+            id="request-tag-input"
+            name="tag"
+            value={@tab.tag_draft}
+            placeholder="Add tag"
+            autocomplete="off"
+            class={["w-28 shrink-0 font-mono focus:w-40", meta_input_class()]}
+          />
+        </form>
       </div>
-
-      <div id="request-editor" class="h-[var(--request-height,34vh)] min-h-24 overflow-y-auto">
-        <%= case @tab.editor_tab do %>
-          <% "params" -> %>
-            <.row_editor kind="param" rows={@tab.params} placeholder="page" />
-          <% "headers" -> %>
-            <.row_editor kind="header" rows={@tab.headers} placeholder="Content-Type" />
-          <% "auth" -> %>
-            <.auth_editor tab={@tab} form={@form} />
-          <% "body" -> %>
-            <.body_editor tab={@tab} form={@form} />
-        <% end %>
-      </div>
-    </.form>
+    </div>
     """
   end
 
@@ -959,12 +1253,12 @@ defmodule MDTClientWeb.HttpClientLive do
 
   @impl true
   def handle_event("open_dialog", %{"dialog" => dialog}, socket) do
-    {:noreply, socket |> assign(:dialog, dialog) |> assign(:import_error, nil)}
+    {:noreply, socket |> close_dialog() |> assign(:dialog, dialog)}
   end
 
   @impl true
   def handle_event("close_dialog", _params, socket) do
-    {:noreply, socket |> assign(:dialog, nil) |> assign(:import_error, nil)}
+    {:noreply, close_dialog(socket)}
   end
 
   @impl true
@@ -973,13 +1267,12 @@ defmodule MDTClientWeb.HttpClientLive do
       {:ok, attrs} ->
         {:noreply,
          socket
-         |> assign(:dialog, nil)
-         |> assign(:import_error, nil)
+         |> close_dialog()
          |> open_tab(Utils.new_request(attrs))
          |> put_flash(:info, "Request imported from curl")}
 
       {:error, reason} ->
-        {:noreply, assign(socket, :import_error, String.capitalize(reason))}
+        {:noreply, assign(socket, :dialog_error, String.capitalize(reason))}
     end
   end
 
@@ -998,7 +1291,84 @@ defmodule MDTClientWeb.HttpClientLive do
   @impl true
   def handle_event("clear_history", _params, socket) do
     :ok = Resources.clear()
-    {:noreply, assign_history(socket)}
+    {:noreply, socket |> assign(:selected, MapSet.new()) |> assign_history()}
+  end
+
+  @impl true
+  def handle_event("toggle_select", %{"id" => id}, socket) do
+    selected = socket.assigns.selected
+
+    selected =
+      if MapSet.member?(selected, id),
+        do: MapSet.delete(selected, id),
+        else: MapSet.put(selected, id)
+
+    {:noreply, assign(socket, :selected, selected)}
+  end
+
+  @impl true
+  def handle_event("select_all", _params, socket) do
+    ids = for {_label, _key, entries} <- socket.assigns.groups, entry <- entries, do: entry.id
+
+    {:noreply, assign(socket, :selected, MapSet.new(ids))}
+  end
+
+  @impl true
+  def handle_event("clear_selection", _params, socket) do
+    {:noreply, assign(socket, :selected, MapSet.new())}
+  end
+
+  # Without an id these work on the whole selection.
+  @impl true
+  def handle_event("open_metadata", %{"dialog" => dialog} = params, socket) do
+    case targets(socket, params) do
+      [] ->
+        {:noreply, socket}
+
+      targets ->
+        {:noreply,
+         socket
+         |> close_dialog()
+         |> assign(:dialog, dialog)
+         |> assign(:dialog_targets, targets)
+         |> assign(:dialog_value, metadata_value(socket, dialog, targets))}
+    end
+  end
+
+  @impl true
+  def handle_event("delete_entries", params, socket) do
+    case targets(socket, params) do
+      [] ->
+        {:noreply, socket}
+
+      targets ->
+        {:noreply,
+         socket
+         |> apply_to_entries(targets, &Core.delete/1, "Deleted")
+         |> update(:selected, &MapSet.difference(&1, MapSet.new(targets)))}
+    end
+  end
+
+  @impl true
+  def handle_event("save_metadata", %{"value" => value}, socket) do
+    %{dialog: dialog, dialog_targets: targets} = socket.assigns
+
+    case {dialog, String.trim(value)} do
+      {"add_tag", ""} ->
+        {:noreply, assign(socket, :dialog_error, "Enter a tag")}
+
+      {"add_tag", tag} ->
+        {:noreply,
+         socket |> close_dialog() |> apply_to_entries(targets, &Core.add_tag(&1, tag), "Tagged")}
+
+      {"set_description", description} ->
+        description = if description == "", do: nil, else: description
+
+        {:noreply,
+         socket
+         |> close_dialog()
+         |> apply_to_entries(targets, &Core.set_description(&1, description), "Described")}
+    end
   end
 
   @impl true
@@ -1055,6 +1425,26 @@ defmodule MDTClientWeb.HttpClientLive do
   @impl true
   def handle_event("update", params, socket) do
     {:noreply, update_active(socket, &apply_params(&1, params))}
+  end
+
+  @impl true
+  def handle_event("update_meta", %{"description" => description}, socket) do
+    {:noreply, update_active(socket, &%{&1 | name: description})}
+  end
+
+  @impl true
+  def handle_event("update_tag_draft", %{"tag" => tag}, socket) do
+    {:noreply, update_active(socket, &%{&1 | tag_draft: tag})}
+  end
+
+  @impl true
+  def handle_event("add_tag", %{"tag" => tag}, socket) do
+    {:noreply, update_active(socket, &commit_tag_draft(%{&1 | tag_draft: tag}))}
+  end
+
+  @impl true
+  def handle_event("remove_tag", %{"tag" => tag}, socket) do
+    {:noreply, update_active(socket, &%{&1 | tags: List.delete(&1.tags, tag)})}
   end
 
   @impl true
@@ -1172,6 +1562,8 @@ defmodule MDTClientWeb.HttpClientLive do
   ## Assign helpers
 
   defp send_request(socket) do
+    # A tag typed but never submitted would otherwise be dropped on send.
+    socket = update_active(socket, &commit_tag_draft/1)
     tab = socket.assigns.tab
 
     cond do
@@ -1186,13 +1578,14 @@ defmodule MDTClientWeb.HttpClientLive do
 
       true ->
         request = Translation.to_req(tab)
+        metadata = %{description: tab.name, tags: tab.tags}
         task = {:request, tab.id}
 
         socket
         |> put_tab(tab.id, &%{&1 | state: :sending, pending: task, response: nil})
         |> start_async(task, fn ->
           started_at = System.monotonic_time()
-          result = Core.request(request)
+          result = Core.request(request, metadata)
 
           duration_ms =
             (System.monotonic_time() - started_at)
@@ -1201,6 +1594,55 @@ defmodule MDTClientWeb.HttpClientLive do
           {result, duration_ms}
         end)
     end
+  end
+
+  defp commit_tag_draft(%{tag_draft: draft} = tab) do
+    case String.trim(draft) do
+      "" -> %{tab | tag_draft: ""}
+      tag -> %{tab | tags: Enum.uniq(tab.tags ++ [tag]), tag_draft: ""}
+    end
+  end
+
+  defp close_dialog(socket) do
+    assign(socket, dialog: nil, dialog_targets: [], dialog_value: "", dialog_error: nil)
+  end
+
+  # Prefills the dialog with the description already on a single entry; a
+  # selection has no single value to show.
+  defp metadata_value(socket, "set_description", [id]) do
+    socket.assigns.groups
+    |> Enum.flat_map(fn {_label, _key, entries} -> entries end)
+    |> Enum.find_value("", &(&1.id == id && (&1.description || "")))
+  end
+
+  defp metadata_value(_socket, _dialog, _targets), do: ""
+
+  # The entry under the cursor, or the whole selection when there is no id.
+  defp targets(_socket, %{"id" => id}), do: [id]
+  defp targets(socket, _params), do: MapSet.to_list(socket.assigns.selected)
+
+  defp apply_to_entries(socket, targets, update, verb) do
+    {updated, failed} =
+      Enum.reduce(targets, {0, 0}, fn id, {updated, failed} ->
+        case update.(id) do
+          {:ok, _entry} -> {updated + 1, failed}
+          {:error, _reason} -> {updated, failed + 1}
+        end
+      end)
+
+    socket
+    |> assign_history()
+    |> flash_entries(verb, updated, failed)
+  end
+
+  defp flash_entries(socket, _verb, 0, failed),
+    do: put_flash(socket, :error, "Could not update #{requests(failed)}")
+
+  defp flash_entries(socket, verb, updated, 0),
+    do: put_flash(socket, :info, "#{verb} #{requests(updated)}")
+
+  defp flash_entries(socket, verb, updated, failed) do
+    put_flash(socket, :info, "#{verb} #{requests(updated)}, #{failed} could not be updated")
   end
 
   defp open_tab(socket, tab) do
@@ -1325,6 +1767,21 @@ defmodule MDTClientWeb.HttpClientLive do
   defp status_pill(status) when status < 500, do: "border-warn/40 bg-warn-soft/40 text-warn"
   defp status_pill(_status), do: "border-bad/40 bg-bad-soft/40 text-bad"
 
+  defp requests(1), do: "1 request"
+  defp requests(count), do: "#{count} requests"
+
+  defp selection_action_class do
+    "flex size-6 shrink-0 cursor-pointer items-center justify-center rounded text-muted transition-colors hover:bg-hover hover:text-ink"
+  end
+
+  defp entry_action_class do
+    "flex size-5 cursor-pointer items-center justify-center rounded text-faint transition-colors hover:bg-panel hover:text-accent"
+  end
+
+  defp meta_input_class do
+    "rounded border border-transparent bg-transparent px-1.5 py-0.5 text-xs text-ink outline-none transition-all placeholder:text-faint hover:border-line-soft focus:border-accent/50 focus:bg-deep"
+  end
+
   defp cell_class do
     "rounded border border-transparent bg-transparent px-1.5 py-1 font-mono text-xs text-ink outline-none transition-colors placeholder:text-faint hover:border-line-soft focus:border-accent/50 focus:bg-deep"
   end
@@ -1344,6 +1801,20 @@ defmodule MDTClientWeb.HttpClientLive do
     |> Enum.reject(&is_nil/1)
     |> Enum.join()
   end
+
+  # The authority the request went to, with the port only when it is not the
+  # default one for the scheme.
+  defp host(url) do
+    case URI.parse(url) do
+      %URI{host: nil} -> ""
+      %URI{host: host} = uri -> host <> port(uri)
+    end
+  end
+
+  defp port(%URI{scheme: "https", port: 443}), do: ""
+  defp port(%URI{scheme: "http", port: 80}), do: ""
+  defp port(%URI{port: nil}), do: ""
+  defp port(%URI{port: port}), do: ":#{port}"
 
   defp time(at), do: Calendar.strftime(at, "%H:%M")
 end

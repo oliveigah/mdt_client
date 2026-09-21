@@ -60,6 +60,19 @@ defmodule MDTClient.HttpClient.Resources do
     end
   end
 
+  @doc "Deletes one recorded request history entry."
+  @spec delete(history_id()) :: :ok | :error
+  def delete(identifier) do
+    case :ets.lookup(@table, identifier) do
+      [_entry] ->
+        true = :ets.delete(@table, identifier)
+        persist_history(history_path())
+
+      [] ->
+        :error
+    end
+  end
+
   @doc "Clears the in-memory and persisted request history."
   @spec clear() :: :ok
   def clear do

@@ -65,8 +65,24 @@ defmodule MDTClient.HttpClient.CoreTest do
     assert Resources.search("health endpoint") == []
   end
 
+  test "deletes history entries by identifier" do
+    request = Req.new(url: "https://example.test/health")
+    response = %Req.Response{status: 200, body: "healthy"}
+
+    kept = Resources.record(HistoryMetadata.new(%{description: "Kept"}), request, response)
+    dropped = Resources.record(HistoryMetadata.new(%{description: "Dropped"}), request, response)
+
+    assert {:ok, {^dropped, _metadata, _request, _response}} = Core.delete(to_string(dropped))
+
+    assert Resources.get(dropped) == :error
+    assert [{^kept, _metadata, _request, _response}] = Resources.all()
+    assert Resources.search("dropped") == []
+  end
+
   test "reports unknown and invalid history identifiers" do
     assert {:error, :not_found} = Core.add_tag(99_999, "system")
     assert {:error, :invalid_identifier} = Core.set_description("not-an-id", "Health check")
+    assert {:error, :not_found} = Core.delete(99_999)
+    assert {:error, :invalid_identifier} = Core.delete("not-an-id")
   end
 end

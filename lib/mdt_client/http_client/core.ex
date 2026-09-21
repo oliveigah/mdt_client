@@ -41,6 +41,20 @@ defmodule MDTClient.HttpClient.Core do
     update_metadata(identifier, &HistoryMetadata.set_description(&1, description))
   end
 
+  @doc "Deletes a persisted request history entry."
+  @spec delete(pos_integer() | String.t()) ::
+          {:ok, Resources.entry()} | {:error, :not_found | :invalid_identifier}
+  def delete(identifier) do
+    with {:ok, identifier} <- history_identifier(identifier),
+         {:ok, entry} <- Resources.get(identifier),
+         :ok <- Resources.delete(identifier) do
+      {:ok, entry}
+    else
+      :error -> {:error, :not_found}
+      :invalid_identifier -> {:error, :invalid_identifier}
+    end
+  end
+
   defp response_from({:ok, response}), do: response
   defp response_from({:error, error}), do: error
 

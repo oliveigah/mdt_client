@@ -47,6 +47,25 @@ defmodule MDTClientWeb.HttpClientLiveTest do
     assert count(view, "[phx-click=open_history]") == 2
   end
 
+  test "history rows carry the host on its own line", %{view: view, health_id: health_id} do
+    row = view |> element("#history-#{health_id}") |> render()
+
+    assert row =~ "api.example.test"
+    assert row =~ "/health"
+  end
+
+  test "a non default port is shown with the host", %{conn: conn} do
+    Resources.record(
+      HistoryMetadata.new(%{description: "Local"}),
+      Req.new(method: :get, url: "http://localhost:4000/health"),
+      %Req.Response{status: 200, headers: %{}, body: "ok"}
+    )
+
+    {:ok, view, _html} = live(conn, ~p"/tools/http")
+
+    assert render(view) =~ "localhost:4000"
+  end
+
   test "searching uses persisted history", %{view: view} do
     view
     |> element("form[phx-change=search]")
@@ -205,6 +224,157 @@ defmodule MDTClientWeb.HttpClientLiveTest do
 
     assert first_attribute(view, "#request-url", "value") ==
              "https://api.example.test/orders/ord_1"
+  end
+
+  test "a history entry is tagged from its own row", %{view: view, health_id: health_id} do
+    view |> element(entry_action(health_id, "add_tag")) |> render_click()
+    assert has_element?(view, "#metadata-dialog")
+
+    html = view |> element("#metadata-form") |> render_submit(%{"value" => "smoke"})
+
+    refute has_element?(view, "#metadata-dialog")
+    assert html =~ "Tagged 1 request"
+    assert metadata(health_id).tags == ["system", "health", "smoke"]
+  end
+
+  test "an empty tag is rejected and keeps the dialog open", %{
+    view: view,
+    health_id: health_id
+  } do
+    view |> element(entry_action(health_id, "add_tag")) |> render_click()
+
+    html = view |> element("#metadata-form") |> render_submit(%{"value" => "   "})
+
+    assert html =~ "Enter a tag"
+    assert has_element?(view, "#metadata-dialog")
+    assert metadata(health_id).tags == ["system", "health"]
+  end
+
+  test "a history entry description is prefilled, saved and cleared", %{
+    view: view,
+    health_id: health_id
+  } do
+    view |> element(entry_action(health_id, "set_description")) |> render_click()
+    assert first_attribute(view, "#metadata-value", "value") == "Health check"
+
+    html = view |> element("#metadata-form") |> render_submit(%{"value" => "Liveness probe"})
+
+    assert html =~ "Described 1 request"
+    assert html =~ "Liveness probe"
+    assert metadata(health_id).description == "Liveness probe"
+
+    view |> element(entry_action(health_id, "set_description")) |> render_click()
+    view |> element("#metadata-form") |> render_submit(%{"value" => ""})
+
+    assert metadata(health_id).description == nil
+  end
+
+  test "tags apply to every selected history entry", %{view: view} do
+    ids = attributes(view, "[phx-click=open_history]", "phx-value-id")
+
+    for id <- ids, do: view |> element("#select-history-#{id}") |> render_click()
+    assert has_element?(view, "#history-selection")
+
+    view |> element("#history-selection [phx-value-dialog=add_tag]") |> render_click()
+    html = view |> element("#metadata-form") |> render_submit(%{"value" => "regression"})
+
+    assert html =~ "Tagged 2 requests"
+    for id <- ids, do: assert("regression" in metadata(id).tags)
+  end
+
+  test "the selection bar selects everything and clears", %{view: view, health_id: health_id} do
+    refute has_element?(view, "#history-selection")
+
+    view |> element("#select-history-#{health_id}") |> render_click()
+    view |> element("[phx-click=select_all]") |> render_click()
+    assert count(view, "[phx-click=toggle_select][aria-checked=true]") == 2
+
+    view |> element("[phx-click=clear_selection]") |> render_click()
+    refute has_element?(view, "#history-selection")
+  end
+
+  test "opening a history entry inherits its description and tags", %{
+    view: view,
+    health_id: health_id
+  } do
+    view |> element("#history-#{health_id}") |> render_click()
+
+    assert first_attribute(view, "#request-description-input", "value") == "Health check"
+    assert has_element?(view, "[phx-click=remove_tag][phx-value-tag=system]")
+    assert has_element?(view, "[phx-click=remove_tag][phx-value-tag=health]")
+  end
+
+  test "the request panel edits its description and tags", %{view: view} do
+    view |> element("#request-description") |> render_change(%{"description" => "Nightly smoke"})
+    assert render(view) =~ "Nightly smoke"
+
+    view |> element("#request-tag") |> render_submit(%{"tag" => "smoke"})
+    assert has_element?(view, "[phx-click=remove_tag][phx-value-tag=smoke]")
+
+    view |> element("#request-tag") |> render_submit(%{"tag" => " smoke "})
+    view |> element("#request-tag") |> render_submit(%{"tag" => "  "})
+    assert count(view, "[phx-click=remove_tag]") == 1
+
+    view |> element("[phx-click=remove_tag][phx-value-tag=smoke]") |> render_click()
+    refute has_element?(view, "[phx-click=remove_tag]")
+  end
+
+  test "a selected history entry is deleted", %{view: view, health_id: health_id} do
+    view |> element(entry_action(health_id, "delete_entries")) |> render_click()
+
+    assert count(view, "[phx-click=open_history]") == 1
+    assert Resources.get(health_id) == :error
+  end
+
+  test "deleting works on the whole selection", %{view: view} do
+    ids = attributes(view, "[phx-click=open_history]", "phx-value-id")
+    for id <- ids, do: view |> element("#select-history-#{id}") |> render_click()
+
+    html = view |> element("#history-selection [phx-click=delete_entries]") |> render_click()
+
+    assert html =~ "Deleted 2 requests"
+    assert html =~ "Nothing here yet"
+    refute has_element?(view, "#history-selection")
+    assert Resources.all() == []
+  end
+
+  test "sending records the description and tags of the tab", %{view: view} do
+    Req.Test.stub(__MODULE__, fn conn -> Plug.Conn.send_resp(conn, 200, "ok") end)
+    Req.Test.set_req_test_to_shared()
+    Req.default_options(plug: {Req.Test, __MODULE__})
+
+    on_exit(fn ->
+      Req.default_options([])
+      Req.Test.set_req_test_to_private()
+    end)
+
+    view |> element("#request-description") |> render_change(%{"description" => "Nightly smoke"})
+
+    # typed into the tag box but never submitted with Enter
+    view |> element("#request-tag") |> render_change(%{"tag" => "smoke"})
+    refute has_element?(view, "[phx-click=remove_tag][phx-value-tag=smoke]")
+
+    view
+    |> element("#request-form")
+    |> render_change(%{"request" => %{"url" => "https://api.example.test/ping"}})
+
+    view |> element("#request-form") |> render_submit(%{})
+    render_async(view)
+
+    assert [{_id, metadata, _request, _response} | _older] = Resources.all()
+    assert metadata.description == "Nightly smoke"
+    assert metadata.tags == ["smoke"]
+  end
+
+  defp entry_action(id, "delete_entries"),
+    do: ~s([phx-click=delete_entries][phx-value-id="#{id}"])
+
+  defp entry_action(id, dialog),
+    do: ~s([phx-click=open_metadata][phx-value-dialog=#{dialog}][phx-value-id="#{id}"])
+
+  defp metadata(id) do
+    {:ok, {_id, metadata, _request, _response}} = Resources.get(String.to_integer(to_string(id)))
+    metadata
   end
 
   defp count(view, selector) do

@@ -23,6 +23,8 @@ defmodule MDTClient.HttpClient.Utils do
         id: new_id("tab"),
         source_id: nil,
         name: nil,
+        tags: [],
+        tag_draft: "",
         method: "GET",
         url: "",
         params: [new_row()],
@@ -49,17 +51,14 @@ defmodule MDTClient.HttpClient.Utils do
   end
 
   @doc "The label shown on a request tab."
-  def label(%{name: name}) when is_binary(name) and name != "", do: name
-  def label(%{url: url}) when url in ["", nil], do: "New Request"
-
-  def label(%{url: url}) do
-    uri = URI.parse(url)
-
-    case uri.path do
-      path when path in [nil, "", "/"] -> uri.host || url
-      path -> "/" <> (path |> String.trim("/") |> String.split("/") |> List.last())
+  def label(%{name: name} = request) when is_binary(name) do
+    case String.trim(name) do
+      "" -> url_label(request)
+      name -> name
     end
   end
+
+  def label(request), do: url_label(request)
 
   @doc "The URL with enabled query params appended, as it will be sent."
   def full_url(request) do
@@ -138,6 +137,17 @@ defmodule MDTClient.HttpClient.Utils do
       status,
       "Unknown"
     )
+  end
+
+  defp url_label(%{url: url}) when url in ["", nil], do: "New Request"
+
+  defp url_label(%{url: url}) do
+    uri = URI.parse(url)
+
+    case uri.path do
+      path when path in [nil, "", "/"] -> uri.host || url
+      path -> "/" <> (path |> String.trim("/") |> String.split("/") |> List.last())
+    end
   end
 
   defp day_label(date, today) do

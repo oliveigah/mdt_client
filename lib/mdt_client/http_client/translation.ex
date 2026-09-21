@@ -41,6 +41,8 @@ defmodule MDTClient.HttpClient.Translation do
     %{
       id: to_string(identifier),
       name: metadata.description || Utils.label(tab),
+      description: metadata.description,
+      tags: metadata.tags,
       method: tab.method,
       url: Utils.full_url(tab),
       status: response.status,
@@ -65,6 +67,7 @@ defmodule MDTClient.HttpClient.Translation do
     |> Map.merge(%{
       source_id: to_string(identifier),
       name: metadata.description,
+      tags: metadata.tags,
       response: response_view(response, metadata.duration_ms),
       response_tab: "body"
     })
