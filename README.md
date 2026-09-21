@@ -74,9 +74,14 @@ The Debian package is compiled on Ubuntu 22.04 and the RPM is compiled on Fedora
 44. The Phoenix release contains Erlang native libraries, so building each
 package on its target distribution family keeps those libraries compatible with
 the system OpenSSL ABI. The RPM matches the development toolchain with Erlang
-28.3 and Elixir 1.19.4, and its Rust code is optimized for the build machine's
-CPU. Build that package on the Fedora computer where it will run. Docker keeps
-separate build caches for both packages.
+28.3 and Elixir 1.19.4, and its Rust code targets the Fedora computer's AMD Zen 5
+CPU even when another computer performs the build. Docker keeps separate build
+caches for both packages.
+
+Every push to `master` runs the `Linux packages` GitHub Actions workflow. Its
+Debian and Fedora jobs build independently and upload `MDT-deb-amd64` and
+`MDT-rpm-x86_64` artifacts to the workflow run for 90 days. The workflow can
+also be started manually from the repository's **Actions** tab.
 
 ## Development
 

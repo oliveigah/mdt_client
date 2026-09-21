@@ -110,7 +110,9 @@ RUN --mount=type=cache,id=mdt-cargo-registry,target=/root/.cargo/registry \
     cargo install tauri-cli --version 2.11.4 --locked
 
 ENV LANG=C.UTF-8 LC_ALL=C.UTF-8
-ENV RUSTFLAGS="-C target-cpu=native"
+# The distributed RPM targets the Ryzen AI 9 HX 370 machine even when GitHub
+# Actions performs the build on different hardware.
+ENV RUSTFLAGS="-C target-cpu=znver5"
 WORKDIR /app
 COPY mix.exs mix.lock ./
 RUN git config --global http.version HTTP/1.1
