@@ -111,8 +111,11 @@ RUN --mount=type=cache,id=mdt-cargo-registry,target=/root/.cargo/registry \
 
 ENV LANG=C.UTF-8 LC_ALL=C.UTF-8
 # The distributed RPM targets the Ryzen AI 9 HX 370 machine even when GitHub
-# Actions performs the build on different hardware.
+# Actions performs the build on different hardware. Passing an explicit target
+# keeps these flags away from host build scripts and procedural macros, which
+# must execute on the GitHub runner during compilation.
 ENV RUSTFLAGS="-C target-cpu=znver5"
+ENV RPM_RUST_TARGET=x86_64-unknown-linux-gnu
 WORKDIR /app
 COPY mix.exs mix.lock ./
 RUN git config --global http.version HTTP/1.1
@@ -142,10 +145,10 @@ RUN --mount=type=cache,id=mdt-cargo-registry,target=/root/.cargo/registry \
     --mount=type=cache,id=mdt-rpm-mix-deps,target=/app/deps \
     --mount=type=cache,id=mdt-rpm-mix-build-${TARGETARCH},target=/app/_build \
     mix assets.setup \
-    && cargo tauri build --no-bundle -- --locked \
-    && cargo tauri bundle --bundles rpm --verbose \
+    && cargo tauri build --target "$RPM_RUST_TARGET" --no-bundle -- --locked \
+    && cargo tauri bundle --target "$RPM_RUST_TARGET" --bundles rpm --verbose \
     && mkdir /out \
-    && cp src-tauri/target/release/bundle/rpm/*.rpm /out/
+    && cp "src-tauri/target/$RPM_RUST_TARGET/release/bundle/rpm/"*.rpm /out/
 
 FROM scratch AS rpm
 COPY --from=rpm-build /out /out
