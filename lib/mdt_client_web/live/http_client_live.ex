@@ -321,25 +321,33 @@ defmodule MDTClientWeb.HttpClientLive do
           this.storageKey = this.el.dataset.key
           this.min = parseInt(this.el.dataset.min, 10)
           this.max = parseInt(this.el.dataset.max, 10)
+          this.frame = null
+          this.pendingPoint = null
+
+          this.commitSize = () => {
+            this.frame = null
+            if (!this.panel || this.pendingPoint === null) return
+
+            const size = (this.pendingPoint - this.origin) / this.scale
+            this.size = `${Math.round(Math.max(this.min, Math.min(size, this.limit)))}px`
+            document.documentElement.style.setProperty(this.variable, this.size)
+            this.pendingPoint = null
+          }
 
           this.onMove = (event) => {
             if (!this.panel) return
-            const rect = this.panel.getBoundingClientRect()
-            const horizontal = this.axis === "x"
-            // Pointer coordinates are in screen pixels while the panel is sized
-            // in its own, possibly zoomed, pixels. This ratio converts between them.
-            const scale =
-              (horizontal ? rect.width / (this.panel.offsetWidth || 1) : rect.height / (this.panel.offsetHeight || 1)) || 1
-            const size = (horizontal ? event.clientX - rect.left : event.clientY - rect.top) / scale
-            const room = (horizontal ? window.innerWidth * 0.6 : window.innerHeight * 0.7) / scale
-            const limit = Math.min(this.max, room)
-            this.size = `${Math.round(Math.max(this.min, Math.min(size, limit)))}px`
-            document.documentElement.style.setProperty(this.variable, this.size)
+            this.pendingPoint = this.horizontal ? event.clientX : event.clientY
+            if (this.frame === null) this.frame = requestAnimationFrame(this.commitSize)
           }
 
           this.onUp = () => {
+            if (this.frame !== null) {
+              cancelAnimationFrame(this.frame)
+              this.commitSize()
+            }
             document.removeEventListener("pointermove", this.onMove)
             document.removeEventListener("pointerup", this.onUp)
+            document.removeEventListener("pointercancel", this.onUp)
             document.body.style.userSelect = ""
             this.el.removeAttribute("data-dragging")
             if (this.size) { localStorage.setItem(this.storageKey, this.size) }
@@ -349,10 +357,20 @@ defmodule MDTClientWeb.HttpClientLive do
             this.panel = document.getElementById(this.el.dataset.panel)
             if (!this.panel) return
             event.preventDefault()
+            const rect = this.panel.getBoundingClientRect()
+            this.horizontal = this.axis === "x"
+            this.scale =
+              (this.horizontal
+                ? rect.width / (this.panel.offsetWidth || 1)
+                : rect.height / (this.panel.offsetHeight || 1)) || 1
+            this.origin = this.horizontal ? rect.left : rect.top
+            const room = (this.horizontal ? window.innerWidth * 0.6 : window.innerHeight * 0.7) / this.scale
+            this.limit = Math.min(this.max, room)
             this.el.setAttribute("data-dragging", "")
             document.body.style.userSelect = "none"
             document.addEventListener("pointermove", this.onMove)
             document.addEventListener("pointerup", this.onUp)
+            document.addEventListener("pointercancel", this.onUp)
           })
 
           this.el.addEventListener("dblclick", () => {
@@ -363,8 +381,10 @@ defmodule MDTClientWeb.HttpClientLive do
         },
 
         destroyed() {
+          if (this.frame !== null) cancelAnimationFrame(this.frame)
           document.removeEventListener("pointermove", this.onMove)
           document.removeEventListener("pointerup", this.onUp)
+          document.removeEventListener("pointercancel", this.onUp)
         }
       }
     </script>

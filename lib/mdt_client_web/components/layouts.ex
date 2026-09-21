@@ -152,31 +152,27 @@ defmodule MDTClientWeb.Layouts do
   end
 
   @doc """
-  The MDT mark: a terminal prompt inside a rounded square.
+  The MDT mark: connected modules forming a compact M.
   """
   attr :class, :any, default: "size-5"
 
   def logo(assigns) do
     ~H"""
     <svg viewBox="0 0 24 24" fill="none" aria-hidden="true" class={@class}>
-      <rect
-        x="1.25"
-        y="1.25"
-        width="21.5"
-        height="21.5"
-        rx="6"
-        stroke="currentColor"
-        stroke-opacity="0.45"
-        stroke-width="1.5"
-      />
       <path
-        d="M7 9l2.75 3L7 15"
-        stroke="currentColor"
-        stroke-width="1.75"
+        d="M4.25 18V7L12 11.6V18"
+        stroke="var(--color-accent)"
+        stroke-width="4"
         stroke-linecap="round"
         stroke-linejoin="round"
       />
-      <path d="M12.75 15.25H17" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" />
+      <path
+        d="M12 11.6L19.75 7V18"
+        stroke="var(--color-ok)"
+        stroke-width="4"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+      />
     </svg>
     """
   end

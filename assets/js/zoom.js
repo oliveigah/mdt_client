@@ -1,9 +1,8 @@
 // Interface zoom: Ctrl/Cmd with "+", "-", "0", or the mouse wheel.
 //
 // The Tauri webview has no browser chrome to zoom the page for us, so the app
-// does it: the factor is stored on <html> as `--zoom`, which `app.css` applies
-// to the body. The value is persisted and re-applied before the first paint by
-// the script in `root.html.heex`.
+// asks WebKit to change its native zoom level. This keeps resizing and scrolling
+// on WebKit's fast rendering path instead of scaling and relaying out the body.
 //
 // A browser already zooms with the same shortcuts and will not let a page
 // intercept them, so the handlers stay out of the way there and only run inside
@@ -18,14 +17,31 @@ const WHEEL_THRESHOLD = 50
 let badge = null
 let badgeTimer = null
 let wheelDelta = 0
+let zoomLevel = DEFAULT
 
-export const currentZoom = () => {
-  const zoom = parseFloat(document.documentElement.style.getPropertyValue("--zoom"))
-  return Number.isFinite(zoom) && zoom > 0 ? zoom : DEFAULT
+export const currentZoom = () => zoomLevel
+
+const applyCssFallback = (zoom) => {
+  document.documentElement.style.setProperty("--zoom", zoom)
+  document.body.classList.add("interface-zoom")
+}
+
+const applyRenderZoom = (zoom) => {
+  document.documentElement.style.removeProperty("--zoom")
+  document.body.classList.remove("interface-zoom")
+
+  if (window.__TAURI_INTERNALS__?.invoke) {
+    window.__TAURI_INTERNALS__.invoke("set_webview_zoom", {scale: zoom}).catch(() => applyCssFallback(zoom))
+  } else if (window.__TAURI__?.core?.invoke) {
+    window.__TAURI__.core.invoke("set_webview_zoom", {scale: zoom}).catch(() => applyCssFallback(zoom))
+  } else {
+    applyCssFallback(zoom)
+  }
 }
 
 const applyZoom = (zoom) => {
-  document.documentElement.style.setProperty("--zoom", zoom)
+  zoomLevel = zoom
+  applyRenderZoom(zoom)
 
   if (zoom === DEFAULT) {
     localStorage.removeItem(STORAGE_KEY)
@@ -69,6 +85,10 @@ const ownsZoom = () =>
 
 export const initZoom = () => {
   if (!ownsZoom()) return
+
+  const savedZoom = parseFloat(localStorage.getItem(STORAGE_KEY))
+  zoomLevel = Number.isFinite(savedZoom) && savedZoom >= 0.5 && savedZoom <= 3 ? savedZoom : DEFAULT
+  applyRenderZoom(zoomLevel)
 
   window.addEventListener("keydown", (event) => {
     if (!event.ctrlKey && !event.metaKey) return

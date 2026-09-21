@@ -27,5 +27,6 @@ container_id="$("${compose[@]}" ps --all --quiet rpm)"
 [[ -n "$container_id" ]] || { printf 'Could not create the artifact container.\n' >&2; exit 1; }
 
 mkdir -p "$project_dir/dist"
+find "$project_dir/dist" -maxdepth 1 -type f -name 'MDT-*.rpm' -delete
 docker cp "$container_id:/out/." "$project_dir/dist/"
 printf '\nRPM package ready in %s/dist/\n' "$project_dir"

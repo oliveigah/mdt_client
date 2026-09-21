@@ -70,9 +70,13 @@ sudo apt install ./dist/*.deb
 sudo dnf install ./dist/*.rpm
 ```
 
-The Docker image uses Ubuntu 22.04 as its binary compatibility baseline and pins
-the Elixir, Erlang, Rust, and Tauri CLI versions. Docker caches the shared native
-build layer, so building the second package reuses the compiled application.
+The Debian package is compiled on Ubuntu 22.04 and the RPM is compiled on Fedora
+44. The Phoenix release contains Erlang native libraries, so building each
+package on its target distribution family keeps those libraries compatible with
+the system OpenSSL ABI. The RPM matches the development toolchain with Erlang
+28.3 and Elixir 1.19.4, and its Rust code is optimized for the build machine's
+CPU. Build that package on the Fedora computer where it will run. Docker keeps
+separate build caches for both packages.
 
 ## Development
 

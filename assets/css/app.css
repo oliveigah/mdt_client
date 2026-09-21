@@ -126,15 +126,17 @@
     height: 100%;
   }
 
-  /* The app is rendered inside a Tauri window: the shell owns all scrolling.
-     `zoom` scales the whole interface (see assets/js/zoom.js); dividing the
-     height by the same factor keeps the shell exactly one window tall. */
+  /* The app is rendered inside a Tauri window, so the shell owns scrolling. */
   body {
     overflow: hidden;
     background-color: var(--color-app);
     color: var(--color-ink);
     font-family: var(--font-sans);
     -webkit-font-smoothing: antialiased;
+  }
+
+  /* Browser-only fallback when native WebKit zoom is unavailable. */
+  body.interface-zoom {
     zoom: var(--zoom, 1);
     height: calc(100% / var(--zoom, 1));
   }

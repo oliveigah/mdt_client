@@ -2,11 +2,21 @@ use tauri::Manager;
 
 const DESKTOP_PORT: &str = "12995";
 
+#[tauri::command]
+fn set_webview_zoom(webview: tauri::WebviewWindow, scale: f64) -> Result<(), String> {
+    if !scale.is_finite() || !(0.5..=3.0).contains(&scale) {
+        return Err("zoom must be between 0.5 and 3.0".into());
+    }
+
+    webview.set_zoom(scale).map_err(|error| error.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let pubsub = elixirkit::PubSub::listen("tcp://127.0.0.1:0").expect("failed to listen");
 
     tauri::Builder::default()
+        .invoke_handler(tauri::generate_handler![set_webview_zoom])
         .plugin(tauri_plugin_opener::init())
         .setup(move |app| {
             let app_handle = app.handle().clone();

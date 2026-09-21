@@ -15,6 +15,7 @@
         "priority": "optional"
       },
       "rpm": {
+        "release": "5",
         "depends": [
           "xdg-utils",
           "openssl-libs",
