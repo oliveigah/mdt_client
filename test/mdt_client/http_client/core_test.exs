@@ -1,6 +1,8 @@
 defmodule MDTClient.HttpClient.CoreTest do
   use ExUnit.Case, async: false
 
+  import MDTClient.VaultHelpers
+
   alias MDTClient.HttpClient.Core
   alias MDTClient.HttpClient.HistoryMetadata
   alias MDTClient.HttpClient.Resources
@@ -8,11 +10,10 @@ defmodule MDTClient.HttpClient.CoreTest do
   setup {Req.Test, :verify_on_exit!}
 
   setup do
-    Resources.clear()
-    on_exit(&Resources.clear/0)
+    unlocked_identity()
   end
 
-  test "executes a Req request" do
+  test "executes a Req request", %{username: username} do
     Req.Test.expect(__MODULE__, fn conn ->
       assert conn.method == "GET"
       assert conn.request_path == "/health"
@@ -27,10 +28,15 @@ defmodule MDTClient.HttpClient.CoreTest do
       )
 
     assert {:ok, response = %Req.Response{status: 200, body: "ok"}} =
-             Core.request(request, %{description: "Service health", tags: ["system", "health"]})
+             Core.request(username, request, %{
+               description: "Service health",
+               tags: ["system", "health"]
+             })
 
-    assert [{identifier, metadata, ^request, ^response}] = Resources.all()
-    assert {:ok, {^identifier, ^metadata, ^request, ^response}} = Resources.get(identifier)
+    assert [{identifier, metadata, ^request, ^response}] = Resources.all(username)
+
+    assert {:ok, {^identifier, ^metadata, ^request, ^response}} =
+             Resources.get(username, identifier)
 
     assert %HistoryMetadata{
              started_at: %DateTime{},
@@ -44,45 +50,66 @@ defmodule MDTClient.HttpClient.CoreTest do
     assert metadata.search_text =~ "service health"
   end
 
-  test "updates tags and descriptions by history identifier" do
+  test "updates tags and descriptions by history identifier", %{username: username} do
     request = Req.new(url: "https://example.test/health")
     response = %Req.Response{status: 200, body: "healthy"}
 
     identifier =
-      Resources.record(HistoryMetadata.new(%{description: "Health endpoint"}), request, response)
+      Resources.record(
+        username,
+        HistoryMetadata.new(%{description: "Health endpoint"}),
+        request,
+        response
+      )
 
     assert {:ok, {^identifier, metadata, ^request, ^response}} =
-             Core.add_tag(to_string(identifier), "system")
+             Core.add_tag(username, to_string(identifier), "system")
 
     assert metadata.tags == ["system"]
-    assert Resources.search("system") == [{identifier, metadata, request, response}]
+    assert Resources.search(username, "system") == [{identifier, metadata, request, response}]
 
     assert {:ok, {^identifier, metadata, ^request, ^response}} =
-             Core.set_description(identifier, "Primary health check")
+             Core.set_description(username, identifier, "Primary health check")
 
     assert metadata.description == "Primary health check"
-    assert Resources.search("primary health") == [{identifier, metadata, request, response}]
-    assert Resources.search("health endpoint") == []
+
+    assert Resources.search(username, "primary health") == [
+             {identifier, metadata, request, response}
+           ]
+
+    assert Resources.search(username, "health endpoint") == []
   end
 
-  test "deletes history entries by identifier" do
+  test "deletes history entries by identifier", %{username: username} do
     request = Req.new(url: "https://example.test/health")
     response = %Req.Response{status: 200, body: "healthy"}
 
-    kept = Resources.record(HistoryMetadata.new(%{description: "Kept"}), request, response)
-    dropped = Resources.record(HistoryMetadata.new(%{description: "Dropped"}), request, response)
+    kept =
+      Resources.record(username, HistoryMetadata.new(%{description: "Kept"}), request, response)
 
-    assert {:ok, {^dropped, _metadata, _request, _response}} = Core.delete(to_string(dropped))
+    dropped =
+      Resources.record(
+        username,
+        HistoryMetadata.new(%{description: "Dropped"}),
+        request,
+        response
+      )
 
-    assert Resources.get(dropped) == :error
-    assert [{^kept, _metadata, _request, _response}] = Resources.all()
-    assert Resources.search("dropped") == []
+    assert {:ok, {^dropped, _metadata, _request, _response}} =
+             Core.delete(username, to_string(dropped))
+
+    assert Resources.get(username, dropped) == :error
+    assert [{^kept, _metadata, _request, _response}] = Resources.all(username)
+    assert Resources.search(username, "dropped") == []
   end
 
-  test "reports unknown and invalid history identifiers" do
-    assert {:error, :not_found} = Core.add_tag(99_999, "system")
-    assert {:error, :invalid_identifier} = Core.set_description("not-an-id", "Health check")
-    assert {:error, :not_found} = Core.delete(99_999)
-    assert {:error, :invalid_identifier} = Core.delete("not-an-id")
+  test "reports unknown and invalid history identifiers", %{username: username} do
+    assert {:error, :not_found} = Core.add_tag(username, 99_999, "system")
+
+    assert {:error, :invalid_identifier} =
+             Core.set_description(username, "not-an-id", "Health check")
+
+    assert {:error, :not_found} = Core.delete(username, 99_999)
+    assert {:error, :invalid_identifier} = Core.delete(username, "not-an-id")
   end
 end

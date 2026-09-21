@@ -1,81 +1,107 @@
 defmodule MDTClient.HttpClient.ResourcesTest do
   use ExUnit.Case, async: false
 
-  alias MDTClient.HttpClient.Resources
+  import MDTClient.VaultHelpers
+
+  alias MDTClient.Accounts
   alias MDTClient.HttpClient.HistoryMetadata
+  alias MDTClient.HttpClient.Resources
+  alias MDTClient.Vault.Store
 
   setup do
-    Resources.clear()
-    on_exit(&Resources.clear/0)
+    unlocked_identity()
   end
 
-  test "starts with the application and stores history entries" do
-    assert Process.whereis(Resources)
-
+  test "stores and searches history entries", %{username: username} do
     request = Req.new(url: "https://example.test/health")
     response = %Req.Response{status: 204, body: "healthy"}
     metadata = HistoryMetadata.new(%{description: "Health check", tags: ["system", "health"]})
 
-    identifier = Resources.record(metadata, request, response)
+    identifier = Resources.record(username, metadata, request, response)
 
-    assert {:ok, {^identifier, stored_metadata, ^request, ^response}} = Resources.get(identifier)
+    assert {:ok, {^identifier, stored, ^request, ^response}} = Resources.get(username, identifier)
+    assert %HistoryMetadata{description: "Health check", tags: ["system", "health"]} = stored
+    assert stored.search_text =~ "https://example.test/health"
+    assert [{^identifier, ^stored, ^request, ^response}] = Resources.all(username)
 
-    assert %HistoryMetadata{description: "Health check", tags: ["system", "health"]} =
-             stored_metadata
-
-    assert stored_metadata.search_text =~ "https://example.test/health"
-    assert [{^identifier, ^stored_metadata, ^request, ^response}] = Resources.all()
-
-    assert [{^identifier, ^stored_metadata, ^request, ^response}] = Resources.search("HEALTH")
-    assert [{^identifier, ^stored_metadata, ^request, ^response}] = Resources.search("system")
-    assert [{^identifier, ^stored_metadata, ^request, ^response}] = Resources.search("healthy")
-    assert Resources.search("missing") == []
+    assert [{^identifier, ^stored, _, _}] = Resources.search(username, "HEALTH")
+    assert [{^identifier, ^stored, _, _}] = Resources.search(username, "system")
+    assert [{^identifier, ^stored, _, _}] = Resources.search(username, "healthy")
+    assert Resources.search(username, "missing") == []
   end
 
-  test "clears stored history" do
+  test "clears stored history", %{username: username} do
     Resources.record(
+      username,
       HistoryMetadata.new(%{}),
       Req.new(url: "https://example.test"),
       %Req.Response{status: 200}
     )
 
-    assert :ok = Resources.clear()
-    assert Resources.all() == []
+    assert :ok = Resources.clear(username)
+    assert Resources.all(username) == []
   end
 
-  test "restores the counter and records after the owner restarts" do
-    first_identifier =
-      Resources.record(
-        HistoryMetadata.new(%{}),
-        Req.new(url: "https://example.test/one"),
-        %Req.Response{status: 200}
-      )
+  test "deletes one entry and keeps the rest", %{username: username} do
+    kept = record(username, "https://example.test/one")
+    dropped = record(username, "https://example.test/two")
 
-    last_identifier =
-      Resources.record(
-        HistoryMetadata.new(%{}),
-        Req.new(url: "https://example.test/two"),
-        %Req.Response{status: 201}
-      )
+    assert :ok = Resources.delete(username, dropped)
+    assert Resources.delete(username, dropped) == :error
+    assert Resources.get(username, dropped) == :error
+    assert {:ok, _entry} = Resources.get(username, kept)
+  end
 
-    previous_owner = Process.whereis(Resources)
-    owner_ref = Process.monitor(previous_owner)
-    :ok = GenServer.stop(previous_owner, :shutdown)
+  test "survives a lock and unlock, restoring the counter", %{
+    username: username,
+    password: password
+  } do
+    first = record(username, "https://example.test/one")
+    last = record(username, "https://example.test/two")
 
-    assert_receive {:DOWN, ^owner_ref, :process, ^previous_owner, :shutdown}
-    _ = :sys.get_state(MDTClient.Supervisor)
+    :ok = Store.close(username)
+    refute Store.open?(username)
 
-    assert Process.whereis(Resources)
-    assert {:ok, {^first_identifier, _, _, _}} = Resources.get(first_identifier)
-    assert {:ok, {^last_identifier, _, _, _}} = Resources.get(last_identifier)
+    {:ok, _profile, key} = Accounts.sign_in(username, password)
+    :ok = Store.open(username, key)
 
-    next_identifier =
-      Resources.record(
-        HistoryMetadata.new(%{}),
-        Req.new(url: "https://example.test/three"),
-        %Req.Response{status: 202}
-      )
+    assert {:ok, {^first, _, _, _}} = Resources.get(username, first)
+    assert {:ok, {^last, _, _, _}} = Resources.get(username, last)
+    assert record(username, "https://example.test/three") > last
+  end
 
-    assert next_identifier > last_identifier
+  test "the history file on disk is encrypted", %{username: username} do
+    record(username, "https://api.example.test/health")
+    :ok = Resources.clear(username)
+    record(username, "https://api.example.test/health")
+    :ok = Store.close(username)
+
+    body = username |> Accounts.store_path("http_history.bin") |> File.read!()
+
+    refute String.contains?(body, "api.example.test")
+    refute String.contains?(body, "Elixir.Req.Request")
+  end
+
+  test "another identity cannot read this one's history", %{username: username} do
+    record(username, "https://api.example.test/health")
+    other = also_unlock("someone-else")
+
+    assert Resources.all(other) == []
+    assert Resources.search(other, "health") == []
+  end
+
+  test "reading a locked vault raises rather than falling through", %{username: username} do
+    :ok = Store.close(username)
+
+    assert_raise RuntimeError, ~r/locked/, fn -> Resources.all(username) end
+  end
+
+  defp record(username, url) do
+    Resources.record(
+      username,
+      HistoryMetadata.new(%{}),
+      Req.new(url: url),
+      %Req.Response{status: 200}
+    )
   end
 end

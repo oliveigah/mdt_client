@@ -20,8 +20,26 @@ if System.get_env("PHX_SERVER") do
   config :mdt_client, MDTClientWeb.Endpoint, server: true
 end
 
-config :mdt_client, MDTClientWeb.Endpoint,
-  http: [port: String.to_integer(System.get_env("PORT", "4000"))]
+port = String.to_integer(System.get_env("PORT", "4000"))
+
+# Public binding is opt in; everything else assumes this is a desktop app
+# talking to its own WebView over loopback.
+bind_all? = System.get_env("PHX_BIND_ALL") == "true"
+
+config :mdt_client, :require_loopback_host, not bind_all?
+
+config :mdt_client, MDTClientWeb.Endpoint, http: [port: port]
+
+# An explicit allow list rather than `:conn`: `:conn` only checks that Origin
+# agrees with Host, which a DNS rebinding attacker satisfies trivially.
+unless bind_all? do
+  config :mdt_client, MDTClientWeb.Endpoint,
+    check_origin: [
+      "http://127.0.0.1:#{port}",
+      "http://localhost:#{port}",
+      "http://[::1]:#{port}"
+    ]
+end
 
 if config_env() == :dev do
   # Reload browser tabs when matching files change.
@@ -55,22 +73,19 @@ if config_env() == :prod do
 
   config :mdt_client, :dns_cluster_query, System.get_env("DNS_CLUSTER_QUERY")
 
+  # MDT is a desktop app holding one person's encrypted history, so it binds
+  # loopback unless a deployment explicitly opts into a public interface. This
+  # is deliberately the default rather than something a missing environment
+  # variable can switch off: getting it wrong exposes a vault to the network.
   config :mdt_client, MDTClientWeb.Endpoint,
     url: [host: host, port: 443, scheme: "https"],
-    http: [
-      # Enable IPv6 and bind on all interfaces.
-      # Set it to  {0, 0, 0, 0, 0, 0, 0, 1} for local network only access.
-      # See the documentation on https://bandit.hexdocs.pm/Bandit.html#t:options/0
-      # for details about using IPv6 vs IPv4 and loopback vs public addresses.
-      ip: {0, 0, 0, 0, 0, 0, 0, 0}
-    ],
+    http: [ip: if(bind_all?, do: {0, 0, 0, 0, 0, 0, 0, 0}, else: {127, 0, 0, 1})],
     secret_key_base: secret_key_base
 
   # The desktop WebView connects over local HTTP, including its LiveView socket.
   if System.get_env("ELIXIRKIT_PUBSUB") do
     config :mdt_client, MDTClientWeb.Endpoint,
-      url: [host: host, port: String.to_integer(System.fetch_env!("PORT")), scheme: "http"],
-      http: [ip: {127, 0, 0, 1}]
+      url: [host: host, port: String.to_integer(System.fetch_env!("PORT")), scheme: "http"]
   end
 
   # ## SSL Support

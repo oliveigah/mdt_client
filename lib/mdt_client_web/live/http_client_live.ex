@@ -23,6 +23,7 @@ defmodule MDTClientWeb.HttpClientLive do
      socket
      |> assign(:page_title, "HTTP Client")
      |> assign(:tool, Tools.fetch!(:http))
+     |> assign(:username, socket.assigns.current_scope.user.username)
      |> assign(:tabs, tabs)
      |> assign(:active_id, hd(tabs).id)
      |> assign(:sidebar?, true)
@@ -1290,7 +1291,7 @@ defmodule MDTClientWeb.HttpClientLive do
 
   @impl true
   def handle_event("clear_history", _params, socket) do
-    :ok = Resources.clear()
+    :ok = Resources.clear(socket.assigns.username)
     {:noreply, socket |> assign(:selected, MapSet.new()) |> assign_history()}
   end
 
@@ -1344,14 +1345,14 @@ defmodule MDTClientWeb.HttpClientLive do
       targets ->
         {:noreply,
          socket
-         |> apply_to_entries(targets, &Core.delete/1, "Deleted")
+         |> apply_to_entries(targets, &Core.delete(socket.assigns.username, &1), "Deleted")
          |> update(:selected, &MapSet.difference(&1, MapSet.new(targets)))}
     end
   end
 
   @impl true
   def handle_event("save_metadata", %{"value" => value}, socket) do
-    %{dialog: dialog, dialog_targets: targets} = socket.assigns
+    %{dialog: dialog, dialog_targets: targets, username: username} = socket.assigns
 
     case {dialog, String.trim(value)} do
       {"add_tag", ""} ->
@@ -1359,7 +1360,9 @@ defmodule MDTClientWeb.HttpClientLive do
 
       {"add_tag", tag} ->
         {:noreply,
-         socket |> close_dialog() |> apply_to_entries(targets, &Core.add_tag(&1, tag), "Tagged")}
+         socket
+         |> close_dialog()
+         |> apply_to_entries(targets, &Core.add_tag(username, &1, tag), "Tagged")}
 
       {"set_description", description} ->
         description = if description == "", do: nil, else: description
@@ -1367,7 +1370,11 @@ defmodule MDTClientWeb.HttpClientLive do
         {:noreply,
          socket
          |> close_dialog()
-         |> apply_to_entries(targets, &Core.set_description(&1, description), "Described")}
+         |> apply_to_entries(
+           targets,
+           &Core.set_description(username, &1, description),
+           "Described"
+         )}
     end
   end
 
@@ -1382,7 +1389,7 @@ defmodule MDTClientWeb.HttpClientLive do
       true ->
         case Integer.parse(id) do
           {identifier, ""} ->
-            case Resources.get(identifier) do
+            case Resources.get(socket.assigns.username, identifier) do
               {:ok, entry} ->
                 {:noreply, open_tab(socket, Translation.request_from_history(entry))}
 
@@ -1579,13 +1586,14 @@ defmodule MDTClientWeb.HttpClientLive do
       true ->
         request = Translation.to_req(tab)
         metadata = %{description: tab.name, tags: tab.tags}
+        username = socket.assigns.username
         task = {:request, tab.id}
 
         socket
         |> put_tab(tab.id, &%{&1 | state: :sending, pending: task, response: nil})
         |> start_async(task, fn ->
           started_at = System.monotonic_time()
-          result = Core.request(request, metadata)
+          result = Core.request(username, request, metadata)
 
           duration_ms =
             (System.monotonic_time() - started_at)
@@ -1688,8 +1696,8 @@ defmodule MDTClientWeb.HttpClientLive do
 
   defp assign_history(socket) do
     entries =
-      socket.assigns.term
-      |> Resources.search()
+      socket.assigns.username
+      |> Resources.search(socket.assigns.term)
       |> Enum.map(&Translation.history_entry/1)
 
     assign(socket, groups: Utils.group_history(entries), count: length(entries))

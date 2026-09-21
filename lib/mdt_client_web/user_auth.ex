@@ -1,17 +1,32 @@
 defmodule MDTClientWeb.UserAuth do
   @moduledoc """
-  Session plumbing for LiveViews behind the login screen.
+  Keeps the tools behind an unlocked vault.
 
-  Real authentication is not built yet, so the hook assigns a scope holding the
-  placeholder user from `MDTClient.Accounts`. When the backend lands, only this
-  module should need to change.
+  A mounted LiveView carries the username it signed in as, so one left over
+  from an earlier session fails against a closed vault rather than reading
+  whoever signed in next.
   """
 
-  import Phoenix.Component, only: [assign_new: 3]
+  use MDTClientWeb, :verified_routes
+
+  import Phoenix.Component, only: [assign: 3]
+  import Phoenix.LiveView, only: [redirect: 2]
 
   alias MDTClient.Accounts
+  alias MDTClient.Vault.Store
+  alias MDTClientWeb.Session
 
-  def on_mount(:mock_user, _params, _session, socket) do
-    {:cont, assign_new(socket, :current_scope, fn -> %{user: Accounts.mock_user()} end)}
+  @session_key "mdt_session"
+
+  @doc "The key the session token is stored under."
+  def session_key, do: @session_key
+
+  def on_mount(:unlocked, _params, session, socket) do
+    with {:ok, %{username: username}} <- Session.fetch(session[@session_key]),
+         true <- Store.open?(username) do
+      {:cont, assign(socket, :current_scope, %{user: Accounts.profile(username)})}
+    else
+      _locked -> {:halt, redirect(socket, to: ~p"/")}
+    end
   end
 end

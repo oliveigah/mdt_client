@@ -5,10 +5,12 @@ defmodule MDTClientWeb.HttpClientLiveTest do
 
   alias MDTClient.HttpClient.HistoryMetadata
   alias MDTClient.HttpClient.Resources
+  alias MDTClient.VaultHelpers
 
   setup %{conn: conn} do
-    Resources.clear()
-    on_exit(&Resources.clear/0)
+    VaultHelpers.reset_data_dir!()
+    on_exit(&VaultHelpers.reset_data_dir!/0)
+    %{conn: conn, username: username} = sign_in(conn)
 
     health_request =
       Req.new(
@@ -25,19 +27,21 @@ defmodule MDTClientWeb.HttpClientLiveTest do
 
     health_id =
       Resources.record(
+        username,
         HistoryMetadata.new(%{description: "Health check", tags: ["system", "health"]}),
         health_request,
         health_response
       )
 
     Resources.record(
+      username,
       HistoryMetadata.new(%{description: "Create order", tags: ["orders"]}),
       Req.new(method: :post, url: "https://api.example.test/orders", body: ~s({"sku":"MDT-PRO"})),
       %Req.Response{status: 201, headers: %{}, body: %{"id" => "ord_1"}}
     )
 
     {:ok, view, _html} = live(conn, ~p"/tools/http")
-    %{view: view, health_id: health_id}
+    %{view: view, health_id: health_id, username: username, conn: conn}
   end
 
   test "boots with a blank request and persisted history", %{view: view} do
@@ -54,8 +58,9 @@ defmodule MDTClientWeb.HttpClientLiveTest do
     assert row =~ "/health"
   end
 
-  test "a non default port is shown with the host", %{conn: conn} do
+  test "a non default port is shown with the host", %{conn: conn, username: username} do
     Resources.record(
+      username,
       HistoryMetadata.new(%{description: "Local"}),
       Req.new(method: :get, url: "http://localhost:4000/health"),
       %Req.Response{status: 200, headers: %{}, body: "ok"}
@@ -165,12 +170,12 @@ defmodule MDTClientWeb.HttpClientLiveTest do
     assert has_element?(view, "#request-editor")
   end
 
-  test "clearing history removes persisted entries", %{view: view} do
+  test "clearing history removes persisted entries", %{view: view, username: username} do
     view |> element("[phx-click=clear_history]") |> render_click()
 
     assert count(view, "[phx-click=open_history]") == 0
     assert render(view) =~ "Nothing here yet"
-    assert Resources.all() == []
+    assert Resources.all(username) == []
   end
 
   test "the editor tabs swap the panel below the URL", %{view: view} do
@@ -226,7 +231,11 @@ defmodule MDTClientWeb.HttpClientLiveTest do
              "https://api.example.test/orders/ord_1"
   end
 
-  test "a history entry is tagged from its own row", %{view: view, health_id: health_id} do
+  test "a history entry is tagged from its own row", %{
+    view: view,
+    health_id: health_id,
+    username: username
+  } do
     view |> element(entry_action(health_id, "add_tag")) |> render_click()
     assert has_element?(view, "#metadata-dialog")
 
@@ -234,12 +243,13 @@ defmodule MDTClientWeb.HttpClientLiveTest do
 
     refute has_element?(view, "#metadata-dialog")
     assert html =~ "Tagged 1 request"
-    assert metadata(health_id).tags == ["system", "health", "smoke"]
+    assert metadata(username, health_id).tags == ["system", "health", "smoke"]
   end
 
   test "an empty tag is rejected and keeps the dialog open", %{
     view: view,
-    health_id: health_id
+    health_id: health_id,
+    username: username
   } do
     view |> element(entry_action(health_id, "add_tag")) |> render_click()
 
@@ -247,12 +257,13 @@ defmodule MDTClientWeb.HttpClientLiveTest do
 
     assert html =~ "Enter a tag"
     assert has_element?(view, "#metadata-dialog")
-    assert metadata(health_id).tags == ["system", "health"]
+    assert metadata(username, health_id).tags == ["system", "health"]
   end
 
   test "a history entry description is prefilled, saved and cleared", %{
     view: view,
-    health_id: health_id
+    health_id: health_id,
+    username: username
   } do
     view |> element(entry_action(health_id, "set_description")) |> render_click()
     assert first_attribute(view, "#metadata-value", "value") == "Health check"
@@ -261,15 +272,15 @@ defmodule MDTClientWeb.HttpClientLiveTest do
 
     assert html =~ "Described 1 request"
     assert html =~ "Liveness probe"
-    assert metadata(health_id).description == "Liveness probe"
+    assert metadata(username, health_id).description == "Liveness probe"
 
     view |> element(entry_action(health_id, "set_description")) |> render_click()
     view |> element("#metadata-form") |> render_submit(%{"value" => ""})
 
-    assert metadata(health_id).description == nil
+    assert metadata(username, health_id).description == nil
   end
 
-  test "tags apply to every selected history entry", %{view: view} do
+  test "tags apply to every selected history entry", %{view: view, username: username} do
     ids = attributes(view, "[phx-click=open_history]", "phx-value-id")
 
     for id <- ids, do: view |> element("#select-history-#{id}") |> render_click()
@@ -279,7 +290,7 @@ defmodule MDTClientWeb.HttpClientLiveTest do
     html = view |> element("#metadata-form") |> render_submit(%{"value" => "regression"})
 
     assert html =~ "Tagged 2 requests"
-    for id <- ids, do: assert("regression" in metadata(id).tags)
+    for id <- ids, do: assert("regression" in metadata(username, id).tags)
   end
 
   test "the selection bar selects everything and clears", %{view: view, health_id: health_id} do
@@ -319,14 +330,18 @@ defmodule MDTClientWeb.HttpClientLiveTest do
     refute has_element?(view, "[phx-click=remove_tag]")
   end
 
-  test "a selected history entry is deleted", %{view: view, health_id: health_id} do
+  test "a selected history entry is deleted", %{
+    view: view,
+    health_id: health_id,
+    username: username
+  } do
     view |> element(entry_action(health_id, "delete_entries")) |> render_click()
 
     assert count(view, "[phx-click=open_history]") == 1
-    assert Resources.get(health_id) == :error
+    assert Resources.get(username, health_id) == :error
   end
 
-  test "deleting works on the whole selection", %{view: view} do
+  test "deleting works on the whole selection", %{view: view, username: username} do
     ids = attributes(view, "[phx-click=open_history]", "phx-value-id")
     for id <- ids, do: view |> element("#select-history-#{id}") |> render_click()
 
@@ -335,10 +350,10 @@ defmodule MDTClientWeb.HttpClientLiveTest do
     assert html =~ "Deleted 2 requests"
     assert html =~ "Nothing here yet"
     refute has_element?(view, "#history-selection")
-    assert Resources.all() == []
+    assert Resources.all(username) == []
   end
 
-  test "sending records the description and tags of the tab", %{view: view} do
+  test "sending records the description and tags of the tab", %{view: view, username: username} do
     Req.Test.stub(__MODULE__, fn conn -> Plug.Conn.send_resp(conn, 200, "ok") end)
     Req.Test.set_req_test_to_shared()
     Req.default_options(plug: {Req.Test, __MODULE__})
@@ -361,7 +376,7 @@ defmodule MDTClientWeb.HttpClientLiveTest do
     view |> element("#request-form") |> render_submit(%{})
     render_async(view)
 
-    assert [{_id, metadata, _request, _response} | _older] = Resources.all()
+    assert [{_id, metadata, _request, _response} | _older] = Resources.all(username)
     assert metadata.description == "Nightly smoke"
     assert metadata.tags == ["smoke"]
   end
@@ -372,8 +387,10 @@ defmodule MDTClientWeb.HttpClientLiveTest do
   defp entry_action(id, dialog),
     do: ~s([phx-click=open_metadata][phx-value-dialog=#{dialog}][phx-value-id="#{id}"])
 
-  defp metadata(id) do
-    {:ok, {_id, metadata, _request, _response}} = Resources.get(String.to_integer(to_string(id)))
+  defp metadata(username, id) do
+    {:ok, {_id, metadata, _request, _response}} =
+      Resources.get(username, String.to_integer(to_string(id)))
+
     metadata
   end
 

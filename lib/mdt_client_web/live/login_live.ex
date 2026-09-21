@@ -2,18 +2,27 @@ defmodule MDTClientWeb.LoginLive do
   @moduledoc """
   The screen the app boots to.
 
-  Credentials are not verified yet: any email and password unlock the tool
-  picker, so the rest of the interface can be explored.
+  A username and password unlock that identity's encrypted directory. An
+  unknown username creates a profile, so the form says so before submit —
+  otherwise a typo silently produces an empty history and looks like data loss.
+
+  The form posts to `MDTClientWeb.SessionController`: only a plain request can
+  write the session cookie.
   """
   use MDTClientWeb, :live_view
 
+  alias MDTClient.Accounts
+  alias MDTClient.Preferences
+
   @impl true
-  def mount(_params, _session, socket) do
+  def mount(params, _session, socket) do
+    username = params["username"] || Preferences.get("last_username") || ""
+
     {:ok,
      socket
      |> assign(:page_title, "Sign in")
-     |> assign(:error, nil)
-     |> assign_form(%{"email" => "dev@mdt.local", "password" => ""})}
+     |> assign(:error, error_message(params["error"]))
+     |> assign_username(username)}
   end
 
   @impl true
@@ -40,17 +49,17 @@ defmodule MDTClientWeb.LoginLive do
             <.form
               for={@form}
               id="login-form"
-              phx-submit="sign_in"
+              action={~p"/login"}
               phx-change="validate"
               class="space-y-3"
             >
               <.input
-                field={@form[:email]}
-                type="email"
-                label="Email"
-                placeholder="you@example.com"
+                field={@form[:username]}
+                type="text"
+                label="Username"
+                placeholder="you"
                 autocomplete="username"
-                phx-mounted={JS.focus()}
+                phx-mounted={@username == "" && JS.focus()}
               />
               <.input
                 field={@form[:password]}
@@ -58,6 +67,7 @@ defmodule MDTClientWeb.LoginLive do
                 label="Password"
                 placeholder="••••••••"
                 autocomplete="current-password"
+                phx-mounted={@username != "" && JS.focus()}
               />
 
               <p :if={@error} id="login-error" class="flex items-center gap-1.5 text-xs text-bad">
@@ -65,24 +75,25 @@ defmodule MDTClientWeb.LoginLive do
                 {@error}
               </p>
 
-              <div class="flex items-center justify-between pt-1">
-                <.input field={@form[:remember_me]} type="checkbox" label="Keep me signed in" />
-                <button
-                  type="button"
-                  class="cursor-pointer text-xs text-muted transition-colors hover:text-accent"
-                >
-                  Forgot password?
-                </button>
-              </div>
+              <p
+                :if={!@error and @new_profile?}
+                id="new-profile-notice"
+                class="flex items-center gap-1.5 text-xs text-accent"
+              >
+                <.icon name="hero-sparkles" class="size-4" />
+                New profile — “{@username}” will be created
+              </p>
 
               <.button id="sign-in" type="submit" variant="primary" class="mt-2 w-full py-2">
-                Sign in <.icon name="hero-arrow-right" class="size-4" />
+                {if @new_profile?, do: "Create and unlock", else: "Unlock"}
+                <.icon name="hero-arrow-right" class="size-4" />
               </.button>
             </.form>
           </div>
 
-          <p class="mt-5 text-center text-[11px] text-faint">
-            v{Application.spec(:mdt_client, :vsn)} · authentication is mocked while the backend is built
+          <p class="mt-5 text-center text-[11px] leading-4 text-faint">
+            v{Application.spec(:mdt_client, :vsn)} · your history is encrypted with this password.
+            <br />There is no way to recover it if you forget it.
           </p>
         </div>
       </div>
@@ -92,27 +103,24 @@ defmodule MDTClientWeb.LoginLive do
 
   @impl true
   def handle_event("validate", %{"user" => params}, socket) do
-    {:noreply, socket |> assign(:error, nil) |> assign_form(params)}
+    # Editing the form clears a stale failure.
+    {:noreply, socket |> assign(:error, nil) |> assign_username(params["username"] || "")}
   end
 
-  @impl true
-  def handle_event("sign_in", %{"user" => params}, socket) do
-    email = String.trim(params["email"] || "")
-    password = params["password"] || ""
+  # Only known codes are rendered, so nothing a caller puts in the query string
+  # reaches the page.
+  defp error_message("bad_password"), do: "Incorrect password"
+  defp error_message("blank_username"), do: "Enter a username"
+  defp error_message("blank_password"), do: "Enter a password"
+  defp error_message("unreadable_vault"), do: "That profile's vault file could not be read"
+  defp error_message(_other), do: nil
 
-    cond do
-      email == "" ->
-        {:noreply, socket |> assign(:error, "Enter your email") |> assign_form(params)}
+  defp assign_username(socket, username) do
+    trimmed = Accounts.normalize(username)
 
-      password == "" ->
-        {:noreply, socket |> assign(:error, "Enter your password") |> assign_form(params)}
-
-      true ->
-        {:noreply, push_navigate(socket, to: ~p"/tools")}
-    end
-  end
-
-  defp assign_form(socket, params) do
-    assign(socket, :form, to_form(params, as: :user))
+    socket
+    |> assign(:username, username)
+    |> assign(:new_profile?, trimmed != "" and not Accounts.exists?(trimmed))
+    |> assign(:form, to_form(%{"username" => username, "password" => ""}, as: :user))
   end
 end

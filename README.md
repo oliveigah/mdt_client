@@ -4,8 +4,8 @@ MDT (My Dev Tools) is a Phoenix LiveView app packaged with Tauri and ElixirKit.
 
 ## Screens
 
-The app boots to a login screen (`/`), which leads to the tool picker (`/tools`)
-and from there into a tool:
+The app boots to a sign in screen (`/`), which leads to the tool picker
+(`/tools`) and from there into a tool:
 
 * **HTTP Client** (`/tools/http`) — searchable request history grouped by day,
   tabbed requests, params/headers/auth/body editors, a response viewer, and
@@ -13,8 +13,15 @@ and from there into a tool:
   split are drag resizable.
 * **Git GUI** (`/tools/git`) — not built yet.
 
-Authentication still uses a local placeholder user. The HTTP client executes
-requests through Req and persists request history locally between app restarts.
+Signing in takes a username and a password. The password is stretched into an
+encryption key, and everything that identity persists — today the HTTP client's
+request history — is written to `~/.mdt_client/identities/<hash>/` encrypted
+with it. An unknown username creates a profile; two identities cannot read each
+other's data even when they share a password, and there is no way to recover a
+forgotten one. `docs/vault.md` covers the design and its limits.
+
+The HTTP client executes requests through Req and persists request history
+between app restarts, encrypted at rest.
 
 Both themes live in `assets/css/app.css` as one set of tokens: the dark values
 follow the "Oliveigah Dark" Zed theme and the light ones override them under

@@ -3,6 +3,14 @@ defmodule MDTClientWeb.ToolsLiveTest do
 
   import Phoenix.LiveViewTest
 
+  alias MDTClient.VaultHelpers
+
+  setup %{conn: conn} do
+    VaultHelpers.reset_data_dir!()
+    on_exit(&VaultHelpers.reset_data_dir!/0)
+    sign_in(conn)
+  end
+
   test "lists every tool", %{conn: conn} do
     {:ok, view, _html} = live(conn, ~p"/tools")
 
@@ -28,5 +36,9 @@ defmodule MDTClientWeb.ToolsLiveTest do
       |> follow_redirect(conn, ~p"/tools/http")
 
     assert has_element?(tool_view, "#request-form")
+  end
+
+  test "the picker is unreachable while locked" do
+    assert {:error, {:redirect, %{to: "/"}}} = live(build_conn(), ~p"/tools")
   end
 end

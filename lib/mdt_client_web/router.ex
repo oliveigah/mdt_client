@@ -2,6 +2,7 @@ defmodule MDTClientWeb.Router do
   use MDTClientWeb, :router
 
   pipeline :browser do
+    plug MDTClientWeb.Plugs.LoopbackHost
     plug :accepts, ["html"]
     plug :fetch_session
     plug :fetch_live_flash
@@ -17,9 +18,15 @@ defmodule MDTClientWeb.Router do
   scope "/", MDTClientWeb do
     pipe_through :browser
 
-    live "/", LoginLive
+    live_session :public, on_mount: {MDTClientWeb.Hooks.Theme, :default} do
+      live "/", LoginLive
+    end
 
-    live_session :app, on_mount: {MDTClientWeb.UserAuth, :mock_user} do
+    post "/login", SessionController, :create
+    delete "/logout", SessionController, :delete
+
+    live_session :app,
+      on_mount: [{MDTClientWeb.UserAuth, :unlocked}, {MDTClientWeb.Hooks.Theme, :default}] do
       live "/tools", ToolsLive
       live "/tools/http", HttpClientLive
       live "/tools/git", GitLive

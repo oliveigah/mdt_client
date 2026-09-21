@@ -20,7 +20,7 @@ defmodule MDTClientWeb.ToolsLive do
         <div class="w-full max-w-2xl">
           <header class="mb-6">
             <h1 class="text-lg font-semibold tracking-tight">
-              Welcome back, {@current_scope.user.name}
+              Welcome back, {@current_scope.user.username}
             </h1>
             <p class="text-[13px] text-muted">Pick a tool to get to work.</p>
           </header>

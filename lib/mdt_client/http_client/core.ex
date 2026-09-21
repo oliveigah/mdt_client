@@ -1,21 +1,25 @@
 defmodule MDTClient.HttpClient.Core do
   @moduledoc """
   Executes HTTP client requests.
+
+  Every function takes the username whose vault the history belongs to; that
+  vault must be unlocked.
   """
 
-  alias MDTClient.HttpClient.Resources
   alias MDTClient.HttpClient.HistoryMetadata
+  alias MDTClient.HttpClient.Resources
 
   @doc "Executes a `Req.Request` through Req's request pipeline and records it."
-  @spec request(Req.Request.t()) :: {:ok, Req.Response.t()} | {:error, Exception.t()}
-  @spec request(Req.Request.t(), HistoryMetadata.t() | map()) ::
+  @spec request(String.t(), Req.Request.t()) :: {:ok, Req.Response.t()} | {:error, Exception.t()}
+  @spec request(String.t(), Req.Request.t(), HistoryMetadata.t() | map()) ::
           {:ok, Req.Response.t()} | {:error, Exception.t()}
-  def request(%Req.Request{} = request, metadata \\ %{}) do
+  def request(username, %Req.Request{} = request, metadata \\ %{}) do
     started_at = DateTime.utc_now()
     result = Req.request(request)
     completed_at = DateTime.utc_now()
 
     Resources.record(
+      username,
       metadata
       |> HistoryMetadata.new()
       |> HistoryMetadata.with_timing(started_at, completed_at),
@@ -27,27 +31,27 @@ defmodule MDTClient.HttpClient.Core do
   end
 
   @doc "Adds a tag to a persisted request history entry."
-  @spec add_tag(pos_integer() | String.t(), String.t()) ::
+  @spec add_tag(String.t(), pos_integer() | String.t(), String.t()) ::
           {:ok, Resources.entry()} | {:error, :not_found | :invalid_identifier}
-  def add_tag(identifier, tag) when is_binary(tag) do
-    update_metadata(identifier, &HistoryMetadata.add_tag(&1, tag))
+  def add_tag(username, identifier, tag) when is_binary(tag) do
+    update_metadata(username, identifier, &HistoryMetadata.add_tag(&1, tag))
   end
 
   @doc "Sets the user description for a persisted request history entry."
-  @spec set_description(pos_integer() | String.t(), String.t() | nil) ::
+  @spec set_description(String.t(), pos_integer() | String.t(), String.t() | nil) ::
           {:ok, Resources.entry()} | {:error, :not_found | :invalid_identifier}
-  def set_description(identifier, description)
+  def set_description(username, identifier, description)
       when is_binary(description) or is_nil(description) do
-    update_metadata(identifier, &HistoryMetadata.set_description(&1, description))
+    update_metadata(username, identifier, &HistoryMetadata.set_description(&1, description))
   end
 
   @doc "Deletes a persisted request history entry."
-  @spec delete(pos_integer() | String.t()) ::
+  @spec delete(String.t(), pos_integer() | String.t()) ::
           {:ok, Resources.entry()} | {:error, :not_found | :invalid_identifier}
-  def delete(identifier) do
+  def delete(username, identifier) do
     with {:ok, identifier} <- history_identifier(identifier),
-         {:ok, entry} <- Resources.get(identifier),
-         :ok <- Resources.delete(identifier) do
+         {:ok, entry} <- Resources.get(username, identifier),
+         :ok <- Resources.delete(username, identifier) do
       {:ok, entry}
     else
       :error -> {:error, :not_found}
@@ -58,12 +62,12 @@ defmodule MDTClient.HttpClient.Core do
   defp response_from({:ok, response}), do: response
   defp response_from({:error, error}), do: error
 
-  defp update_metadata(identifier, update) do
+  defp update_metadata(username, identifier, update) do
     with {:ok, identifier} <- history_identifier(identifier),
-         {:ok, {^identifier, metadata, request, response}} <- Resources.get(identifier) do
+         {:ok, {^identifier, metadata, request, response}} <- Resources.get(username, identifier) do
       metadata = metadata |> update.() |> HistoryMetadata.with_search_text(request, response)
       entry = {identifier, metadata, request, response}
-      true = :ets.insert(Resources.table(), entry)
+      true = :ets.insert(Resources.table(username), entry)
 
       {:ok, entry}
     else

@@ -8,7 +8,7 @@ config :mdt_client, MDTClientWeb.Endpoint,
   server: false
 
 config :mdt_client,
-  http_client_history_path: Path.join(System.tmp_dir!(), "mdt_client_test_history.ets"),
+  data_dir: Path.join(System.tmp_dir!(), "mdt_client_test_data"),
   http_client_history_sync_interval: :timer.seconds(1)
 
 # Print only warnings and errors during test

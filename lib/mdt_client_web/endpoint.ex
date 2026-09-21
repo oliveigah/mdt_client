@@ -4,13 +4,17 @@ defmodule MDTClientWeb.Endpoint do
   # The session will be stored in the cookie and signed,
   # this means its contents can be read but not tampered with.
   # Set :encryption_salt if you would also like to encrypt it.
+  # "Strict" rather than "Lax": nothing outside the app ever links into it, so
+  # the session cookie has no reason to ride along on a cross site navigation.
   @session_options [
     store: :cookie,
     key: "_mdt_client_key",
     signing_salt: "9Mt24JLD",
-    same_site: "Lax"
+    same_site: "Strict"
   ]
 
+  # The accepted origins are pinned in config/runtime.exs, where the port is
+  # known.
   socket "/live", Phoenix.LiveView.Socket,
     websocket: [connect_info: [session: @session_options]],
     longpoll: [connect_info: [session: @session_options]]

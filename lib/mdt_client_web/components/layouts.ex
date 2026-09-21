@@ -90,10 +90,11 @@ defmodule MDTClientWeb.Layouts do
           <span class="flex size-6 items-center justify-center rounded-full bg-accent-soft text-[10px] font-semibold text-accent">
             {@current_scope.user.initials}
           </span>
-          <span class="hidden text-xs text-muted sm:inline">{@current_scope.user.email}</span>
+          <span class="hidden text-xs text-muted sm:inline">{@current_scope.user.username}</span>
           <.link
-            navigate={~p"/"}
-            title="Sign out"
+            href={~p"/logout"}
+            method="delete"
+            title="Lock and sign out"
             class="flex size-7 items-center justify-center rounded text-muted transition-colors hover:bg-hover hover:text-bad"
           >
             <.icon name="hero-arrow-left-start-on-rectangle" class="size-4" />
@@ -135,7 +136,7 @@ defmodule MDTClientWeb.Layouts do
       <button
         :for={{theme, icon, label, active_class} <- @themes}
         type="button"
-        phx-click={JS.dispatch("phx:set-theme")}
+        phx-click={JS.dispatch("phx:set-theme") |> JS.push("set_theme", value: %{theme: theme})}
         data-phx-theme={theme}
         title={label}
         aria-label={label}
