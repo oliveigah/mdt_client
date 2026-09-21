@@ -1,6 +1,28 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "bundle": {
-    "targets": ["appimage"]
+    "targets": ["deb", "rpm"],
+    "linux": {
+      "deb": {
+        "depends": [
+          "xdg-utils",
+          "libssl3",
+          "libncurses6",
+          "libstdc++6",
+          "zlib1g"
+        ],
+        "section": "devel",
+        "priority": "optional"
+      },
+      "rpm": {
+        "depends": [
+          "xdg-utils",
+          "openssl-libs",
+          "ncurses-libs",
+          "libstdc++",
+          "zlib"
+        ]
+      }
+    }
   }
 }

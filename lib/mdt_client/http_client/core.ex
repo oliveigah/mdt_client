@@ -68,6 +68,7 @@ defmodule MDTClient.HttpClient.Core do
       metadata = metadata |> update.() |> HistoryMetadata.with_search_text(request, response)
       entry = {identifier, metadata, request, response}
       true = :ets.insert(Resources.table(username), entry)
+      :ok = Resources.touch(username)
 
       {:ok, entry}
     else

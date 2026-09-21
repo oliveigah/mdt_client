@@ -20,6 +20,7 @@ defmodule MDTClient.HttpClient.Resources do
   @history_file "http_history.bin"
   @end_of_table :"$end_of_table"
   @default_sync_interval :timer.seconds(30)
+  @flush_after 250
 
   @type history_id :: pos_integer()
   @type metadata :: HistoryMetadata.t()
@@ -48,7 +49,20 @@ defmodule MDTClient.HttpClient.Resources do
     identifier = :atomics.add_get(counter, 1, 1)
     metadata = HistoryMetadata.with_search_text(metadata, request, response)
     true = :ets.insert(table, {identifier, metadata, request, response})
+    :ok = touch(username)
     identifier
+  end
+
+  @doc """
+  Marks the history as changed so it reaches disk shortly.
+
+  Callers that write to the table directly must call this. Without it a change
+  would only be durable at the next periodic sync or on a clean shutdown —
+  and a desktop app that is force quit gets neither.
+  """
+  @spec touch(String.t()) :: :ok
+  def touch(username) do
+    GenServer.cast(Store.via(__MODULE__, username), :changed)
   end
 
   @doc "Returns all recorded request history entries, newest first."
@@ -111,7 +125,7 @@ defmodule MDTClient.HttpClient.Resources do
     :ok = Store.publish(__MODULE__, username, %{table: table, counter: counter})
     schedule_sync()
 
-    {:ok, %{username: username, key: key, path: path, table: table}}
+    {:ok, %{username: username, key: key, path: path, table: table, flush: nil}}
   end
 
   @impl true
@@ -119,8 +133,7 @@ defmodule MDTClient.HttpClient.Resources do
     case :ets.lookup(state.table, identifier) do
       [_entry] ->
         true = :ets.delete(state.table, identifier)
-        :ok = persist(state)
-        {:reply, :ok, state}
+        {:reply, :ok, flushed(state)}
 
       [] ->
         {:reply, :error, state}
@@ -131,8 +144,23 @@ defmodule MDTClient.HttpClient.Resources do
   def handle_call(:clear, _from, state) do
     true = :ets.delete_all_objects(state.table)
     :ok = :atomics.put(counter(state.username), 1, 0)
+    {:reply, :ok, flushed(state)}
+  end
+
+  # Coalesced rather than written straight away: a burst of edits becomes one
+  # write, while nothing waits longer than @flush_after to become durable.
+  @impl true
+  def handle_cast(:changed, %{flush: nil} = state) do
+    {:noreply, %{state | flush: Process.send_after(self(), :flush, @flush_after)}}
+  end
+
+  @impl true
+  def handle_cast(:changed, state), do: {:noreply, state}
+
+  @impl true
+  def handle_info(:flush, state) do
     :ok = persist(state)
-    {:reply, :ok, state}
+    {:noreply, %{state | flush: nil}}
   end
 
   @impl true
@@ -148,6 +176,7 @@ defmodule MDTClient.HttpClient.Resources do
   def terminate(_reason, state) do
     Store.release(__MODULE__, state.username)
     persist(state)
+    :ok
   end
 
   defp handles(username) do
@@ -160,8 +189,23 @@ defmodule MDTClient.HttpClient.Resources do
     end
   end
 
+  # Writes now and drops any pending timer, so a later :flush cannot fire
+  # against state that has already been written.
+  defp flushed(state) do
+    if state.flush, do: Process.cancel_timer(state.flush)
+    :ok = persist(state)
+    %{state | flush: nil}
+  end
+
   defp persist(state) do
-    File.write(state.path, Vault.seal(state.key, :ets.tab2list(state.table)))
+    case File.write(state.path, Vault.seal(state.key, :ets.tab2list(state.table))) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.error("could not write history to #{state.path}: #{:file.format_error(reason)}")
+        :ok
+    end
   end
 
   # A file that will not decrypt is kept, not overwritten: the key was already
@@ -183,9 +227,11 @@ defmodule MDTClient.HttpClient.Resources do
     end
   end
 
+  # Timestamped so a second failed start cannot overwrite the copy kept by the
+  # first, which would turn a recoverable problem into data loss.
   defp quarantine(path) do
-    corrupt = path <> ".corrupt"
-    Logger.warning("history at #{path} could not be decrypted; moved to #{corrupt}")
+    corrupt = "#{path}.#{System.system_time(:second)}.corrupt"
+    Logger.warning("history at #{path} could not be decrypted; kept as #{corrupt}")
     File.rename(path, corrupt)
     :ok
   end

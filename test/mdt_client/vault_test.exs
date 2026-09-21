@@ -50,6 +50,32 @@ defmodule MDTClient.VaultTest do
     refute Vault.seal(key, "same") == Vault.seal(key, "same")
   end
 
+  # The bug this guards: `binary_to_term/2` with `:safe` refuses to create
+  # atoms the VM has not seen. A freshly started VM has not loaded the modules
+  # whose struct names are in the history, so every restore after a restart
+  # failed and the history looked empty.
+  test "opens terms naming modules this VM has not loaded", %{key: key} do
+    name = "atom_that_has_never_existed_#{System.unique_integer([:positive])}"
+    unknown_atom = <<131, 119, byte_size(name), name::binary>>
+
+    nonce = :crypto.strong_rand_bytes(12)
+
+    {ciphertext, tag} =
+      :crypto.crypto_one_time_aead(:aes_256_gcm, key, nonce, unknown_atom, "", true)
+
+    blob = <<1, nonce::binary, tag::binary, ciphertext::binary>>
+
+    assert {:ok, decoded} = Vault.open(key, blob)
+    assert Atom.to_string(decoded) == name
+  end
+
+  test "round trips a Req request, which carries captured functions", %{key: key} do
+    request = Req.new(url: "https://api.example.test/health", headers: [{"accept", "json"}])
+
+    assert {:ok, restored} = key |> Vault.seal(request) |> then(&Vault.open(key, &1))
+    assert URI.to_string(restored.url) == "https://api.example.test/health"
+  end
+
   test "derive honours stored parameters", %{salt: salt} do
     params = %{"iterations" => 1_000, "length" => 32}
 

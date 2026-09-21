@@ -1,0 +1,16 @@
+services:
+  deb:
+    platform: ${PACKAGE_PLATFORM:-linux/amd64}
+    build:
+      context: .
+      dockerfile: scripts/linux-packages.Dockerfile
+      target: deb
+    command: ["/artifact"]
+
+  rpm:
+    platform: ${PACKAGE_PLATFORM:-linux/amd64}
+    build:
+      context: .
+      dockerfile: scripts/linux-packages.Dockerfile
+      target: rpm
+    command: ["/artifact"]

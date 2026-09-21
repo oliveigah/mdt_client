@@ -1,6 +1,7 @@
 # MDT Client
 
-MDT (My Dev Tools) is a Phoenix LiveView app packaged with Tauri and ElixirKit.
+MDT (My Dev Tools) is a Phoenix LiveView app packaged as a native Linux desktop
+application with Tauri and ElixirKit.
 
 ## Screens
 
@@ -36,22 +37,42 @@ scaling the interface through the same CSS variable mechanism. In a browser the
 handlers stay out of the way and the browser's own zoom applies; set
 `mdt:force-zoom` in local storage to exercise the app's zoom there.
 
-To build the AppImage:
+## Linux packages
+
+Docker and the Docker Compose plugin are the only host requirements. Build both
+native Linux packages with:
 
 ```bash
 ./scripts/build-linux.sh
 ```
 
-For a quick build using an already configured local Elixir/Rust/Tauri toolchain:
+Or build one package at a time:
 
 ```bash
-MIX_ENV=prod mix deps.get --only prod --check-locked
-MIX_ENV=prod mix assets.setup
-NO_STRIP=1 APPIMAGE_EXTRACT_AND_RUN=1 cargo tauri build --bundles appimage
+./scripts/build-deb.sh
+./scripts/build-rpm.sh
 ```
 
-This local build writes to `src-tauri/target/release/bundle/appimage/` and inherits
-the host's library requirements.
+All scripts write the finished packages to `dist/`. The default target is
+`linux/amd64`, including when the build runs through emulation on an ARM host.
+To build ARM64 packages instead, set the platform explicitly:
+
+```bash
+PACKAGE_PLATFORM=linux/arm64 ./scripts/build-linux.sh
+```
+
+Install a package using the distribution's package manager so its WebKitGTK and
+GTK runtime dependencies are installed and kept current by the operating system:
+
+```bash
+sudo apt install ./dist/*.deb
+# or
+sudo dnf install ./dist/*.rpm
+```
+
+The Docker image uses Ubuntu 22.04 as its binary compatibility baseline and pins
+the Elixir, Erlang, Rust, and Tauri CLI versions. Docker caches the shared native
+build layer, so building the second package reuses the compiled application.
 
 ## Development
 

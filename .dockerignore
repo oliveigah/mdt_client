@@ -1,7 +1,7 @@
-# Send only inputs used by the AppImage build, never host build artifacts.
+# Send only inputs used by the Linux package build, never host build artifacts.
 **
 !scripts/
-!scripts/appimage.Dockerfile
+!scripts/linux-packages.Dockerfile
 !mix.exs
 !mix.lock
 !.gitignore

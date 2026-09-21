@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "mdt_client",
+  "productName": "MDT",
   "version": "0.1.0",
   "identifier": "com.oliveigah.mdtclient",
   "build": {
@@ -15,7 +15,10 @@
   "bundle": {
     "active": true,
     "resources": { "target/rel": "rel" },
-    "targets": "all",
+    "targets": ["deb", "rpm"],
+    "category": "DeveloperTool",
+    "shortDescription": "A focused desktop toolbox for developers.",
+    "longDescription": "MDT (My Dev Tools) is a local-first desktop toolbox with an HTTP client and room for more everyday development utilities.",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

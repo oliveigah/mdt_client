@@ -38,9 +38,26 @@ this is a live concern rather than a theoretical one.
 
     <<version::8, nonce::96, tag::128, ciphertext::binary>>
 
-Plaintext is `:erlang.term_to_binary/1`, read back with the `:safe` flag. The
-GCM tag is verified before anything is deserialised, so a tampered file is
-rejected rather than decoded.
+Plaintext is `:erlang.term_to_binary/1`. The GCM tag is verified before
+anything is deserialised, so a tampered file is rejected rather than decoded —
+and because only a holder of the key could produce a blob that authenticates,
+the term is always one we wrote ourselves.
+
+Decoding deliberately does **not** pass `:safe`. That flag refuses to create
+atoms the VM has not seen, and a freshly started VM has not yet loaded the
+modules whose struct names are in the history, so `:safe` rejects our own data
+on precisely the restart where restoring matters.
+
+## Durability
+
+The history is flushed about 250ms after any change — a new request, a tag, a
+description — rather than only on a timer and at shutdown. A desktop app can
+be force quit or killed, in which case `terminate/2` never runs; anything
+relying on it alone is lost. The 30 second sync remains as a backstop, and
+`clear` and `delete` still write synchronously.
+
+A history file that will not decrypt is renamed aside with a timestamp rather
+than overwritten, so a bad start can never destroy a recoverable copy.
 
 ## Identity
 

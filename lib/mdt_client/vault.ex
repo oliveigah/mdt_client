@@ -72,7 +72,15 @@ defmodule MDTClient.Vault do
   Decrypts a blob produced by `seal/2`.
 
   Returns `:error` for the wrong key, a tampered blob, or one this version
-  cannot read. The tag is checked before anything is deserialised.
+  cannot read. The GCM tag is checked before anything is deserialised, which
+  is what makes the plain `binary_to_term/1` below safe: only a holder of this
+  key could have produced a blob that authenticates, so the term is one we
+  wrote ourselves.
+
+  It deliberately does *not* pass `:safe`. That flag refuses to create atoms
+  the VM has not seen, and a freshly started VM has not yet loaded the modules
+  whose struct names are in here — so `:safe` rejects our own data on every
+  restart, which is exactly when restoring matters.
   """
   @spec open(key(), binary()) :: {:ok, term()} | :error
   def open(
@@ -82,16 +90,14 @@ defmodule MDTClient.Vault do
       ) do
     case :crypto.crypto_one_time_aead(:aes_256_gcm, key, nonce, ciphertext, "", tag, false) do
       :error -> :error
-      plain -> safe_term(plain)
+      plain -> decode(plain)
     end
   end
 
   def open(_key, _blob), do: :error
 
-  # Authenticated by the tag above, but `:safe` still keeps a surprising blob
-  # from minting atoms.
-  defp safe_term(plain) do
-    {:ok, :erlang.binary_to_term(plain, [:safe])}
+  defp decode(plain) do
+    {:ok, :erlang.binary_to_term(plain)}
   rescue
     ArgumentError -> :error
   end

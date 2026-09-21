@@ -70,6 +70,27 @@ defmodule MDTClient.HttpClient.ResourcesTest do
     assert record(username, "https://example.test/three") > last
   end
 
+  test "a recorded entry reaches disk without waiting for shutdown", %{username: username} do
+    path = Accounts.store_path(username, "http_history.bin")
+    refute File.exists?(path)
+
+    record(username, "https://api.example.test/health")
+
+    # No lock, no clean shutdown: just the debounced flush.
+    assert eventually(fn -> File.exists?(path) end)
+  end
+
+  test "a tag edit reaches disk too", %{username: username} do
+    id = record(username, "https://api.example.test/health")
+    path = Accounts.store_path(username, "http_history.bin")
+    assert eventually(fn -> File.exists?(path) end)
+
+    before = File.read!(path)
+    {:ok, _entry} = MDTClient.HttpClient.Core.add_tag(username, id, "smoke")
+
+    assert eventually(fn -> File.read!(path) != before end)
+  end
+
   test "the history file on disk is encrypted", %{username: username} do
     record(username, "https://api.example.test/health")
     :ok = Resources.clear(username)
@@ -94,6 +115,14 @@ defmodule MDTClient.HttpClient.ResourcesTest do
     :ok = Store.close(username)
 
     assert_raise RuntimeError, ~r/locked/, fn -> Resources.all(username) end
+  end
+
+  defp eventually(check, attempts \\ 40) do
+    cond do
+      check.() -> true
+      attempts == 0 -> false
+      true -> Process.sleep(25) && eventually(check, attempts - 1)
+    end
   end
 
   defp record(username, url) do
