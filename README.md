@@ -13,9 +13,8 @@ and from there into a tool:
   split are drag resizable.
 * **Git GUI** (`/tools/git`) — not built yet.
 
-The interface is front end only for now: authentication always succeeds and the
-HTTP client answers with canned responses from `MDTClient.HttpClient`, so there
-is no networking or persistence behind it yet.
+Authentication still uses a local placeholder user. The HTTP client executes
+requests through Req and persists request history locally between app restarts.
 
 Both themes live in `assets/css/app.css` as one set of tokens: the dark values
 follow the "Oliveigah Dark" Zed theme and the light ones override them under

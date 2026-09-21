@@ -9,7 +9,7 @@ defmodule MDTClient.HttpClient.Curl do
   and skips flags that do not describe the request, like `-L` or `--compressed`.
   """
 
-  alias MDTClient.HttpClient
+  alias MDTClient.HttpClient.Utils
 
   @body_flags ~w(-d --data --data-raw --data-binary --data-ascii --json)
   @header_flags ~w(-H --header)
@@ -22,13 +22,13 @@ defmodule MDTClient.HttpClient.Curl do
 
   ## Examples
 
-      iex> MDTClient.HttpClient.Curl.to_curl(MDTClient.HttpClient.new_request(%{url: "https://mdt.dev"}))
+      iex> MDTClient.HttpClient.Curl.to_curl(MDTClient.HttpClient.Utils.new_request(%{url: "https://mdt.dev"}))
       "curl --request GET \\\\\\n  --url 'https://mdt.dev'"
 
   """
   def to_curl(request) do
     parts =
-      ["--request #{request.method}", "--url #{quoted(HttpClient.full_url(request))}"] ++
+      ["--request #{request.method}", "--url #{quoted(Utils.full_url(request))}"] ++
         header_parts(request) ++ auth_parts(request) ++ body_parts(request)
 
     "curl " <> Enum.join(parts, " \\\n  ")
@@ -59,7 +59,7 @@ defmodule MDTClient.HttpClient.Curl do
   defp quoted(value), do: "'" <> String.replace(value, "'", "'\\''") <> "'"
 
   @doc """
-  Parses a curl command into attributes for `MDTClient.HttpClient.new_request/1`.
+  Parses a curl command into attributes for `MDTClient.HttpClient.Utils.new_request/1`.
 
   Returns `{:error, reason}` when the command cannot be read.
   """
@@ -176,10 +176,10 @@ defmodule MDTClient.HttpClient.Curl do
       %{
         method: acc.method || if(acc.body, do: "POST", else: "GET"),
         url: url,
-        params: HttpClient.query_rows(query),
+        params: Utils.query_rows(query),
         headers:
-          Enum.map(headers, fn {key, value} -> HttpClient.new_row(key, value) end) ++
-            [HttpClient.new_row()],
+          Enum.map(headers, fn {key, value} -> Utils.new_row(key, value) end) ++
+            [Utils.new_row()],
         body_type: body_type(acc, headers),
         body: acc.body || "",
         editor_tab: if(acc.body, do: "body", else: "params")

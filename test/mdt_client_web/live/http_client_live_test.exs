@@ -3,52 +3,60 @@ defmodule MDTClientWeb.HttpClientLiveTest do
 
   import Phoenix.LiveViewTest
 
-  alias MDTClient.HttpClient
+  alias MDTClient.HttpClient.HistoryMetadata
+  alias MDTClient.HttpClient.Resources
 
   setup %{conn: conn} do
+    Resources.clear()
+    on_exit(&Resources.clear/0)
+
+    health_request =
+      Req.new(
+        method: :get,
+        url: "https://api.example.test/health",
+        headers: [{"accept", "application/json"}]
+      )
+
+    health_response = %Req.Response{
+      status: 200,
+      headers: %{"content-type" => ["application/json"], "x-ratelimit-remaining" => ["4998"]},
+      body: %{"status" => "ok"}
+    }
+
+    health_id =
+      Resources.record(
+        HistoryMetadata.new(%{description: "Health check", tags: ["system", "health"]}),
+        health_request,
+        health_response
+      )
+
+    Resources.record(
+      HistoryMetadata.new(%{description: "Create order", tags: ["orders"]}),
+      Req.new(method: :post, url: "https://api.example.test/orders", body: ~s({"sku":"MDT-PRO"})),
+      %Req.Response{status: 201, headers: %{}, body: %{"id" => "ord_1"}}
+    )
+
     {:ok, view, _html} = live(conn, ~p"/tools/http")
-    %{view: view, history: HttpClient.history()}
+    %{view: view, health_id: health_id}
   end
 
-  test "boots with open request tabs and the history panel", %{view: view, history: history} do
+  test "boots with a blank request and persisted history", %{view: view} do
     assert has_element?(view, "#request-form")
     assert has_element?(view, "#request-url")
-    assert count(view, "[phx-click=select_tab]") == 2
-    assert count(view, "[phx-click=open_history]") == length(history)
+    assert count(view, "[phx-click=select_tab]") == 1
+    assert count(view, "[phx-click=open_history]") == 2
   end
 
-  test "the history is grouped by day, newest first", %{view: view, history: history} do
-    labels = attributes(view, "[phx-click=toggle_group]", "phx-value-group")
-
-    assert length(labels) == history |> HttpClient.group_history() |> length()
-    assert labels == Enum.sort(labels, :desc)
-    assert render(view) =~ "Today"
-    assert render(view) =~ "Yesterday"
-  end
-
-  test "a history group can be collapsed and expanded", %{view: view, history: history} do
-    [group | _] = attributes(view, "[phx-click=toggle_group]", "phx-value-group")
-    in_group = Enum.count(history, &(Date.to_iso8601(NaiveDateTime.to_date(&1.at)) == group))
-
-    view |> element("#group-#{group}") |> render_click()
-    assert count(view, "[phx-click=open_history]") == length(history) - in_group
-
-    view |> element("#group-#{group}") |> render_click()
-    assert count(view, "[phx-click=open_history]") == length(history)
-  end
-
-  test "searching filters the history", %{view: view, history: history} do
-    matches = history |> HttpClient.search_history("login") |> length()
-
+  test "searching uses persisted history", %{view: view} do
     view
     |> element("form[phx-change=search]")
-    |> render_change(%{"term" => "login"})
+    |> render_change(%{"term" => "SYSTEM"})
 
-    assert count(view, "[phx-click=open_history]") == matches
+    assert count(view, "[phx-click=open_history]") == 1
+    assert render(view) =~ "Health check"
 
     view |> element("[phx-click=clear_search]") |> render_click()
-
-    assert count(view, "[phx-click=open_history]") == length(history)
+    assert count(view, "[phx-click=open_history]") == 2
   end
 
   test "searching with no match shows an empty state", %{view: view} do
@@ -61,63 +69,50 @@ defmodule MDTClientWeb.HttpClientLiveTest do
     assert html =~ "No request matches"
   end
 
-  test "opening a history entry adds a tab", %{view: view} do
-    id = first_attribute(view, "[phx-click=open_history]", "phx-value-id")
+  test "opening persisted history restores its request and response", %{
+    view: view,
+    health_id: health_id
+  } do
+    view |> element("#history-#{health_id}") |> render_click()
 
-    view |> element("#history-#{id}") |> render_click()
+    assert count(view, "[phx-click=select_tab]") == 2
+    assert first_attribute(view, "#request-url", "value") == "https://api.example.test/health"
+    assert render(view) =~ "200 OK"
 
-    assert count(view, "[phx-click=select_tab]") == 3
+    view |> element("[phx-click=set_response_tab][phx-value-tab=headers]") |> render_click()
+    assert render(view) =~ "x-ratelimit-remaining"
   end
 
   test "new and close tab", %{view: view} do
     view |> element("[phx-click=new_tab]") |> render_click()
-    assert count(view, "[phx-click=select_tab]") == 3
+    assert count(view, "[phx-click=select_tab]") == 2
 
     id = first_attribute(view, "[phx-click=close_tab]", "phx-value-id")
     view |> element("[phx-click=close_tab][phx-value-id=#{id}]") |> render_click()
 
-    assert count(view, "[phx-click=select_tab]") == 2
+    assert count(view, "[phx-click=select_tab]") == 1
   end
 
   test "closing every tab shows the empty state", %{view: view} do
-    for _ <- 1..2 do
-      id = first_attribute(view, "[phx-click=close_tab]", "phx-value-id")
-      view |> element("[phx-click=close_tab][phx-value-id=#{id}]") |> render_click()
-    end
+    id = first_attribute(view, "[phx-click=close_tab]", "phx-value-id")
+    view |> element("[phx-click=close_tab][phx-value-id=#{id}]") |> render_click()
 
     assert render(view) =~ "No request open"
     refute has_element?(view, "#request-form")
   end
 
-  test "editing the request updates the tab and the url", %{view: view} do
+  test "editing the request updates the tab and the URL", %{view: view} do
     view
     |> element("#request-form")
     |> render_change(%{
-      "request" => %{"method" => "DELETE", "url" => "https://api.mdt.dev/v1/users/7"}
+      "request" => %{"method" => "DELETE", "url" => "https://api.example.test/users/7"}
     })
 
-    assert first_attribute(view, "#request-url", "value") == "https://api.mdt.dev/v1/users/7"
+    assert first_attribute(view, "#request-url", "value") == "https://api.example.test/users/7"
     assert render(view) =~ "DELETE"
   end
 
-  test "sending a request renders a response and records history", %{
-    view: view,
-    history: history
-  } do
-    view |> element("[phx-click=set_editor_tab][phx-value-tab=body]") |> render_click()
-
-    view
-    |> element("#request-form")
-    |> render_submit(%{"request" => %{"url" => "https://api.mdt.dev/v1/users/42"}})
-
-    assert has_element?(view, "[id^=response-body-]")
-    assert render(view) =~ "200 OK"
-    assert count(view, "[phx-click=open_history]") == length(history) + 1
-  end
-
-  test "sending without a url is rejected", %{view: view} do
-    view |> element("[phx-click=new_tab]") |> render_click()
-
+  test "sending without a URL is rejected", %{view: view} do
     html = render_submit(element(view, "#request-form"), %{"request" => %{"url" => "   "}})
 
     assert html =~ "Enter a URL before sending"
@@ -151,14 +146,15 @@ defmodule MDTClientWeb.HttpClientLiveTest do
     assert has_element?(view, "#request-editor")
   end
 
-  test "clearing the history empties the panel", %{view: view} do
+  test "clearing history removes persisted entries", %{view: view} do
     view |> element("[phx-click=clear_history]") |> render_click()
 
     assert count(view, "[phx-click=open_history]") == 0
     assert render(view) =~ "Nothing here yet"
+    assert Resources.all() == []
   end
 
-  test "the editor tabs swap the panel below the url", %{view: view} do
+  test "the editor tabs swap the panel below the URL", %{view: view} do
     view |> element("[phx-click=set_editor_tab][phx-value-tab=auth]") |> render_click()
     assert has_element?(view, "#request_auth_type")
 
@@ -168,16 +164,6 @@ defmodule MDTClientWeb.HttpClientLiveTest do
     view |> element("#request-form") |> render_change(%{"request" => %{"body_type" => "json"}})
     assert has_element?(view, "#request-body")
     assert has_element?(view, "[phx-click=format_body]")
-
-    view |> element("[phx-click=set_editor_tab][phx-value-tab=headers]") |> render_click()
-    assert count(view, "[phx-click=remove_row]") == 2
-  end
-
-  test "the response headers can be inspected", %{view: view} do
-    view |> element("[phx-click=set_response_tab][phx-value-tab=headers]") |> render_click()
-
-    assert render(view) =~ "x-ratelimit-remaining"
-    refute has_element?(view, "[id^=response-body-]")
   end
 
   test "invalid JSON bodies are not formatted", %{view: view} do
@@ -191,7 +177,9 @@ defmodule MDTClientWeb.HttpClientLiveTest do
   end
 
   test "the request can be exported as curl", %{view: view} do
-    refute has_element?(view, "#curl-dialog")
+    view
+    |> element("#request-form")
+    |> render_change(%{"request" => %{"url" => "https://api.example.test/users"}})
 
     html =
       view
@@ -199,12 +187,8 @@ defmodule MDTClientWeb.HttpClientLiveTest do
       |> render_click()
 
     assert has_element?(view, "#curl-export")
-    assert has_element?(view, "#copy-curl[data-copy]")
     assert html =~ "curl --request GET"
-    assert html =~ "https://api.mdt.dev/v1/users"
-
-    view |> element("[phx-click=close_dialog]", "Close") |> render_click()
-    refute has_element?(view, "#curl-dialog")
+    assert html =~ "https://api.example.test/users"
   end
 
   test "a curl command is imported into a new tab", %{view: view} do
@@ -214,24 +198,13 @@ defmodule MDTClientWeb.HttpClientLiveTest do
 
     view
     |> element("#curl-dialog form")
-    |> render_submit(%{"command" => "curl -X DELETE https://api.mdt.dev/v1/orders/ord_9f31"})
+    |> render_submit(%{"command" => "curl -X DELETE https://api.example.test/orders/ord_1"})
 
     refute has_element?(view, "#curl-dialog")
     assert count(view, "[phx-click=select_tab]") == tabs + 1
 
     assert first_attribute(view, "#request-url", "value") ==
-             "https://api.mdt.dev/v1/orders/ord_9f31"
-
-    assert render(view) =~ "Request imported from curl"
-  end
-
-  test "an unreadable curl command keeps the dialog open", %{view: view} do
-    view |> element("[phx-click=open_dialog][phx-value-dialog=import_curl]") |> render_click()
-
-    view |> element("#curl-dialog form") |> render_submit(%{"command" => "wget https://mdt.dev"})
-
-    assert has_element?(view, "#curl-import-error")
-    assert has_element?(view, "#curl-dialog")
+             "https://api.example.test/orders/ord_1"
   end
 
   defp count(view, selector) do

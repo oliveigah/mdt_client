@@ -7,8 +7,9 @@ config :mdt_client, MDTClientWeb.Endpoint,
   secret_key_base: "es3iXg62cZ/nhOeFiFoKUtbMcjvDfNcQFanIwcNKukmDNW0YShvqkHTEQAYQ68JZ",
   server: false
 
-# Answer mocked HTTP requests immediately instead of simulating latency
-config :mdt_client, simulate_latency: false
+config :mdt_client,
+  http_client_history_path: Path.join(System.tmp_dir!(), "mdt_client_test_history.ets"),
+  http_client_history_sync_interval: :timer.seconds(1)
 
 # Print only warnings and errors during test
 config :logger, level: :warning

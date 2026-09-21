@@ -13,6 +13,7 @@ defmodule MDTClient.Application do
       MDTClientWeb.Telemetry,
       {DNSCluster, query: Application.get_env(:mdt_client, :dns_cluster_query) || :ignore},
       {Phoenix.PubSub, name: MDTClient.PubSub},
+      MDTClient.HttpClient.Resources,
       # Start a worker by calling: MDTClient.Worker.start_link(arg)
       # {MDTClient.Worker, arg},
       # Start to serve requests, typically the last entry

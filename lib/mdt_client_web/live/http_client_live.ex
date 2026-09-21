@@ -3,18 +3,21 @@ defmodule MDTClientWeb.HttpClientLive do
   The HTTP client tool: a searchable history on the left, tabbed requests and
   their responses on the right.
 
-  All data is mocked (see `MDTClient.HttpClient`) and lives in the LiveView
-  assigns, so nothing is persisted between sessions yet.
+  Requests are executed through `MDTClient.HttpClient.Core` and their persisted
+  history is read from `MDTClient.HttpClient.Resources`.
   """
   use MDTClientWeb, :live_view
 
-  alias MDTClient.HttpClient
+  alias MDTClient.HttpClient.Core
   alias MDTClient.HttpClient.Curl
+  alias MDTClient.HttpClient.Resources
+  alias MDTClient.HttpClient.Translation
+  alias MDTClient.HttpClient.Utils
   alias MDTClient.Tools
 
   @impl true
   def mount(_params, _session, socket) do
-    tabs = HttpClient.sample_tabs()
+    tabs = [Utils.new_request()]
 
     {:ok,
      socket
@@ -27,7 +30,6 @@ defmodule MDTClientWeb.HttpClientLive do
      |> assign(:dialog, nil)
      |> assign(:import_error, nil)
      |> assign(:term, "")
-     |> assign(:history, HttpClient.history())
      |> assign_history()
      |> sync_tab()}
   end
@@ -479,7 +481,7 @@ defmodule MDTClientWeb.HttpClientLive do
               "max-w-36 truncate text-xs",
               if(tab.id == @active_id, do: "text-ink", else: "text-muted")
             ]}>
-              {HttpClient.label(tab)}
+              {Utils.label(tab)}
             </span>
             <.icon
               :if={tab.state == :sending}
@@ -537,7 +539,7 @@ defmodule MDTClientWeb.HttpClientLive do
             ]}
           >
             <option
-              :for={method <- HttpClient.methods()}
+              :for={method <- Utils.methods()}
               value={method}
               selected={method == @tab.method}
             >
@@ -585,13 +587,13 @@ defmodule MDTClientWeb.HttpClientLive do
           tab={@tab}
           name="params"
           label="Params"
-          count={HttpClient.enabled_count(@tab.params)}
+          count={Utils.enabled_count(@tab.params)}
         />
         <.editor_tab
           tab={@tab}
           name="headers"
           label="Headers"
-          count={HttpClient.enabled_count(@tab.headers)}
+          count={Utils.enabled_count(@tab.headers)}
         />
         <.editor_tab tab={@tab} name="auth" label="Auth" />
         <.editor_tab tab={@tab} name="body" label="Body" />
@@ -748,7 +750,7 @@ defmodule MDTClientWeb.HttpClientLive do
           field={@form[:auth_type]}
           type="select"
           label="Type"
-          options={HttpClient.auth_types()}
+          options={Utils.auth_types()}
           value={@tab.auth_type}
         />
       </div>
@@ -787,7 +789,7 @@ defmodule MDTClientWeb.HttpClientLive do
           <.input
             field={@form[:body_type]}
             type="select"
-            options={HttpClient.body_types()}
+            options={Utils.body_types()}
             value={@tab.body_type}
           />
         </div>
@@ -973,7 +975,7 @@ defmodule MDTClientWeb.HttpClientLive do
          socket
          |> assign(:dialog, nil)
          |> assign(:import_error, nil)
-         |> open_tab(HttpClient.new_request(attrs))
+         |> open_tab(Utils.new_request(attrs))
          |> put_flash(:info, "Request imported from curl")}
 
       {:error, reason} ->
@@ -995,24 +997,39 @@ defmodule MDTClientWeb.HttpClientLive do
 
   @impl true
   def handle_event("clear_history", _params, socket) do
-    {:noreply, socket |> assign(:history, []) |> assign_history()}
+    :ok = Resources.clear()
+    {:noreply, assign_history(socket)}
   end
 
   @impl true
   def handle_event("open_history", %{"id" => id}, socket) do
-    entry = Enum.find(socket.assigns.history, &(&1.id == id))
     existing = Enum.find(socket.assigns.tabs, &(&1.source_id == id))
 
     cond do
-      existing -> {:noreply, socket |> assign(:active_id, existing.id) |> sync_tab()}
-      entry -> {:noreply, open_tab(socket, HttpClient.request_from_history(entry))}
-      true -> {:noreply, socket}
+      existing ->
+        {:noreply, socket |> assign(:active_id, existing.id) |> sync_tab()}
+
+      true ->
+        case Integer.parse(id) do
+          {identifier, ""} ->
+            case Resources.get(identifier) do
+              {:ok, entry} ->
+                {:noreply, open_tab(socket, Translation.request_from_history(entry))}
+
+              :error ->
+                {:noreply,
+                 socket |> assign_history() |> put_flash(:error, "History entry not found")}
+            end
+
+          :error ->
+            {:noreply, socket}
+        end
     end
   end
 
   @impl true
   def handle_event("new_tab", _params, socket) do
-    {:noreply, open_tab(socket, HttpClient.new_request())}
+    {:noreply, open_tab(socket, Utils.new_request())}
   end
 
   @impl true
@@ -1054,8 +1071,7 @@ defmodule MDTClientWeb.HttpClientLive do
   def handle_event("add_row", %{"kind" => kind}, socket) do
     key = rows_key(kind)
 
-    {:noreply,
-     update_active(socket, &Map.put(&1, key, Map.fetch!(&1, key) ++ [HttpClient.new_row()]))}
+    {:noreply, update_active(socket, &Map.put(&1, key, Map.fetch!(&1, key) ++ [Utils.new_row()]))}
   end
 
   @impl true
@@ -1096,24 +1112,57 @@ defmodule MDTClientWeb.HttpClientLive do
 
   @impl true
   def handle_event("cancel", _params, socket) do
-    {:noreply, update_active(socket, &%{&1 | state: :idle, pending: nil})}
+    case socket.assigns.tab do
+      %{pending: pending} when not is_nil(pending) ->
+        {:noreply,
+         socket
+         |> cancel_async(pending)
+         |> update_active(&%{&1 | state: :idle, pending: nil})}
+
+      _tab ->
+        {:noreply, socket}
+    end
   end
 
   @impl true
-  def handle_info({:response, tab_id, ref, response}, socket) do
+  def handle_async({:request, tab_id} = task, {:ok, {result, duration_ms}}, socket) do
     case Enum.find(socket.assigns.tabs, &(&1.id == tab_id)) do
-      %{pending: ^ref} = tab ->
-        entry = HttpClient.history_entry(tab, response)
-
+      %{pending: ^task} ->
         socket =
           put_tab(socket, tab_id, fn tab ->
-            %{tab | state: :idle, pending: nil, response: response, response_tab: "body"}
+            %{
+              tab
+              | state: :idle,
+                pending: nil,
+                response: Translation.response_view(result, duration_ms),
+                response_tab: "body"
+            }
           end)
 
-        {:noreply,
-         socket
-         |> assign(:history, [entry | socket.assigns.history])
-         |> assign_history()}
+        {:noreply, assign_history(socket)}
+
+      _stale ->
+        {:noreply, socket}
+    end
+  end
+
+  @impl true
+  def handle_async({:request, tab_id} = task, {:exit, reason}, socket) do
+    case Enum.find(socket.assigns.tabs, &(&1.id == tab_id)) do
+      %{pending: ^task} ->
+        socket =
+          put_tab(socket, tab_id, fn tab ->
+            %{
+              tab
+              | state: :idle,
+                pending: nil,
+                response:
+                  Translation.response_view({:error, RuntimeError.exception(inspect(reason))}, 0),
+                response_tab: "body"
+            }
+          end)
+
+        {:noreply, socket}
 
       _stale ->
         {:noreply, socket}
@@ -1136,22 +1185,21 @@ defmodule MDTClientWeb.HttpClientLive do
         socket
 
       true ->
-        response = HttpClient.perform(tab)
-        ref = make_ref()
+        request = Translation.to_req(tab)
+        task = {:request, tab.id}
 
-        schedule_response({:response, tab.id, ref, response}, response.duration_ms)
+        socket
+        |> put_tab(tab.id, &%{&1 | state: :sending, pending: task, response: nil})
+        |> start_async(task, fn ->
+          started_at = System.monotonic_time()
+          result = Core.request(request)
 
-        put_tab(socket, tab.id, &%{&1 | state: :sending, pending: ref, response: nil})
-    end
-  end
+          duration_ms =
+            (System.monotonic_time() - started_at)
+            |> System.convert_time_unit(:native, :millisecond)
 
-  # Responses land after the mocked latency, so a request can be seen in flight.
-  # Tests turn the wait off to stay deterministic.
-  defp schedule_response(message, duration_ms) do
-    if Application.get_env(:mdt_client, :simulate_latency, true) do
-      Process.send_after(self(), message, min(duration_ms, 900))
-    else
-      send(self(), message)
+          {result, duration_ms}
+        end)
     end
   end
 
@@ -1197,9 +1245,12 @@ defmodule MDTClientWeb.HttpClientLive do
   end
 
   defp assign_history(socket) do
-    entries = HttpClient.search_history(socket.assigns.history, socket.assigns.term)
+    entries =
+      socket.assigns.term
+      |> Resources.search()
+      |> Enum.map(&Translation.history_entry/1)
 
-    assign(socket, groups: HttpClient.group_history(entries), count: length(entries))
+    assign(socket, groups: Utils.group_history(entries), count: length(entries))
   end
 
   @scalar_fields ~w(method url body body_type auth_type auth_token auth_username auth_password)
@@ -1246,9 +1297,9 @@ defmodule MDTClientWeb.HttpClientLive do
   # Keeps a trailing empty row around, so there is always somewhere to type.
   defp ensure_blank_row(rows) do
     case List.last(rows) do
-      nil -> [HttpClient.new_row()]
+      nil -> [Utils.new_row()]
       %{key: "", value: ""} -> rows
-      _filled -> rows ++ [HttpClient.new_row()]
+      _filled -> rows ++ [Utils.new_row()]
     end
   end
 

@@ -1,17 +1,17 @@
 defmodule MDTClient.HttpClient.CurlTest do
   use ExUnit.Case, async: true
 
-  alias MDTClient.HttpClient
   alias MDTClient.HttpClient.Curl
+  alias MDTClient.HttpClient.Utils
 
   describe "to_curl/1" do
     test "renders method, url, params, headers, auth and body" do
       request =
-        HttpClient.new_request(%{
+        Utils.new_request(%{
           method: "POST",
           url: "https://api.mdt.dev/v1/orders",
-          params: [HttpClient.new_row("dry_run", "true"), HttpClient.new_row()],
-          headers: [HttpClient.new_row("Content-Type", "application/json"), HttpClient.new_row()],
+          params: [Utils.new_row("dry_run", "true"), Utils.new_row()],
+          headers: [Utils.new_row("Content-Type", "application/json"), Utils.new_row()],
           body_type: "json",
           body: ~s({"sku": "MDT-PRO"}),
           auth_type: "bearer",
@@ -29,9 +29,9 @@ defmodule MDTClient.HttpClient.CurlTest do
 
     test "skips disabled rows and empty bodies" do
       request =
-        HttpClient.new_request(%{
+        Utils.new_request(%{
           url: "https://mdt.dev",
-          headers: [%{HttpClient.new_row("X-Off", "1") | enabled: false}, HttpClient.new_row()],
+          headers: [%{Utils.new_row("X-Off", "1") | enabled: false}, Utils.new_row()],
           body_type: "json",
           body: ""
         })
@@ -44,7 +44,7 @@ defmodule MDTClient.HttpClient.CurlTest do
 
     test "uses --user for basic auth and escapes quotes" do
       request =
-        HttpClient.new_request(%{
+        Utils.new_request(%{
           url: "https://mdt.dev",
           auth_type: "basic",
           auth_username: "dev",
@@ -114,11 +114,11 @@ defmodule MDTClient.HttpClient.CurlTest do
 
     test "round trips a request" do
       request =
-        HttpClient.new_request(%{
+        Utils.new_request(%{
           method: "PUT",
           url: "https://api.mdt.dev/v1/users/42",
-          params: [HttpClient.new_row("verbose", "1"), HttpClient.new_row()],
-          headers: [HttpClient.new_row("Accept", "application/json"), HttpClient.new_row()],
+          params: [Utils.new_row("verbose", "1"), Utils.new_row()],
+          headers: [Utils.new_row("Accept", "application/json"), Utils.new_row()],
           body_type: "json",
           body: ~s({"name": "Ada"}),
           auth_type: "bearer",
