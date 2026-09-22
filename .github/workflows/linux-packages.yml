@@ -1,10 +1,9 @@
-name: Linux packages
+name: Release Linux packages
 
 on:
-  push:
-    branches:
-      - master
-  workflow_dispatch:
+  release:
+    types:
+      - published
 
 permissions:
   contents: read
@@ -28,8 +27,10 @@ jobs:
             path: dist/MDT-*.rpm
 
     steps:
-      - name: Check out repository
+      - name: Check out release tag
         uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.release.tag_name }}
 
       - name: Build ${{ matrix.label }} package
         run: ${{ matrix.script }}
@@ -37,11 +38,42 @@ jobs:
       - name: Record package checksum
         run: sha256sum ${{ matrix.path }}
 
-      - name: Upload ${{ matrix.label }} package
+      - name: Store ${{ matrix.label }} package for publishing
         uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.path }}
           if-no-files-found: error
-          retention-days: 90
+          retention-days: 1
           compression-level: 0
+
+  publish:
+    name: Attach packages to release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ github.event.release.tag_name }}
+
+    steps:
+      - name: Download built packages
+        uses: actions/download-artifact@v8
+        with:
+          pattern: MDT-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Create checksums
+        working-directory: release-assets
+        run: sha256sum -- ./*.deb ./*.rpm | tee SHA256SUMS
+
+      - name: Upload packages to GitHub Release
+        run: >-
+          gh release upload "$RELEASE_TAG"
+          release-assets/*.deb
+          release-assets/*.rpm
+          release-assets/SHA256SUMS
+          --clobber
+          --repo "$GITHUB_REPOSITORY"

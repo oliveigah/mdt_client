@@ -78,10 +78,12 @@ the system OpenSSL ABI. The RPM matches the development toolchain with Erlang
 CPU even when another computer performs the build. Docker keeps separate build
 caches for both packages.
 
-Every push to `master` runs the `Linux packages` GitHub Actions workflow. Its
-Debian and Fedora jobs build independently and upload `MDT-deb-amd64` and
-`MDT-rpm-x86_64` artifacts to the workflow run for 90 days. The workflow can
-also be started manually from the repository's **Actions** tab.
+Every push runs the `CI` GitHub Actions workflow. It executes `mix precommit`,
+including compilation with warnings treated as errors and the full test suite.
+
+Publishing a GitHub Release runs the `Release Linux packages` workflow. It
+checks out the release tag, builds the Debian and Fedora packages independently,
+and attaches the `.deb`, `.rpm`, and `SHA256SUMS` files directly to that release.
 
 ## Development
 
