@@ -1,0 +1,11 @@
+{
+  "permission": [
+    {
+      "identifier": "allow-set-webview-zoom",
+      "description": "Lets the interface ask WebKit to change its own zoom level, which is what the Ctrl/Cmd +, - and 0 shortcuts drive. Without it the app falls back to scaling the page with CSS, which keeps working but distorts pointer coordinates.",
+      "commands": {
+        "allow": ["set_webview_zoom"]
+      }
+    }
+  ]
+}

@@ -20,13 +20,13 @@ defmodule MDTClient.Tools do
     %{
       id: :git,
       name: "Git GUI",
-      tagline: "Stage, commit and browse history",
+      tagline: "Browse history, branches and changes",
       description:
-        "Review diffs, craft commits hunk by hunk and walk the history of any repository on your machine.",
+        "Open any repository in a tab, walk its commit graph, manage branches and stage, stash or commit exactly the files you pick.",
       icon: "hero-code-bracket-square",
       path: "/tools/git",
       shortcut: "2",
-      status: :soon
+      status: :ready
     }
   ]
 

@@ -82,6 +82,7 @@ defmodule MDTClientWeb do
       # Core UI components
       import MDTClientWeb.CoreComponents
       import MDTClientWeb.CodeComponents
+      import MDTClientWeb.PanelComponents
 
       # Common modules used in templates
       alias Phoenix.LiveView.JS

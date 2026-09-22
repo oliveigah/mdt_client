@@ -75,9 +75,42 @@ rewrite, it changes descendant object IDs and can stop for conflict resolution.
 
 ## File boundary
 
-Working-tree status, diffs, discard, and file-content access will live in
-`MDTClient.Git.Files`. Stage, unstage, and path-limited stash remain in
-`Git.Core`: they accept only repository paths and perform Git index or object
-database mutations. Keeping file content outside the core lets graph and branch
-state refresh independently from larger diff payloads, while both APIs can
-continue to share the same repository handle and command runner.
+`MDTClient.Git.Files` owns the working tree. Today it exposes one read-only
+function, `status/1`, which lists the changed repository paths as
+`MDTClient.Git.FileChange` structs:
+
+```elixir
+{:ok, changes} = MDTClient.Git.Files.status(repository)
+```
+
+Each change carries its path, the original path when Git detected a rename, and
+the state of both sides: `staged` is the difference between HEAD and the index,
+`unstaged` the difference between the index and the working tree. Either is
+`nil` when that side is unchanged, so a path can belong to the staged list, the
+unstaged list, or both. Untracked and conflicted paths are flagged separately
+because they need different actions. The underlying command is
+`git status --porcelain=v2 -z`, whose NUL terminated records keep file names
+with spaces, quotes, or newlines intact.
+
+Diffs, file contents, editing, and discard are deliberately still absent. Stage,
+unstage, and path-limited stash remain in `Git.Core`: they accept only
+repository paths and perform Git index or object database mutations. Keeping
+file content outside the core lets graph and branch state refresh independently
+from larger diff payloads, while both APIs share the same repository handle and
+command runner, so a tab's SSH agent applies to either.
+
+## Client
+
+`MDTClientWeb.GitLive` is the only consumer. It keeps one repository handle per
+tab, runs every command through `start_async/3` — refreshing the snapshot,
+status, and stash list in the same task — and turns a `%Error{kind: :conflict}`
+into the continue, skip, and abort panel. Lane assignment lives in
+`MDTClientWeb.GitLive.Graph.Layout`, a pure function from the commit list to
+rows, lanes, and edges.
+
+The graph is the primary surface: a right click, a row menu, or the inspector's
+Actions button opens the same commit menu, and every entry maps to one `Core`
+call. Folder selection goes through the Tauri dialog plugin; because the window
+loads the local Phoenix server over loopback, that call is only permitted by the
+`local-server` capability described in `README.md`. When the picker cannot run
+at all — a browser, say — the UI falls back to a dialog asking for a path.

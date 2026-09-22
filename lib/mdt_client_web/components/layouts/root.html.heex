@@ -18,7 +18,7 @@
     <script>
       // Applies the theme and panel sizes before the first paint, so the app
       // never flashes the wrong colors or layout. See Layouts.theme_toggle/1 and
-      // the ".Resize" hook in MDTClientWeb.HttpClientLive.
+      // the ".Resize" hook in MDTClientWeb.PanelComponents.
       (() => {
         const systemTheme = () => matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
 
@@ -45,7 +45,12 @@
           }
         });
 
-        for (const [key, variable] of [["mdt:history-width", "--history-width"], ["mdt:request-height", "--request-height"]]) {
+        for (const [key, variable] of [
+          ["mdt:history-width", "--history-width"],
+          ["mdt:request-height", "--request-height"],
+          ["mdt:git-branches-width", "--git-branches-width"],
+          ["mdt:git-inspector-width", "--git-inspector-width"],
+        ]) {
           const size = localStorage.getItem(key);
           if (size) { document.documentElement.style.setProperty(variable, size); }
         }

@@ -12,8 +12,17 @@ The app boots to a sign in screen (`/`), which leads to the tool picker
   tabbed requests, params/headers/auth/body editors, a response viewer, and
   curl import/export. `Ctrl+Enter` sends; the history and the request/response
   split are drag resizable.
-* **Git GUI** (`/tools/git`) — its repository, graph, branch, and history-operation
-  backend is available; the interface is still a placeholder.
+* **Git GUI** (`/tools/git`) — a repository tab per folder, over three resizable
+  panels: branches with tracking state on the left, a lane-drawn commit graph in
+  the middle, and an inspector on the right that switches between commit
+  metadata and the working tree. The graph is where work happens: right click
+  any commit (or use its row menu, or the inspector's Actions button) for
+  checkout, branch creation, cherry-pick, revert, merge, rebase, message edits
+  and resets. Refs sit in their own column beside the graph, a monitor marking a
+  local branch, a cloud a remote one and a tick the branch HEAD is on. The
+  working-tree mode stages, unstages and stashes the paths you select. Folders
+  are chosen with the native desktop picker, and each tab picks its own SSH
+  agent. `docs/git-backend.md` covers the backend it drives.
 
 Signing in takes a username and a password. The password is stretched into an
 encryption key, and everything that identity persists — today the HTTP client's
@@ -29,8 +38,19 @@ Both themes live in `assets/css/app.css` as one set of tokens: the dark values
 follow the "Oliveigah Dark" Zed theme and the light ones override them under
 `:root[data-theme="light"]`. The title bar toggle switches between dark, light
 and the system preference, and the script in `root.html.heex` applies the
-choice (along with the panel sizes dragged in the HTTP client) before the first
+choice (along with the panel sizes dragged in either tool) before the first
 paint.
+
+The interface is served by the embedded Phoenix server, so the webview's origin
+is `http://127.0.0.1:<port>` rather than the `tauri://` scheme. Tauri treats
+that as a *remote* origin and rejects every IPC call coming from it unless a
+capability names the origin explicitly, which is what
+`src-tauri/capabilities/local-server.json` does. Anything that calls into Rust
+has to be granted there: the folder picker through the dialog plugin, and
+`set_webview_zoom` through the app permission in `src-tauri/permissions/`.
+Without the grant the call is rejected, which is quiet — the zoom shortcuts, for
+instance, silently fall back to scaling the page with CSS. The Rust side has to
+be rebuilt for a new plugin, permission or capability to take effect.
 
 The desktop app has no browser chrome, so `assets/js/zoom.js` implements the
 usual zoom controls — `Ctrl`/`Cmd` with `+`, `-`, `0`, or the mouse wheel —
