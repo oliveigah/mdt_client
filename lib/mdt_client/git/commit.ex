@@ -1,7 +1,13 @@
 defmodule MDTClient.Git.Commit do
-  @moduledoc "Commit metadata used by the graph and commit inspector."
+  @moduledoc """
+  Commit metadata used by the graph and commit inspector.
+
+  `labels` holds every reference pointing at this commit: local and remote
+  branches, and the tags that resolve to it.
+  """
 
   alias MDTClient.Git.Branch
+  alias MDTClient.Git.Tag
 
   @enforce_keys [
     :id,
@@ -57,6 +63,6 @@ defmodule MDTClient.Git.Commit do
           body: String.t(),
           signature_status: signature_status(),
           signature_signer: String.t() | nil,
-          labels: [Branch.t()]
+          labels: [Branch.t() | Tag.t()]
         }
 end

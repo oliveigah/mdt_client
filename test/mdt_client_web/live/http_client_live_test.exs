@@ -107,6 +107,24 @@ defmodule MDTClientWeb.HttpClientLiveTest do
     assert render(view) =~ "x-ratelimit-remaining"
   end
 
+  test "tabs can be dragged into another order", %{view: view} do
+    view |> element("[phx-click=new_tab]") |> render_click()
+
+    [first, second] = tab_ids(view)
+    assert has_element?(view, "#request-tabs [data-sortable-id=#{first}][draggable=true]")
+
+    render_hook(view, "reorder_tabs", %{"order" => [second, first]})
+    assert tab_ids(view) == [second, first]
+  end
+
+  defp tab_ids(view) do
+    view
+    |> render()
+    |> LazyHTML.from_fragment()
+    |> LazyHTML.query("#request-tabs [data-sortable-id]")
+    |> LazyHTML.attribute("data-sortable-id")
+  end
+
   test "new and close tab", %{view: view} do
     view |> element("[phx-click=new_tab]") |> render_click()
     assert count(view, "[phx-click=select_tab]") == 2

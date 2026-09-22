@@ -3,9 +3,9 @@ defmodule MDTClient.Git.FileDiff do
   The diff of one repository path, on one side of the index.
 
   `side` is `:unstaged` for the difference between the index and the working
-  tree, and `:staged` for the difference between HEAD and the index. A diff with
-  no hunks is either unchanged on that side, or `binary?`, which Git refuses to
-  render as text. `truncated?` says the file changed more than the requested
+  tree, `:staged` for the difference between HEAD and the index, and `:commit`
+  for the change one commit made. A diff with no hunks is either unchanged on
+  that side, or `binary?`, which Git refuses to render as text. `truncated?` says the file changed more than the requested
   line budget and the tail was dropped.
   """
 
@@ -14,7 +14,7 @@ defmodule MDTClient.Git.FileDiff do
   @enforce_keys [:path, :side]
   defstruct [:path, :side, hunks: [], binary?: false, truncated?: false]
 
-  @type side :: :staged | :unstaged
+  @type side :: :staged | :unstaged | :commit
 
   @type t :: %__MODULE__{
           path: Path.t(),

@@ -28,6 +28,7 @@ defmodule MDTClient.Git.Core do
   alias MDTClient.Git.SSHKey
   alias MDTClient.Git.Snapshot
   alias MDTClient.Git.Stash
+  alias MDTClient.Git.Tag
 
   @default_graph_limit 500
   @maximum_graph_limit 5_000
@@ -63,6 +64,17 @@ defmodule MDTClient.Git.Core do
                    ],
                    "%00"
                  ) <> "%00%1e"
+
+  @tag_format Enum.join(
+                [
+                  "%(refname)",
+                  "%(refname:short)",
+                  "%(objectname)",
+                  "%(*objectname)",
+                  "%(objecttype)"
+                ],
+                "%00"
+              ) <> "%00%1e"
 
   @stash_format Enum.join(["%gd", "%H", "%gs", "%cI"], "%x00") <> "%x00%x1e"
 
@@ -191,7 +203,8 @@ defmodule MDTClient.Git.Core do
          {:ok, head} <- head(repository),
          {:ok, current_branch} <- current_branch(repository),
          {:ok, branches} <- list_branches(repository),
-         {:ok, commits} <- graph_with_branches(repository, branches, head, limit),
+         {:ok, tags} <- list_tags(repository),
+         {:ok, commits} <- graph_with_refs(repository, branches, tags, head, limit),
          {:ok, operation} <- operation(repository) do
       {:ok,
        %Snapshot{
@@ -200,9 +213,19 @@ defmodule MDTClient.Git.Core do
          current_branch: current_branch,
          detached?: not is_nil(head) and is_nil(current_branch),
          branches: branches,
+         tags: tags,
          commits: commits,
          operation: operation
        }}
+    end
+  end
+
+  @doc "Lists tags, resolved to the commits they point at."
+  @spec list_tags(Repository.t()) :: result([Tag.t()])
+  def list_tags(%Repository{} = repository) do
+    with {:ok, output} <-
+           Command.run(repository, ["for-each-ref", "refs/tags", "--format=#{@tag_format}"]) do
+      parse_tags(output)
     end
   end
 
@@ -225,8 +248,9 @@ defmodule MDTClient.Git.Core do
   def graph(%Repository{} = repository, opts \\ []) do
     with {:ok, limit} <- graph_limit(opts),
          {:ok, branches} <- list_branches(repository),
+         {:ok, tags} <- list_tags(repository),
          {:ok, head} <- head(repository) do
-      graph_with_branches(repository, branches, head, limit)
+      graph_with_refs(repository, branches, tags, head, limit)
     end
   end
 
@@ -235,6 +259,7 @@ defmodule MDTClient.Git.Core do
   def get_commit(%Repository{} = repository, revision) do
     with {:ok, commit_id} <- resolve_commit(repository, revision),
          {:ok, branches} <- list_branches(repository),
+         {:ok, tags} <- list_tags(repository),
          {:ok, output} <-
            Command.run(repository, [
              "show",
@@ -242,7 +267,7 @@ defmodule MDTClient.Git.Core do
              "--format=#{@commit_format}",
              commit_id
            ]),
-         {:ok, [commit]} <- parse_commits(output, labels_by_commit(branches)) do
+         {:ok, [commit]} <- parse_commits(output, labels_by_commit(branches, tags)) do
       {:ok, commit}
     else
       {:ok, commits} when is_list(commits) ->
@@ -765,7 +790,7 @@ defmodule MDTClient.Git.Core do
     end
   end
 
-  defp graph_with_branches(repository, branches, head, limit) do
+  defp graph_with_refs(repository, branches, tags, head, limit) do
     revisions = ["--all"] ++ if(is_nil(head), do: [], else: [head])
 
     with {:ok, output} <-
@@ -778,7 +803,7 @@ defmodule MDTClient.Git.Core do
                "--format=#{@commit_format}"
              ] ++ revisions
            ) do
-      parse_commits(output, labels_by_commit(branches))
+      parse_commits(output, labels_by_commit(branches, tags))
     end
   end
 
@@ -998,10 +1023,39 @@ defmodule MDTClient.Git.Core do
   defp signature_status("N"), do: :no_signature
   defp signature_status(_status), do: :unknown
 
-  defp labels_by_commit(branches) do
+  # A symbolic reference such as refs/remotes/origin/HEAD only repeats a branch
+  # that is already labelled, so it is left out.
+  defp labels_by_commit(branches, tags) do
     branches
     |> Enum.reject(& &1.symbolic_target)
+    |> Kernel.++(tags)
     |> Enum.group_by(& &1.target)
+  end
+
+  defp parse_tags(output) do
+    output
+    |> records()
+    |> Enum.reduce_while({:ok, []}, fn record, {:ok, tags} ->
+      case String.split(record, <<0>>, trim: false) do
+        [full_name, name, object, dereferenced, type, ""] ->
+          tag = %Tag{
+            name: name,
+            full_name: full_name,
+            object: object,
+            target: if(dereferenced == "", do: object, else: dereferenced),
+            annotated?: type == "tag"
+          }
+
+          {:cont, {:ok, [tag | tags]}}
+
+        _invalid ->
+          {:halt, {:error, Error.new(:invalid_output, "Git returned invalid tag data")}}
+      end
+    end)
+    |> case do
+      {:ok, tags} -> {:ok, Enum.sort_by(tags, &String.downcase(&1.name))}
+      error -> error
+    end
   end
 
   defp tracking_count(track, direction) do

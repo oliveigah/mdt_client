@@ -178,6 +178,49 @@ defmodule MDTClientWeb.GitLiveTest do
     |> Enum.map(&String.replace_prefix(&1, "git-tab-", ""))
   end
 
+  test "tabs can be dragged into another order", context do
+    %{view: view, path: path, base: base} = context
+
+    other = Path.join(base, "other")
+    File.mkdir_p!(other)
+    git!(other, ["init", "--initial-branch=main"])
+    git!(other, ["config", "user.name", "MDT Test"])
+    git!(other, ["config", "user.email", "mdt@example.test"])
+    commit_file(other, "other.txt", "other\n", "other commit")
+
+    open(view, path)
+    open(view, other)
+
+    [first, second] = tab_ids(view)
+    assert has_element?(view, "#git-tabs [data-sortable-id=#{first}][draggable=true]")
+
+    render_hook(view, "reorder_tabs", %{"order" => [second, first]})
+    assert tab_ids(view) == [second, first]
+
+    # An order naming tabs that are gone leaves the rest alone.
+    render_hook(view, "reorder_tabs", %{"order" => ["tab-gone", first]})
+    assert tab_ids(view) == [first, second]
+  end
+
+  test "a dragged order is what comes back next time", context do
+    %{view: view, path: path, base: base, conn: conn} = context
+
+    other = Path.join(base, "other")
+    File.mkdir_p!(other)
+    git!(other, ["init", "--initial-branch=main"])
+    open(view, path)
+    open(view, other)
+
+    [first, second] = tab_ids(view)
+    render_hook(view, "reorder_tabs", %{"order" => [second, first]})
+
+    {:ok, reopened, _html} = live(conn, ~p"/tools/git")
+    render_async(reopened)
+
+    assert [restored | _] = tab_ids(reopened)
+    assert reopened |> element("#git-tab-#{restored}") |> render() =~ Path.basename(other)
+  end
+
   ## Branches
 
   test "lists local and remote branches with the current one marked", context do
@@ -571,17 +614,82 @@ defmodule MDTClientWeb.GitLiveTest do
     assert has_element?(view, "#git-commit-columns")
   end
 
-  test "the current branch keeps its chip when a commit carries many refs", context do
+  test "refs on one commit collapse behind the one that matters most", context do
     %{view: view, path: path} = context
     for name <- ~w(alpha beta gamma delta), do: git!(path, ["branch", name])
 
     open(view, path)
 
-    row = view |> element("#git-commit-#{head_commit(path)}") |> render()
+    head = head_commit(path)
+    row = view |> element("#git-commit-#{head}") |> render()
 
-    # Two chips plus a counter, and the branch HEAD is on is never the one hidden.
+    # One chip stands for the lot, and it is the branch HEAD is on.
     assert row =~ "Current branch main"
-    assert row =~ "+3"
+    assert row =~ "+4"
+
+    # The rest are there to be picked once the column is hovered.
+    assert has_element?(view, "#git-refs-#{head}")
+    assert has_element?(view, "#git-ref-all-#{slug("refs/heads/alpha")}")
+
+    view |> element("#git-ref-all-#{slug("refs/heads/alpha")}") |> render_click()
+
+    assert has_element?(
+             view,
+             "#git-select-branch-#{slug("refs/heads/alpha")}[aria-selected=true]"
+           )
+  end
+
+  test "the trunk branches come before the rest", context do
+    %{view: view, path: path} = context
+    # Made in an order that only matches if the ranking is doing the work.
+    for name <- ~w(zebra dev master), do: git!(path, ["branch", name])
+
+    git!(path, ["checkout", "-qb", "feature"])
+    git!(path, ["tag", "v9"])
+    open(view, path)
+
+    # The current branch, then master, main and dev, then the rest, then tags.
+    assert ref_order(view, head_commit(path)) == [
+             "refs/heads/feature",
+             "refs/heads/master",
+             "refs/heads/main",
+             "refs/heads/dev",
+             "refs/heads/zebra",
+             "v9"
+           ]
+  end
+
+  defp ref_order(view, commit) do
+    view
+    |> render()
+    |> LazyHTML.from_fragment()
+    |> LazyHTML.query("#git-refs-#{commit} > *")
+    |> Enum.map(fn node ->
+      # Branches are buttons that carry the ref they select; a tag is just a chip.
+      case LazyHTML.attribute(node, "phx-value-name") do
+        [name] -> name
+        [] -> node |> LazyHTML.text() |> String.trim()
+      end
+    end)
+  end
+
+  test "tags are drawn in the graph alongside branches", context do
+    %{view: view, path: path, initial_commit: initial} = context
+    commit_file(path, "second.txt", "second\n", "second commit")
+    git!(path, ["tag", "v1.0.0", initial])
+    git!(path, ["tag", "-a", "v2.0.0", "-m", "release two"])
+
+    open(view, path)
+
+    tagged = view |> element("#git-commit-#{initial}") |> render()
+    assert tagged =~ "Tag v1.0.0"
+    assert tagged =~ "hero-tag-micro"
+
+    head = view |> element("#git-commit-#{head_commit(path)}") |> render()
+    assert head =~ "Annotated tag v2.0.0"
+
+    # A tag is a label, not something to select as a branch.
+    refute has_element?(view, "#git-ref-#{slug("refs/tags/v1.0.0")}")
   end
 
   ## Errors and conflicts
@@ -1040,10 +1148,83 @@ defmodule MDTClientWeb.GitLiveTest do
     view |> element("#git-close-diff") |> render_click()
 
     assert has_element?(view, "#git-select-commit-#{initial}")
-    view |> element("#git-select-commit-#{initial}") |> render_click()
-    assert has_element?(view, "#git-commit-details")
     refute has_element?(view, "#git-diff")
+
+    # The changes tab was open, so picking a commit keeps showing files, its own.
+    view |> element("#git-select-commit-#{initial}") |> render_click()
+    render_async(view)
+    assert has_element?(view, "#git-commit-changes")
+
+    view |> element("#git-panel-commit") |> render_click()
+    assert has_element?(view, "#git-commit-details")
   end
+
+  test "the changes tab shows what a commit did, and its files open a diff", context do
+    %{view: view, path: path, initial_commit: initial} = context
+
+    File.write!(Path.join(path, "README.md"), "rewritten\n")
+    File.write!(Path.join(path, "added.txt"), "added\n")
+    git!(path, ["add", "-A"])
+    git!(path, ["commit", "-m", "second commit"])
+    second = head_commit(path)
+
+    # Something uncommitted too, so the two views cannot be confused.
+    File.write!(Path.join(path, "dirty.txt"), "dirty\n")
+    open(view, path)
+
+    # With nothing picked the tab is about the working tree.
+    view |> element("#git-panel-changes") |> render_click()
+    assert has_element?(view, "#git-working-tree")
+    assert has_element?(view, "#git-file-unstaged-#{slug("dirty.txt")}")
+
+    view |> element("#git-select-commit-#{second}") |> render_click()
+    render_async(view)
+
+    assert has_element?(view, "#git-commit-changes")
+    refute has_element?(view, "#git-working-tree")
+    assert has_element?(view, "#git-commit-file-#{slug("README.md")}")
+    assert has_element?(view, "#git-commit-file-#{slug("added.txt")}")
+    refute has_element?(view, "#git-commit-file-#{slug("dirty.txt")}")
+
+    # Browsing on keeps the file list, now for the other commit.
+    view |> element("#git-select-commit-#{initial}") |> render_click()
+    render_async(view)
+
+    assert has_element?(view, "#git-commit-file-#{slug("README.md")}")
+    refute has_element?(view, "#git-commit-file-#{slug("added.txt")}")
+
+    view |> element("#git-show-working-tree") |> render_click()
+    assert has_element?(view, "#git-working-tree")
+  end
+
+  test "a file in a commit opens that commit's diff", context do
+    %{view: view, path: path} = context
+    File.write!(Path.join(path, "README.md"), "rewritten\n")
+    git!(path, ["commit", "-am", "rewrite"])
+    head = head_commit(path)
+
+    open(view, path)
+    view |> element("#git-select-commit-#{head}") |> render_click()
+    view |> element("#git-panel-changes") |> render_click()
+    render_async(view)
+
+    view |> element("#git-commit-file-#{slug("README.md")}") |> render_click()
+    render_async(view)
+
+    assert has_element?(view, "#git-diff")
+    body = view |> element("#git-diff-body") |> render()
+    assert body =~ "rewritten"
+    assert body =~ "initial"
+
+    # A commit diff has one side, so the working tree toggles stay away.
+    assert view |> element("#git-diff") |> render() =~ short_id(head)
+    refute has_element?(view, "#git-diff-side-staged")
+
+    view |> element("#git-close-diff") |> render_click()
+    assert has_element?(view, "#git-commit-changes")
+  end
+
+  defp short_id(id), do: String.slice(id, 0, 7)
 
   ## Sessions and background refresh
 

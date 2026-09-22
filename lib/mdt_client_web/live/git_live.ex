@@ -207,6 +207,17 @@ defmodule MDTClientWeb.GitLive do
   end
 
   @impl true
+  def handle_event("reorder_tabs", %{"order" => order}, socket) when is_list(order) do
+    tabs = MDTClientWeb.Tabs.reorder(socket.assigns.tabs, order)
+
+    {:noreply,
+     socket
+     |> assign(:tabs, tabs)
+     |> assign(:restore_order, Enum.map(tabs, & &1.path))
+     |> remember_session()}
+  end
+
+  @impl true
   def handle_event("close_tab", %{"id" => id}, socket) do
     socket =
       case find_tab(socket, id) do
@@ -234,8 +245,21 @@ defmodule MDTClientWeb.GitLive do
 
   @impl true
   def handle_event("select_commit", %{"id" => id}, socket) do
-    {:noreply,
-     update_tab(socket, &%{&1 | selected_commit: id, panel: "commit", menu: nil, diff: nil})}
+    socket =
+      update_tab(socket, fn tab ->
+        %{
+          tab
+          | selected_commit: id,
+            # Browsing commits with the file list open should keep showing files.
+            panel: if(tab.panel == "changes", do: "changes", else: "commit"),
+            changes_scope: :commit,
+            commit_changes: nil,
+            menu: nil,
+            diff: nil
+        }
+      end)
+
+    {:noreply, refresh_reads(socket)}
   end
 
   @impl true
@@ -250,7 +274,16 @@ defmodule MDTClientWeb.GitLive do
 
   @impl true
   def handle_event("set_panel", %{"panel" => panel}, socket) when panel in ~w(commit changes) do
-    {:noreply, update_tab(socket, &%{&1 | panel: panel, action: nil})}
+    {:noreply, refresh_reads(update_tab(socket, &%{&1 | panel: panel, action: nil}))}
+  end
+
+  @impl true
+  def handle_event("show_working_tree", _params, socket) do
+    {:noreply,
+     update_tab(
+       socket,
+       &%{&1 | changes_scope: :working_tree, panel: "changes", diff: nil, menu: nil}
+     )}
   end
 
   @impl true
@@ -408,17 +441,21 @@ defmodule MDTClientWeb.GitLive do
   end
 
   @impl true
-  def handle_event("view_diff", %{"path" => path, "side" => side}, socket) do
+  def handle_event("view_diff", %{"path" => path, "side" => side} = params, socket) do
     case {socket.assigns.tab, diff_side(side)} do
       {%{} = tab, side} when not is_nil(side) ->
-        socket =
-          put_tab(
-            socket,
-            tab.id,
-            &%{&1 | diff: %{path: path, side: side, diff: nil, error: nil, pinned?: true}}
-          )
+        open = %{
+          path: path,
+          side: side,
+          commit: params["commit"],
+          diff: nil,
+          error: nil,
+          pinned?: true
+        }
 
-        {:noreply, refresh_diff(socket)}
+        socket = put_tab(socket, tab.id, &%{&1 | diff: open})
+
+        {:noreply, refresh_reads(socket)}
 
       _unknown ->
         {:noreply, socket}
@@ -756,6 +793,8 @@ defmodule MDTClientWeb.GitLive do
       commit_message: "",
       stashes_open?: true,
       diff: nil,
+      commit_changes: nil,
+      changes_scope: :working_tree,
       include_untracked?: true,
       ssh_private_key: private_key,
       ssh_public_key: public_key,
@@ -813,7 +852,12 @@ defmodule MDTClientWeb.GitLive do
     task = {:git, tab.id, System.unique_integer([:positive])}
     repository = tab.repository
     limit = tab.limit
-    diff = tab.diff && Map.take(tab.diff, [:path, :side, :pinned?])
+
+    reads = %{
+      diff: tab.diff && Map.take(tab.diff, [:path, :side, :commit, :pinned?]),
+      commit: commit_changes_wanted(tab)
+    }
+
     # A refresh on a timer should not flash a spinner over the toolbar.
     label = if Keyword.get(opts, :quiet, false), do: nil, else: label(action)
 
@@ -822,12 +866,19 @@ defmodule MDTClientWeb.GitLive do
       tab.id,
       &%{&1 | pending: task, pending_label: label, menu: nil, confirm: nil, error: nil}
     )
-    |> start_async(task, fn -> {perform(repository, action), load(repository, limit, diff)} end)
+    |> start_async(task, fn -> {perform(repository, action), load(repository, limit, reads)} end)
   end
 
   # Every command reloads the state it may have changed, so the UI never shows a
   # result without the snapshot that produced it.
-  defp load(repository, limit, diff \\ nil) do
+  # The file list of a commit is only fetched while it is on screen; the graph
+  # does not need it, and it is one more Git process per refresh.
+  defp commit_changes_wanted(%{panel: "changes", changes_scope: :commit} = tab),
+    do: tab.selected_commit
+
+  defp commit_changes_wanted(_tab), do: nil
+
+  defp load(repository, limit, reads \\ %{diff: nil, commit: nil}) do
     with {:ok, snapshot} <- Core.snapshot(repository, limit: limit),
          {:ok, changes} <- Files.status(repository),
          {:ok, stashes} <- Core.list_stashes(repository),
@@ -838,9 +889,20 @@ defmodule MDTClientWeb.GitLive do
          changes: changes,
          stashes: stashes,
          remotes: remotes,
-         diff: load_diff(repository, changes, diff)
+         diff: load_diff(repository, changes, reads.diff),
+         commit_changes: load_commit_changes(repository, reads.commit)
        }}
     end
+  end
+
+  defp load_commit_changes(_repository, nil), do: nil
+
+  defp load_commit_changes(repository, commit),
+    do: {commit, Files.commit_status(repository, commit)}
+
+  # A diff of a commit is history, so the working tree has no say in it.
+  defp load_diff(repository, _changes, %{commit: commit} = request) when is_binary(commit) do
+    {request, Files.diff(repository, request.path, side: :commit, commit: commit)}
   end
 
   # The open diff travels with the rest of the state, so staging a file updates
@@ -931,25 +993,30 @@ defmodule MDTClientWeb.GitLive do
 
     socket
     |> put_tab(tab.id, fn _current -> tab end)
-    |> refresh_diff(state)
+    |> refresh_reads(state)
   end
 
-  # A diff opened while a command was running is left waiting for an answer, so
-  # it is fetched as soon as the tab is free again.
-  defp refresh_diff(socket) do
+  # A diff or a commit file list asked for while a command was running is left
+  # waiting for an answer, so it is fetched as soon as the tab is free again.
+  defp refresh_reads(socket) do
     case socket.assigns.tab do
-      %{diff: %{diff: nil, error: nil}, pending: nil} = tab ->
-        run(socket, tab, :refresh, quiet: true)
+      %{pending: nil} = tab ->
+        if waiting_on_read?(tab), do: run(socket, tab, :refresh, quiet: true), else: socket
 
-      _settled ->
+      _busy ->
         socket
     end
   end
 
   # After a load that failed there is nothing to chase: the repository itself is
   # unreadable, and asking again would only spin.
-  defp refresh_diff(socket, {:ok, _state}), do: refresh_diff(socket)
-  defp refresh_diff(socket, _failed), do: socket
+  defp refresh_reads(socket, {:ok, _state}), do: refresh_reads(socket)
+  defp refresh_reads(socket, _failed), do: socket
+
+  defp waiting_on_read?(tab) do
+    match?(%{diff: nil, error: nil}, tab.diff) or
+      (not is_nil(commit_changes_wanted(tab)) and is_nil(tab.commit_changes))
+  end
 
   defp apply_state(tab, {:ok, state}) do
     snapshot = state.snapshot
@@ -967,7 +1034,8 @@ defmodule MDTClientWeb.GitLive do
         selected_commit: keep_commit(tab, snapshot, commits),
         selected_branch: keep_branch(tab, snapshot, branches),
         selected_paths: MapSet.intersection(tab.selected_paths, paths),
-        diff: keep_diff(tab, state.diff)
+        diff: keep_diff(tab, state.diff),
+        commit_changes: keep_commit_changes(tab, state.commit_changes)
     }
   end
 
@@ -984,6 +1052,15 @@ defmodule MDTClientWeb.GitLive do
   end
 
   defp keep_diff(tab, _stale), do: tab.diff
+
+  # An answer about a commit that is no longer selected is of no use.
+  defp keep_commit_changes(%{selected_commit: commit} = _tab, {commit, {:ok, files}}),
+    do: %{commit: commit, files: files, error: nil}
+
+  defp keep_commit_changes(%{selected_commit: commit} = _tab, {commit, {:error, error}}),
+    do: %{commit: commit, files: [], error: error}
+
+  defp keep_commit_changes(tab, _stale), do: tab.commit_changes
 
   defp keep_commit(tab, snapshot, commits) do
     cond do
@@ -1204,6 +1281,7 @@ defmodule MDTClientWeb.GitLive do
 
   defp diff_side("staged"), do: :staged
   defp diff_side("unstaged"), do: :unstaged
+  defp diff_side("commit"), do: :commit
   defp diff_side(_side), do: nil
 
   defp nil_if_empty(""), do: nil

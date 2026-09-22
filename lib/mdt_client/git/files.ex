@@ -164,6 +164,74 @@ defmodule MDTClient.Git.Files do
   end
 
   @doc """
+  Lists the paths one commit changed, newest side first.
+
+  The result reuses `MDTClient.Git.FileChange` so a commit reads like any other
+  set of changes: the kind of change sits in `staged`, because everything in a
+  commit is already recorded. A merge is compared against its first parent,
+  which is what the merge brought onto the branch.
+  """
+  @spec commit_status(Repository.t(), String.t()) ::
+          {:ok, [FileChange.t()]} | {:error, Error.t()}
+  def commit_status(%Repository{} = repository, revision) do
+    with {:ok, revision} <- revision_argument(revision),
+         {:ok, output} <-
+           Command.run(repository, [
+             "diff-tree",
+             "--no-commit-id",
+             "--name-status",
+             "--find-renames",
+             "--root",
+             "-r",
+             "-z",
+             "--diff-merges=first-parent",
+             revision
+           ]) do
+      collect_commit_changes(String.split(output, <<0>>), [])
+    end
+  end
+
+  defp collect_commit_changes([], acc), do: {:ok, Enum.sort_by(acc, & &1.path)}
+  defp collect_commit_changes([""], acc), do: collect_commit_changes([], acc)
+  defp collect_commit_changes(["" | rest], acc), do: collect_commit_changes(rest, acc)
+
+  # A rename or a copy names both sides, so it spans three records instead of two.
+  defp collect_commit_changes(
+         [<<letter::binary-size(1), _score::binary>> = code, original, path | rest],
+         acc
+       )
+       when letter in ["R", "C"] and path != "" do
+    case Map.fetch(@states, letter) do
+      {:ok, state} ->
+        change = %FileChange{path: path, original_path: original, staged: state}
+        collect_commit_changes(rest, [change | acc])
+
+      :error ->
+        invalid(code)
+    end
+  end
+
+  defp collect_commit_changes([code, path | rest], acc) when path != "" do
+    case Map.fetch(@states, code) do
+      {:ok, state} -> collect_commit_changes(rest, [%FileChange{path: path, staged: state} | acc])
+      :error -> invalid(code)
+    end
+  end
+
+  defp collect_commit_changes([record | _rest], _acc), do: invalid(record)
+
+  defp revision_argument(revision) when is_binary(revision) and revision != "" do
+    if String.starts_with?(revision, "-") or String.contains?(revision, <<0>>) do
+      {:error, Error.new(:invalid_argument, "Invalid revision")}
+    else
+      {:ok, revision}
+    end
+  end
+
+  defp revision_argument(_revision),
+    do: {:error, Error.new(:invalid_argument, "Revision must be a non-empty string")}
+
+  @doc """
   Returns the unified diff of one repository path.
 
   `:side` selects which half of the change to read: `:unstaged` (the default)
@@ -177,16 +245,38 @@ defmodule MDTClient.Git.Files do
     with {:ok, side} <- diff_side(Keyword.get(opts, :side, :unstaged)),
          {:ok, limit} <- line_limit(Keyword.get(opts, :lines, @default_line_limit)),
          {:ok, relative} <- repository_path(repository, path),
-         {:ok, output} <-
-           read_diff(repository, side, relative, Keyword.get(opts, :untracked, false)) do
+         {:ok, output} <- read(repository, relative, side, opts) do
       {:ok, parse_diff(output, path, side, limit)}
     end
   end
 
-  defp diff_side(side) when side in [:staged, :unstaged], do: {:ok, side}
+  defp read(repository, relative, side, opts) do
+    case Keyword.get(opts, :commit) do
+      nil -> read_diff(repository, side, relative, Keyword.get(opts, :untracked, false))
+      revision -> read_commit_diff(repository, revision, relative)
+    end
+  end
+
+  defp read_commit_diff(repository, revision, relative) do
+    with {:ok, revision} <- revision_argument(revision) do
+      Command.run(repository, [
+        "show",
+        "--no-color",
+        "--no-ext-diff",
+        "--format=",
+        "--find-renames",
+        "--diff-merges=first-parent",
+        revision,
+        "--",
+        pathspec(relative)
+      ])
+    end
+  end
+
+  defp diff_side(side) when side in [:staged, :unstaged, :commit], do: {:ok, side}
 
   defp diff_side(_side),
-    do: {:error, Error.new(:invalid_argument, "Diff side must be :staged or :unstaged")}
+    do: {:error, Error.new(:invalid_argument, "Diff side must be :staged, :unstaged, or :commit")}
 
   defp line_limit(lines) when is_integer(lines) and lines > 0, do: {:ok, lines}
 

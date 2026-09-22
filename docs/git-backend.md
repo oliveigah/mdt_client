@@ -39,8 +39,10 @@ transport and offers the equivalent `git@host:path` URL for HTTP(S) remotes.
 
 - local and remote branches, including the current branch, upstream, ahead and
   behind counts, target commit, and symbolic remote references;
+- tags, resolved through annotated tag objects to the commits they name;
 - commits in topological order, with parents, author and committer metadata,
-  message, signature state, and every branch label pointing at the commit;
+  message, signature state, and every label pointing at the commit, branch or
+  tag;
 - HEAD and detached-state information; and
 - a merge, rebase, cherry-pick, revert, or bisect operation currently in
   progress.
@@ -98,7 +100,13 @@ because they need different actions. The underlying command is
 `git status --porcelain=v2 -z`, whose NUL terminated records keep file names
 with spaces, quotes, or newlines intact.
 
-`diff/3` reads one path at a time, on one side of the index:
+`commit_status/2` answers the same question for history: the paths one commit
+changed, in the same `FileChange` shape, with the kind of change in `staged`
+because everything in a commit is recorded. A merge is compared against its
+first parent, which is what it brought onto the branch.
+
+`diff/3` reads one path at a time, on one side of the index, or the change a
+commit made to it with `commit: revision`:
 
 ```elixir
 {:ok, diff} = MDTClient.Git.Files.diff(repository, "lib/app.ex", side: :staged)
@@ -128,12 +136,16 @@ into the continue, skip, and abort panel. Lane assignment lives in
 `MDTClientWeb.GitLive.Graph.Layout`, a pure function from the commit list to
 rows, lanes, and edges.
 
-The graph is the primary surface: a right click, a row menu, or the inspector's
+Refs pointing at the same commit collapse to the one that matters most — the
+branch HEAD is on, then master, main or dev, then the rest, then tags — with the
+others a hover away. The graph is the primary surface: a right click, a row menu, or the inspector's
 Actions button opens the same commit menu, and every entry maps to one `Core`
 call. A dirty worktree takes a row of its own above the newest commit, drawn by
 `Layout.pending_row/1`, and opening a file diff replaces the graph until it is
-closed. The open folders are remembered by `MDTClientWeb.GitLive.Session`, and a
-timer refreshes the active tab so work done outside MDT appears on its own. Folder selection goes through the Tauri dialog plugin; because the window loads
+closed. The open folders are remembered by `MDTClientWeb.GitLive.Session`, and a timer
+refreshes the active tab so work done outside MDT appears on its own. Selecting
+a commit points the changes panel at that commit's files rather than the working
+tree, and picking one of them opens the same diff view. Folder selection goes through the Tauri dialog plugin; because the window loads
 the local Phoenix server over loopback, that call is only permitted by the
 `local-server` capability described in `README.md`. The same chooser offers
 `Core.clone/3` for a repository that is not on this machine yet, and falls back

@@ -2,10 +2,13 @@ defmodule MDTClientWeb.PanelComponents do
   @moduledoc """
   Building blocks shared by the tool workspaces.
 
-  For now that is the drag handle used to resize a neighbouring panel. Sizes are
-  written to a CSS variable on `<html>`, outside anything LiveView patches, and
-  persisted in local storage so they survive navigation and restarts. The
-  pre-paint script in `root.html.heex` reads the same keys back.
+  Two things live here: the drag handle used to resize a neighbouring panel, and
+  the tab strip both tools use so their tabs can be dragged into another order.
+
+  Panel sizes are written to a CSS variable on `<html>`, outside anything
+  LiveView patches, and persisted in local storage so they survive navigation
+  and restarts. The pre-paint script in `root.html.heex` reads the same keys
+  back.
   """
   use Phoenix.Component
 
@@ -175,5 +178,133 @@ defmodule MDTClientWeb.PanelComponents do
       }
     </script>
     """
+  end
+
+  @doc """
+  A strip of tabs that can be dragged into another order.
+
+  Each child must carry `draggable="true"` and a `data-sortable-id`. Dropping
+  pushes `event` with the identifiers in their new order, which the LiveView
+  applies; nothing is reordered in the browser, so the list on screen is always
+  the one the server knows about.
+
+  ## Examples
+
+      <.tab_strip id="git-tabs" event="reorder_tabs" class="flex">
+        <div :for={tab <- @tabs} draggable="true" data-sortable-id={tab.id}>...</div>
+      </.tab_strip>
+  """
+  attr :id, :string, required: true
+  attr :event, :string, default: "reorder_tabs"
+  attr :class, :any, default: nil
+  attr :rest, :global
+
+  slot :inner_block, required: true
+
+  def tab_strip(assigns) do
+    ~H"""
+    <div id={@id} phx-hook=".Reorder" data-event={@event} class={@class} {@rest}>
+      {render_slot(@inner_block)}
+    </div>
+    <script :type={Phoenix.LiveView.ColocatedHook} name=".Reorder">
+      export default {
+        mounted() {
+          this.dragged = null
+
+          this.el.addEventListener("dragstart", (event) => {
+            const item = this.item(event.target)
+            if (!item) return
+
+            this.dragged = item.dataset.sortableId
+            item.setAttribute("data-dragging", "")
+            event.dataTransfer.effectAllowed = "move"
+            event.dataTransfer.setData("text/plain", this.dragged)
+          })
+
+          this.el.addEventListener("dragover", (event) => {
+            if (!this.dragged) return
+
+            event.preventDefault()
+            event.dataTransfer.dropEffect = "move"
+            const over = this.item(event.target)
+            this.mark(over, over && this.past(event, over))
+          })
+
+          this.el.addEventListener("drop", (event) => {
+            if (!this.dragged) return
+
+            event.preventDefault()
+            const over = this.item(event.target)
+            const order = this.order(over, over && this.past(event, over))
+            this.clear()
+
+            if (order) this.pushEvent(this.el.dataset.event, {order})
+          })
+
+          this.el.addEventListener("dragend", () => this.clear())
+          this.el.addEventListener("dragleave", (event) => {
+            if (!this.el.contains(event.relatedTarget)) this.mark(null)
+          })
+        },
+
+        destroyed() { this.clear() },
+
+        item(target) {
+          const item = target.closest && target.closest("[data-sortable-id]")
+          return item && this.el.contains(item) ? item : null
+        },
+
+        items() {
+          return Array.from(this.el.querySelectorAll("[data-sortable-id]"))
+        },
+
+        // Past the middle of a tab means the dragged one belongs after it.
+        past(event, item) {
+          const box = item.getBoundingClientRect()
+          return event.clientX > box.left + box.width / 2
+        },
+
+        order(over, past) {
+          const ids = this.items().map((item) => item.dataset.sortableId)
+          const rest = ids.filter((id) => id !== this.dragged)
+
+          if (!over) return [...rest, this.dragged]
+
+          const index = rest.indexOf(over.dataset.sortableId)
+          if (index < 0) return null
+
+          rest.splice(past ? index + 1 : index, 0, this.dragged)
+          return rest
+        },
+
+        mark(over, past) {
+          for (const item of this.items()) {
+            if (item === over && item.dataset.sortableId !== this.dragged) {
+              item.setAttribute("data-drop", past ? "after" : "before")
+            } else {
+              item.removeAttribute("data-drop")
+            }
+          }
+        },
+
+        clear() {
+          this.dragged = null
+          for (const item of this.items()) {
+            item.removeAttribute("data-drop")
+            item.removeAttribute("data-dragging")
+          }
+        }
+      }
+    </script>
+    """
+  end
+
+  @doc "The classes a draggable tab needs for its drag and drop states."
+  def tab_drag_classes do
+    [
+      "data-[dragging]:opacity-40",
+      "data-[drop=before]:shadow-[inset_2px_0_0_0_var(--color-accent)]",
+      "data-[drop=after]:shadow-[inset_-2px_0_0_0_var(--color-accent)]"
+    ]
   end
 end

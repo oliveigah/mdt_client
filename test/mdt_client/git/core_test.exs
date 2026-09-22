@@ -8,6 +8,7 @@ defmodule MDTClient.Git.CoreTest do
   alias MDTClient.Git.Error
   alias MDTClient.Git.Repository
   alias MDTClient.Git.Stash
+  alias MDTClient.Git.Tag
 
   setup :initialized_repository
 
@@ -406,6 +407,59 @@ defmodule MDTClient.Git.CoreTest do
       assert Core.clone_name("/srv/git/local-repo") == "local-repo"
       assert Core.clone_name("") == ""
       assert Core.clone_name(nil) == ""
+    end
+  end
+
+  describe "tags" do
+    test "lists lightweight and annotated tags resolved to their commits", context do
+      %{path: path, repository: repository, initial_commit: initial} = context
+      second = commit_file(path, "second.txt", "second\n", "second commit")
+
+      git!(path, ["tag", "plain", initial])
+      git!(path, ["tag", "-a", "release", "-m", "the first release"])
+
+      assert {:ok, tags} = Core.list_tags(repository)
+      assert [%Tag{name: "plain"}, %Tag{name: "release"}] = Enum.sort_by(tags, & &1.name)
+
+      plain = Enum.find(tags, &(&1.name == "plain"))
+      assert plain.full_name == "refs/tags/plain"
+      assert plain.target == initial
+      assert plain.object == initial
+      refute plain.annotated?
+
+      release = Enum.find(tags, &(&1.name == "release"))
+      assert release.target == second
+      assert release.object != second
+      assert release.annotated?
+    end
+
+    test "a snapshot carries tags and labels the commits they point at", context do
+      %{path: path, repository: repository, initial_commit: initial} = context
+      commit_file(path, "second.txt", "second\n", "second commit")
+      git!(path, ["tag", "v1", initial])
+
+      assert {:ok, snapshot} = Core.snapshot(repository)
+      assert [%Tag{name: "v1"}] = snapshot.tags
+
+      tagged = Enum.find(snapshot.commits, &(&1.id == initial))
+      assert Enum.any?(tagged.labels, &match?(%Tag{name: "v1"}, &1))
+
+      # Branch labels are untouched by the addition.
+      head = List.first(snapshot.commits)
+      assert Enum.any?(head.labels, &match?(%{name: "main"}, &1))
+    end
+
+    test "get_commit labels a commit with its tags", context do
+      %{path: path, repository: repository, initial_commit: initial} = context
+      git!(path, ["tag", "-a", "annotated", "-m", "note", initial])
+
+      assert {:ok, commit} = Core.get_commit(repository, initial)
+      assert Enum.any?(commit.labels, &match?(%Tag{name: "annotated", annotated?: true}, &1))
+    end
+
+    test "a repository with no tags reports none", %{repository: repository} do
+      assert {:ok, []} = Core.list_tags(repository)
+      assert {:ok, %{tags: []}} = Core.snapshot(repository)
     end
   end
 end

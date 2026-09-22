@@ -593,12 +593,15 @@ defmodule MDTClientWeb.HttpClientLive do
         <.icon name="hero-chevron-double-right" class="size-3.5" />
       </button>
 
-      <div class="flex min-w-0 flex-1 items-stretch overflow-x-auto">
+      <.tab_strip id="request-tabs" class="flex min-w-0 flex-1 items-stretch overflow-x-auto">
         <div
           :for={tab <- @tabs}
+          draggable="true"
+          data-sortable-id={tab.id}
           class={[
             "group flex shrink-0 items-center border-r border-line-soft transition-colors",
-            if(tab.id == @active_id, do: "bg-deep", else: "hover:bg-hover")
+            if(tab.id == @active_id, do: "bg-deep", else: "hover:bg-hover"),
+            tab_drag_classes()
           ]}
         >
           <button
@@ -632,7 +635,7 @@ defmodule MDTClientWeb.HttpClientLive do
             <.icon name="hero-x-mark" class="size-3" />
           </button>
         </div>
-      </div>
+      </.tab_strip>
 
       <button
         type="button"
@@ -1313,6 +1316,11 @@ defmodule MDTClientWeb.HttpClientLive do
   @impl true
   def handle_event("select_tab", %{"id" => id}, socket) do
     {:noreply, socket |> assign(:active_id, id) |> sync_tab()}
+  end
+
+  @impl true
+  def handle_event("reorder_tabs", %{"order" => order}, socket) when is_list(order) do
+    {:noreply, assign(socket, :tabs, MDTClientWeb.Tabs.reorder(socket.assigns.tabs, order))}
   end
 
   @impl true

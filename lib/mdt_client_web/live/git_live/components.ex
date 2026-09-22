@@ -11,6 +11,7 @@ defmodule MDTClientWeb.GitLive.Components do
   alias MDTClient.Git.FileChange
   alias MDTClient.Git.FileDiff
   alias MDTClient.Git.Operation
+  alias MDTClient.Git.Tag
   alias MDTClientWeb.GitLive.Graph.Layout
 
   @row_height 28
@@ -39,12 +40,19 @@ defmodule MDTClientWeb.GitLive.Components do
   def tab_bar(assigns) do
     ~H"""
     <div id="git-tab-bar" class="flex h-9 shrink-0 items-stretch border-b border-line-soft bg-panel">
-      <div id="git-tabs" role="tablist" class="flex min-w-0 flex-1 items-stretch overflow-x-auto">
+      <.tab_strip
+        id="git-tabs"
+        role="tablist"
+        class="flex min-w-0 flex-1 items-stretch overflow-x-auto"
+      >
         <div
           :for={tab <- @tabs}
+          draggable="true"
+          data-sortable-id={tab.id}
           class={[
             "group flex shrink-0 items-center border-r border-line-soft transition-colors",
-            if(tab.id == @active_id, do: "bg-deep", else: "hover:bg-hover")
+            if(tab.id == @active_id, do: "bg-deep", else: "hover:bg-hover"),
+            tab_drag_classes()
           ]}
         >
           <button
@@ -89,7 +97,7 @@ defmodule MDTClientWeb.GitLive.Components do
             <.icon name="hero-x-mark" class="size-3" />
           </button>
         </div>
-      </div>
+      </.tab_strip>
 
       <button
         type="button"
@@ -1144,17 +1152,19 @@ defmodule MDTClientWeb.GitLive.Components do
     <div
       id="git-wip-row"
       class={[
-        "group relative flex items-center transition-colors",
-        if(@tab.panel == "changes", do: "bg-active", else: "hover:bg-hover")
+        "group relative flex items-center border-b border-line-soft/40 transition-colors",
+        if(@tab.panel == "changes" and not commit_scoped?(@tab),
+          do: "bg-accent-soft/50 shadow-[inset_2px_0_0_0_var(--color-accent)]",
+          else: "hover:bg-hover/70"
+        )
       ]}
       style={"height: #{row_height()}px"}
     >
       <button
         type="button"
         id="git-select-wip"
-        phx-click="set_panel"
-        phx-value-panel="changes"
-        aria-pressed={to_string(@tab.panel == "changes")}
+        phx-click="show_working_tree"
+        aria-pressed={to_string(@tab.panel == "changes" and not commit_scoped?(@tab))}
         title="Uncommitted changes in the working tree"
         class="flex h-full min-w-0 flex-1 cursor-pointer items-center gap-2 pl-2 pr-1 text-left focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
       >
@@ -1194,7 +1204,14 @@ defmodule MDTClientWeb.GitLive.Components do
           {@open.path}
         </span>
 
-        <div class="flex shrink-0 items-center gap-0.5">
+        <%!-- A commit diff has one side by definition; a working tree file has two. --%>
+        <span
+          :if={@open.side == :commit}
+          class="shrink-0 rounded border border-line bg-deep px-1.5 py-0.5 font-mono text-[10px] text-muted"
+        >
+          in {short_id(@open.commit)}
+        </span>
+        <div :if={@open.side != :commit} class="flex shrink-0 items-center gap-0.5">
           <.diff_side_tab tab={@tab} side={:unstaged} label="Unstaged" />
           <.diff_side_tab tab={@tab} side={:staged} label="Staged" />
         </div>
@@ -1238,7 +1255,11 @@ defmodule MDTClientWeb.GitLive.Components do
             </p>
           <% @open.diff.hunks == [] -> %>
             <p id="git-diff-empty" class="p-8 text-center text-xs text-muted">
-              Nothing changed on this side of the index.
+              <%= if @open.side == :commit do %>
+                This commit left the file untouched.
+              <% else %>
+                Nothing changed on this side of the index.
+              <% end %>
             </p>
           <% true -> %>
             <div id="git-diff-body" class="min-w-max py-1 font-mono text-xs leading-5">
@@ -1319,11 +1340,18 @@ defmodule MDTClientWeb.GitLive.Components do
       data-menu-kind="commit"
       data-menu-id={@id}
       class={[
-        "group relative flex items-center transition-colors",
-        if(@tab.selected_commit == @id, do: "bg-active", else: "hover:bg-hover")
+        "group relative flex items-center border-b border-line-soft/40 transition-colors",
+        if(@tab.selected_commit == @id,
+          do: "bg-accent-soft/50 shadow-[inset_2px_0_0_0_var(--color-accent)]",
+          else: "hover:bg-hover/70"
+        )
       ]}
       style={"height: #{row_height()}px"}
     >
+      <%!-- The ref column sits outside the row button so a chip can be picked
+            without that click also meaning "select this commit". --%>
+      <.ref_column :if={@row.commit.labels != []} commit={@row.commit} tab={@tab} />
+
       <button
         type="button"
         id={"git-select-commit-#{@id}"}
@@ -1333,20 +1361,28 @@ defmodule MDTClientWeb.GitLive.Components do
         phx-value-id={@id}
         class="flex h-full min-w-0 flex-1 cursor-pointer items-center gap-2 pl-2 pr-1 text-left focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
       >
-        <%!-- Wide enough: refs get their own column beside the graph, as a
-              desktop Git client lays them out. Narrow: they ride the summary. --%>
+        <%!-- With no refs to hold it, the column belongs to the row's click
+              target rather than being dead space beside it. --%>
         <span
-          class="hidden shrink-0 items-center justify-end gap-1 overflow-hidden @[44rem]:flex"
+          :if={@row.commit.labels == []}
+          class="hidden shrink-0 @[44rem]:block"
           style={ref_column_style()}
-        >
-          <.label_chips labels={@row.commit.labels} limit={2} />
-        </span>
+        ></span>
 
         <.graph_cell row={@row} lanes={@lanes} head={@tab.snapshot.head} />
 
         <span class="flex min-w-0 flex-1 items-center gap-1.5">
-          <span class="flex shrink-0 items-center gap-1 @[44rem]:hidden">
-            <.label_chips labels={@row.commit.labels} limit={1} compact />
+          <span
+            :if={@row.commit.labels != []}
+            class="flex shrink-0 items-center gap-1 @[44rem]:hidden"
+          >
+            <.label_chip label={hd(ordered_refs(@row.commit.labels))} compact />
+            <span
+              :if={length(@row.commit.labels) > 1}
+              class="shrink-0 rounded border border-line bg-deep px-1 py-px font-mono text-[10px] leading-4 text-faint"
+            >
+              +{length(@row.commit.labels) - 1}
+            </span>
           </span>
           <span class="min-w-0 truncate text-[13px] text-ink">{@row.commit.summary}</span>
         </span>
@@ -1455,13 +1491,114 @@ defmodule MDTClientWeb.GitLive.Components do
     """
   end
 
+  attr :commit, :map, required: true
+  attr :tab, :map, required: true
+
+  defp ref_column(assigns) do
+    refs = ordered_refs(assigns.commit.labels)
+
+    assigns =
+      assigns
+      |> assign(:refs, refs)
+      |> assign(:primary, hd(refs))
+      |> assign(:rest, tl(refs))
+
+    ~H"""
+    <div
+      class="group/refs relative hidden h-full shrink-0 items-center justify-end gap-1 @[44rem]:flex"
+      style={ref_column_style()}
+    >
+      <%!-- Collapsed: the ref that matters most, plus how many are hiding
+            behind it. Hovering swaps in the full list, laid out along the row
+            so it cannot be clipped by the scrolling panel. --%>
+      <div class="flex min-w-0 items-center gap-1 group-hover/refs:invisible">
+        <.ref_button ref={@primary} tab={@tab} id={"git-ref-#{slug(@primary.full_name)}"} />
+        <span
+          :if={@rest != []}
+          title={Enum.map_join(@rest, ", ", & &1.name)}
+          class="shrink-0 rounded border border-line bg-deep px-1 py-px font-mono text-[10px] leading-4 text-faint"
+        >
+          +{length(@rest)}
+        </span>
+      </div>
+
+      <div
+        :if={@rest != []}
+        id={"git-refs-#{@commit.id}"}
+        class="absolute right-0 top-0 z-20 hidden h-full max-w-[32rem] items-center justify-end gap-1 overflow-hidden rounded-md border border-line bg-panel px-1 shadow-lg shadow-black/20 group-hover/refs:flex dark:shadow-black/40"
+      >
+        <.ref_button
+          :for={ref <- @refs}
+          ref={ref}
+          tab={@tab}
+          id={"git-ref-all-#{slug(ref.full_name)}"}
+        />
+      </div>
+    </div>
+    """
+  end
+
+  attr :ref, :map, required: true
+  attr :tab, :map, required: true
+  attr :id, :string, required: true
+
+  defp ref_button(%{ref: %Tag{}} = assigns) do
+    ~H"""
+    <span class="shrink-0"><.label_chip label={@ref} /></span>
+    """
+  end
+
+  defp ref_button(assigns) do
+    ~H"""
+    <button
+      type="button"
+      id={@id}
+      phx-click="select_branch"
+      phx-value-name={@ref.full_name}
+      aria-pressed={to_string(@tab.selected_branch == @ref.full_name)}
+      title={chip_title(@ref)}
+      class={[
+        "shrink-0 cursor-pointer rounded transition-shadow focus-visible:outline-2 focus-visible:outline-accent",
+        @tab.selected_branch == @ref.full_name && "ring-1 ring-accent/60"
+      ]}
+    >
+      <.label_chip label={@ref} />
+    </button>
+    """
+  end
+
+  @doc """
+  Refs in the order a reader looks for them.
+
+  The branch HEAD is on comes first, then the trunk names a project is most
+  likely to care about, then the remaining branches, and finally tags.
+  """
+  def ordered_refs(labels), do: Enum.sort_by(labels, &ref_rank/1)
+
+  defp ref_rank(%Tag{name: name}), do: {3, 0, String.downcase(name)}
+  defp ref_rank(%{current?: true, name: name}), do: {0, 0, String.downcase(name)}
+
+  defp ref_rank(%{kind: kind, name: name} = branch) do
+    group = if kind == :local, do: 1, else: 2
+    {group, trunk_rank(remote_branch_name(branch)), String.downcase(name)}
+  end
+
+  @trunks ~w(master main dev)
+
+  defp trunk_rank(name) do
+    case Enum.find_index(@trunks, &(&1 == String.downcase(name))) do
+      nil -> length(@trunks)
+      index -> index
+    end
+  end
+
   attr :labels, :list, required: true
   attr :limit, :integer, default: nil, doc: "how many chips to draw before collapsing the rest"
   attr :compact, :boolean, default: false
 
   defp label_chips(assigns) do
     # Most important first, so a collapsed chip never hides the branch HEAD is on.
-    labels = Enum.sort_by(assigns.labels, &{not &1.current?, &1.kind == :remote, &1.name})
+    labels = ordered_refs(assigns.labels)
     {shown, rest} = Enum.split(labels, assigns.limit || length(labels))
     assigns = assigns |> assign(:shown, shown) |> assign(:rest, rest)
 
@@ -1486,18 +1623,11 @@ defmodule MDTClientWeb.GitLive.Components do
       title={chip_title(@label)}
       class={[
         "flex min-w-0 shrink items-center gap-1 rounded border px-1 py-px font-mono text-[10px] leading-4",
-        cond do
-          @label.current? -> "border-ok/60 bg-ok-soft/60 text-ok"
-          @label.kind == :remote -> "border-violet/50 bg-violet/10 text-violet"
-          true -> "border-accent/50 bg-accent-soft/70 text-accent"
-        end
+        chip_tone(@label)
       ]}
     >
       <.icon name={chip_icon(@label)} class="size-2.5 shrink-0" />
-      <span
-        :if={@label.kind == :remote and not is_nil(@label.remote) and not @compact}
-        class="shrink-0 opacity-70"
-      >
+      <span :if={remote_prefix?(@label, @compact)} class="shrink-0 opacity-70">
         {@label.remote}/
       </span>
       <span class="truncate">{chip_name(@label, @compact)}</span>
@@ -1505,15 +1635,30 @@ defmodule MDTClientWeb.GitLive.Components do
     """
   end
 
-  # A monitor for a branch that exists on this machine, a cloud for one that
-  # only exists on a remote, and a tick for the branch HEAD is on.
+  # A label for a tag, a monitor for a branch that exists on this machine, a
+  # cloud for one that only exists on a remote, and a tick for the branch HEAD
+  # is on.
+  defp chip_icon(%Tag{}), do: "hero-tag-micro"
   defp chip_icon(%{current?: true}), do: "hero-check-circle-micro"
   defp chip_icon(%{kind: :remote}), do: "hero-cloud-micro"
   defp chip_icon(_label), do: "hero-computer-desktop-micro"
 
+  defp chip_tone(%Tag{}), do: "border-warn/50 bg-warn-soft/40 text-warn"
+  defp chip_tone(%{current?: true}), do: "border-ok/60 bg-ok-soft/60 text-ok"
+  defp chip_tone(%{kind: :remote}), do: "border-violet/50 bg-violet/10 text-violet"
+  defp chip_tone(_label), do: "border-accent/50 bg-accent-soft/70 text-accent"
+
+  defp remote_prefix?(%Tag{}, _compact), do: false
+
+  defp remote_prefix?(label, compact),
+    do: label.kind == :remote and not is_nil(label.remote) and not compact
+
+  defp chip_name(%Tag{name: name}, _compact), do: name
   defp chip_name(%{kind: :remote} = label, _compact), do: remote_branch_name(label)
   defp chip_name(label, _compact), do: label.name
 
+  defp chip_title(%Tag{annotated?: true, name: name}), do: "Annotated tag #{name}"
+  defp chip_title(%Tag{name: name}), do: "Tag #{name}"
   defp chip_title(%{kind: :remote} = label), do: "Remote branch #{label.name}"
   defp chip_title(%{current?: true} = label), do: "Current branch #{label.name}"
   defp chip_title(label), do: "Local branch #{label.name}"
@@ -1864,7 +2009,7 @@ defmodule MDTClientWeb.GitLive.Components do
           name="changes"
           label="Changes"
           icon="hero-pencil-square"
-          count={length(@tab.changes)}
+          count={changes_count(@tab)}
         />
       </div>
 
@@ -1877,6 +2022,8 @@ defmodule MDTClientWeb.GitLive.Components do
         <%= cond do %>
           <% @tab.action -> %>
             <span class="sr-only">An action is being prepared.</span>
+          <% @tab.panel == "changes" and commit_scoped?(@tab) -> %>
+            <.commit_changes tab={@tab} />
           <% @tab.panel == "changes" -> %>
             <.working_tree tab={@tab} />
           <% commit = selected_commit(@tab) -> %>
@@ -2191,6 +2338,124 @@ defmodule MDTClientWeb.GitLive.Components do
     </form>
     """
   end
+
+  ## Commit changes
+
+  @doc """
+  The files one commit touched.
+
+  It takes over the changes tab while a commit is selected, so the same place
+  answers "what changed" for the working tree and for history. Picking a file
+  opens its diff over the graph.
+  """
+  attr :tab, :map, required: true
+
+  def commit_changes(assigns) do
+    assigns = assign(assigns, :loaded, assigns.tab.commit_changes)
+
+    ~H"""
+    <div id="git-commit-changes" class="flex flex-col gap-2 p-2.5">
+      <div class="flex items-center gap-1.5">
+        <span class="text-[10px] font-semibold uppercase tracking-wider text-muted">
+          Files in this commit
+        </span>
+        <span :if={@loaded} class="font-mono text-[10px] text-faint">
+          ({length(@loaded.files)})
+        </span>
+        <div class="flex-1"></div>
+        <button
+          type="button"
+          id="git-show-working-tree"
+          phx-click="show_working_tree"
+          title="Back to the working tree"
+          class="cursor-pointer rounded border border-line-soft px-1.5 py-0.5 text-[10px] text-muted transition-colors hover:bg-hover hover:text-ink focus-visible:outline-2 focus-visible:outline-accent"
+        >
+          Working tree
+        </button>
+      </div>
+
+      <p class="font-mono text-[10px] text-faint">{short_id(@tab.selected_commit)}</p>
+
+      <%= cond do %>
+        <% is_nil(@loaded) -> %>
+          <p id="git-commit-changes-loading" class="flex items-center gap-2 text-[11px] text-muted">
+            <.icon name="hero-arrow-path" class="size-3.5 text-accent motion-safe:animate-spin" />
+            Reading the commit…
+          </p>
+        <% @loaded.error -> %>
+          <.error_notice id="git-commit-changes-error" error={@loaded.error} class="" />
+        <% @loaded.files == [] -> %>
+          <p id="git-commit-changes-empty" class="text-[11px] text-faint">
+            This commit changed no files.
+          </p>
+        <% true -> %>
+          <div id="git-commit-files" role="listbox" aria-label="Files in this commit">
+            <.commit_file_row
+              :for={file <- @loaded.files}
+              file={file}
+              commit={@tab.selected_commit}
+              tab={@tab}
+            />
+          </div>
+      <% end %>
+    </div>
+    """
+  end
+
+  attr :file, :map, required: true
+  attr :commit, :string, required: true
+  attr :tab, :map, required: true
+
+  defp commit_file_row(assigns) do
+    assigns = assign(assigns, :open?, open_diff?(assigns.tab, assigns.file.path, :commit))
+
+    ~H"""
+    <button
+      type="button"
+      id={"git-commit-file-#{slug(@file.path)}"}
+      role="option"
+      aria-selected={to_string(@open?)}
+      phx-click="view_diff"
+      phx-value-path={@file.path}
+      phx-value-side="commit"
+      phx-value-commit={@commit}
+      title={"View what this commit did to #{@file.path}"}
+      class={[
+        "flex w-full cursor-pointer items-center gap-2 rounded px-1.5 py-1 text-left transition-colors",
+        "focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent",
+        if(@open?, do: "bg-active", else: "hover:bg-hover")
+      ]}
+    >
+      <span class={[
+        "w-4 shrink-0 text-center font-mono text-[10px] font-bold",
+        state_color(@file.staged)
+      ]}>
+        {state_code(@file.staged)}
+      </span>
+      <span class="min-w-0 flex-1 truncate text-[11px] text-ink" title={@file.path}>
+        {@file.path}
+      </span>
+      <span
+        :if={@file.original_path}
+        class="shrink-0 truncate font-mono text-[10px] text-faint"
+        title={"renamed from #{@file.original_path}"}
+      >
+        ←
+      </span>
+      <.icon name="hero-document-magnifying-glass" class="size-3.5 shrink-0 text-faint" />
+    </button>
+    """
+  end
+
+  @doc "Whether the changes panel is showing a commit rather than the working tree."
+  def commit_scoped?(%{changes_scope: :commit, selected_commit: commit}), do: is_binary(commit)
+  def commit_scoped?(_tab), do: false
+
+  defp changes_count(%{commit_changes: %{files: files}} = tab) do
+    if commit_scoped?(tab), do: length(files), else: length(tab.changes)
+  end
+
+  defp changes_count(tab), do: if(commit_scoped?(tab), do: 0, else: length(tab.changes))
 
   ## Working tree
 

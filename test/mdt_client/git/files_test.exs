@@ -244,4 +244,103 @@ defmodule MDTClient.Git.FilesTest do
       assert {:error, %{kind: :invalid_argument}} = Files.diff(repository, "a.txt", lines: 0)
     end
   end
+
+  describe "commit_status/2" do
+    test "lists what a commit changed", context do
+      %{path: path, repository: repository} = context
+
+      File.write!(Path.join(path, "added.txt"), "added\n")
+      File.write!(Path.join(path, "README.md"), "changed\n")
+      git!(path, ["add", "-A"])
+      git!(path, ["commit", "-m", "touch two files"])
+      head = git!(path, ["rev-parse", "HEAD"])
+
+      assert {:ok, changes} = Files.commit_status(repository, head)
+
+      assert [
+               %FileChange{path: "README.md", staged: :modified},
+               %FileChange{path: "added.txt", staged: :added}
+             ] = changes
+
+      assert Enum.all?(changes, &(&1.unstaged == nil))
+    end
+
+    test "reads a root commit, which has no parent to compare against", context do
+      %{repository: repository, initial_commit: initial} = context
+
+      assert {:ok, [%FileChange{path: "README.md", staged: :added}]} =
+               Files.commit_status(repository, initial)
+    end
+
+    test "reports deletions and renames", context do
+      %{path: path, repository: repository} = context
+
+      File.write!(Path.join(path, "moved.txt"), String.duplicate("keep\n", 20))
+      File.write!(Path.join(path, "doomed.txt"), "doomed\n")
+      git!(path, ["add", "-A"])
+      git!(path, ["commit", "-m", "prepare"])
+
+      git!(path, ["mv", "moved.txt", "moved elsewhere.txt"])
+      git!(path, ["rm", "--", "doomed.txt"])
+      git!(path, ["commit", "-m", "move and delete"])
+
+      assert {:ok, changes} = Files.commit_status(repository, "HEAD")
+
+      assert %FileChange{staged: :renamed, original_path: "moved.txt"} =
+               Enum.find(changes, &(&1.path == "moved elsewhere.txt"))
+
+      assert %FileChange{staged: :deleted} = Enum.find(changes, &(&1.path == "doomed.txt"))
+    end
+
+    test "compares a merge against its first parent", context do
+      %{path: path, repository: repository} = context
+
+      git!(path, ["checkout", "-b", "side"])
+      commit_file(path, "from-side.txt", "side\n", "side work")
+      git!(path, ["checkout", "main"])
+      commit_file(path, "from-main.txt", "main\n", "main work")
+      git!(path, ["merge", "--no-ff", "-m", "merge side", "side"])
+
+      assert {:ok, changes} = Files.commit_status(repository, "HEAD")
+      assert Enum.map(changes, & &1.path) == ["from-side.txt"]
+    end
+
+    test "refuses a revision that is not one", %{repository: repository} do
+      assert {:error, %{kind: :invalid_argument}} = Files.commit_status(repository, "")
+      assert {:error, %{kind: :invalid_argument}} = Files.commit_status(repository, "--all")
+      assert {:error, %{kind: :command_failed}} = Files.commit_status(repository, "nope")
+    end
+  end
+
+  describe "diff/3 for a commit" do
+    test "reads the change a commit made to one path", context do
+      %{path: path, repository: repository} = context
+      File.write!(Path.join(path, "README.md"), "rewritten\n")
+      git!(path, ["commit", "-am", "rewrite"])
+
+      assert {:ok, %FileDiff{side: :commit} = diff} =
+               Files.diff(repository, "README.md", side: :commit, commit: "HEAD")
+
+      assert %{added: 1, removed: 1} = FileDiff.counts(diff)
+
+      lines = Enum.flat_map(diff.hunks, & &1.lines)
+      assert Enum.any?(lines, &(&1.kind == :added and &1.text == "rewritten"))
+      assert Enum.any?(lines, &(&1.kind == :removed and &1.text == "initial"))
+    end
+
+    test "reads a path added by a root commit", context do
+      %{repository: repository, initial_commit: initial} = context
+
+      assert {:ok, diff} = Files.diff(repository, "README.md", side: :commit, commit: initial)
+      assert %{added: 1, removed: 0} = FileDiff.counts(diff)
+    end
+
+    test "leaves paths the commit did not touch empty", context do
+      %{path: path, repository: repository, initial_commit: initial} = context
+      commit_file(path, "later.txt", "later\n", "later")
+
+      assert {:ok, %FileDiff{hunks: []}} =
+               Files.diff(repository, "later.txt", side: :commit, commit: initial)
+    end
+  end
 end
