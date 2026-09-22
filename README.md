@@ -12,7 +12,8 @@ The app boots to a sign in screen (`/`), which leads to the tool picker
   tabbed requests, params/headers/auth/body editors, a response viewer, and
   curl import/export. `Ctrl+Enter` sends; the history and the request/response
   split are drag resizable.
-* **Git GUI** (`/tools/git`) — not built yet.
+* **Git GUI** (`/tools/git`) — its repository, graph, branch, and history-operation
+  backend is available; the interface is still a placeholder.
 
 Signing in takes a username and a password. The password is stretched into an
 encryption key, and everything that identity persists — today the HTTP client's
