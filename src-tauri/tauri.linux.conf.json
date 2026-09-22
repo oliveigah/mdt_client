@@ -6,6 +6,8 @@
       "deb": {
         "depends": [
           "xdg-utils",
+          "git",
+          "openssh-client",
           "libssl3",
           "libncurses6",
           "libstdc++6",
@@ -18,6 +20,8 @@
         "release": "5",
         "depends": [
           "xdg-utils",
+          "git",
+          "openssh-clients",
           "openssl-libs",
           "ncurses-libs",
           "libstdc++",

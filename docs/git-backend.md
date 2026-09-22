@@ -9,23 +9,29 @@ are always passed as an argv list and never interpolated into a shell command.
 Opening a folder returns an immutable `MDTClient.Git.Repository`. Its `path` is
 normalized to the worktree root, even when the user selected a nested folder.
 The handle also contains the worktree Git directory, common Git directory, and
-an optional SSH agent socket. A UI tab should keep one of these handles as its
-identity and pass it to every other call.
+an optional validated SSH key pair. A UI tab should keep one of these handles
+as its identity and pass it to every other call.
 
-The selected socket is supplied to Git as `SSH_AUTH_SOCK` only for commands
-using that repository handle. It therefore applies to remote authentication and
-to commit signing when the repository is configured to use SSH signing. It does
-not mutate the application environment or affect other tabs.
+The selected private key is supplied to Git through `GIT_SSH_COMMAND` only for
+commands using that repository handle. The public key is used to verify that
+the chosen files form a pair before they are saved. MDT stores their paths, not
+their contents. The key applies to SSH remote authentication without mutating
+the application environment.
 
 ```elixir
-{:ok, repository} =
-  MDTClient.Git.Core.open("/projects/example",
-    ssh_auth_sock: "/run/user/1000/keyring/ssh"
-  )
+{:ok, repository} = MDTClient.Git.Core.open("/projects/example")
 
 {:ok, repository} =
-  MDTClient.Git.Core.with_ssh_agent(repository, "/tmp/ssh-agent.sock")
+  MDTClient.Git.Core.with_ssh_keys(
+    repository,
+    "/home/me/.ssh/id_ed25519",
+    "/home/me/.ssh/id_ed25519.pub"
+  )
 ```
+
+SSH keys only work with SSH remote URLs. `list_remotes/1` reports each remote's
+transport and offers the equivalent `git@host:path` URL for HTTP(S) remotes.
+`use_ssh_remote/2` applies that conversion to an existing remote.
 
 ## Read model
 
@@ -59,7 +65,7 @@ The core currently supports:
 - path-limited stash creation plus stash listing, application, popping, and
   deletion;
 - editing HEAD or an older commit message on the checked-out branch;
-- fetch, pull, push, and remote branch deletion; and
+- fetch, pull, push, remote URL changes, and remote branch deletion; and
 - continue, skip, and abort for operations that stop on conflicts.
 
 Successful mutations return `{:ok, %MDTClient.Git.CommandResult{}}`. The UI
@@ -97,7 +103,7 @@ unstage, and path-limited stash remain in `Git.Core`: they accept only
 repository paths and perform Git index or object database mutations. Keeping
 file content outside the core lets graph and branch state refresh independently
 from larger diff payloads, while both APIs share the same repository handle and
-command runner, so a tab's SSH agent applies to either.
+command runner, so a tab's SSH credentials apply to either.
 
 ## Client
 

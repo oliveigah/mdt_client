@@ -4,7 +4,7 @@ defmodule MDTClient.Git.Core do
 
   `open/2` creates an immutable repository handle suitable for one application
   tab. The handle owns no process and stores no global state, so several tabs
-  can safely use different worktrees and SSH agent sockets.
+  can safely use different worktrees and SSH key pairs.
 
   Read functions return structs shaped for the branch panel, graph, and commit
   inspector. Mutations execute Git directly without a shell and return a small
@@ -23,7 +23,9 @@ defmodule MDTClient.Git.Core do
   alias MDTClient.Git.Commit
   alias MDTClient.Git.Error
   alias MDTClient.Git.Operation
+  alias MDTClient.Git.Remote
   alias MDTClient.Git.Repository
+  alias MDTClient.Git.SSHKey
   alias MDTClient.Git.Snapshot
   alias MDTClient.Git.Stash
 
@@ -75,7 +77,6 @@ defmodule MDTClient.Git.Core do
     expanded = Path.expand(path)
 
     with :ok <- ensure_directory(expanded),
-         {:ok, ssh_auth_sock} <- ssh_auth_sock(Keyword.get(opts, :ssh_auth_sock)),
          {:ok, "true"} <- open_value(expanded, ["rev-parse", "--is-inside-work-tree"]),
          {:ok, root} <- open_value(expanded, ["rev-parse", "--show-toplevel"]),
          {:ok, git_dir} <- open_value(expanded, ["rev-parse", "--absolute-git-dir"]),
@@ -85,7 +86,7 @@ defmodule MDTClient.Git.Core do
          path: Path.expand(root),
          git_dir: Path.expand(git_dir),
          common_dir: Path.expand(common_dir, root),
-         ssh_auth_sock: ssh_auth_sock
+         ssh_key: nil
        }}
     else
       {:ok, _not_worktree} ->
@@ -99,12 +100,54 @@ defmodule MDTClient.Git.Core do
   def open(_path, _opts),
     do: {:error, Error.new(:invalid_argument, "Repository path must be a string")}
 
-  @doc "Returns a copy of a repository handle using the selected SSH agent socket."
-  @spec with_ssh_agent(Repository.t(), String.t() | nil) :: result(Repository.t())
-  def with_ssh_agent(%Repository{} = repository, socket) do
-    case ssh_auth_sock(socket) do
-      {:ok, socket} -> {:ok, %{repository | ssh_auth_sock: socket}}
-      {:error, error} -> {:error, error}
+  @doc "Returns a copy of a repository handle using a validated SSH key pair."
+  @spec with_ssh_keys(Repository.t(), Path.t(), Path.t()) :: result(Repository.t())
+  def with_ssh_keys(%Repository{} = repository, private_key, public_key) do
+    with {:ok, ssh_key} <- SSHKey.new(private_key, public_key) do
+      {:ok, %{repository | ssh_key: ssh_key}}
+    end
+  end
+
+  @doc "Returns a copy of a repository handle that inherits normal Git authentication."
+  @spec without_ssh_keys(Repository.t()) :: {:ok, Repository.t()}
+  def without_ssh_keys(%Repository{} = repository), do: {:ok, %{repository | ssh_key: nil}}
+
+  @doc "Lists configured remotes and identifies HTTPS URLs that can be converted to SSH."
+  @spec list_remotes(Repository.t()) :: result([Remote.t()])
+  def list_remotes(%Repository{} = repository) do
+    with {:ok, output} <- Command.run(repository, ["remote", "-v"]) do
+      parse_remotes(output)
+    end
+  end
+
+  @doc "Changes both fetch and push URLs for an existing remote."
+  @spec set_remote_url(Repository.t(), String.t(), String.t()) :: mutation_result()
+  def set_remote_url(%Repository{} = repository, remote, url) do
+    with {:ok, remote} <- validate_remote(repository, remote),
+         {:ok, url} <- text_argument(url, "Remote URL"),
+         {:ok, result} <-
+           run_mutation(repository, :set_remote_url, ["remote", "set-url", "--", remote, url]),
+         :ok <- clear_remote_push_urls(repository, remote) do
+      {:ok, result}
+    end
+  end
+
+  @doc "Changes an HTTP(S) remote to its equivalent SSH URL."
+  @spec use_ssh_remote(Repository.t(), String.t()) :: mutation_result()
+  def use_ssh_remote(%Repository{} = repository, name) do
+    with {:ok, remotes} <- list_remotes(repository),
+         %Remote{ssh_url: ssh_url} when is_binary(ssh_url) <-
+           Enum.find(remotes, &(&1.name == name)) do
+      set_remote_url(repository, name, ssh_url)
+    else
+      nil ->
+        {:error, Error.new(:invalid_argument, "Remote #{inspect(name)} does not exist")}
+
+      %Remote{} ->
+        {:error, Error.new(:invalid_argument, "Remote #{inspect(name)} is not using HTTP(S)")}
+
+      {:error, error} ->
+        {:error, error}
     end
   end
 
@@ -578,18 +621,6 @@ defmodule MDTClient.Git.Core do
     end
   end
 
-  defp ssh_auth_sock(nil), do: {:ok, nil}
-
-  defp ssh_auth_sock(socket) when is_binary(socket) do
-    case text_argument(socket, "SSH agent socket") do
-      {:ok, socket} -> {:ok, socket}
-      {:error, error} -> {:error, error}
-    end
-  end
-
-  defp ssh_auth_sock(_socket),
-    do: {:error, Error.new(:invalid_argument, "SSH agent socket must be a string or nil")}
-
   defp open_value(path, args) do
     case Command.capture_path(path, args) do
       {:system_error, error} -> {:error, error}
@@ -698,6 +729,71 @@ defmodule MDTClient.Git.Core do
 
       error ->
         error
+    end
+  end
+
+  defp parse_remotes(output) do
+    output
+    |> lines()
+    |> Enum.reduce_while({:ok, %{}}, fn line, {:ok, remotes} ->
+      case Regex.run(~r/\A([^\t]+)\t(.*) \((fetch|push)\)\z/, line, capture: :all_but_first) do
+        [name, url, direction] ->
+          urls = Map.get(remotes, name, %{}) |> Map.put(direction, url)
+          {:cont, {:ok, Map.put(remotes, name, urls)}}
+
+        _invalid ->
+          {:halt, {:error, Error.new(:invalid_output, "Git returned invalid remote data")}}
+      end
+    end)
+    |> case do
+      {:ok, remotes} ->
+        remotes =
+          remotes
+          |> Enum.map(fn {name, urls} ->
+            fetch_url = Map.get(urls, "fetch") || Map.fetch!(urls, "push")
+            push_url = Map.get(urls, "push") || fetch_url
+
+            %Remote{
+              name: name,
+              fetch_url: fetch_url,
+              push_url: push_url,
+              kind: remote_kind(push_url),
+              ssh_url: ssh_url(push_url)
+            }
+          end)
+          |> Enum.sort_by(&String.downcase(&1.name))
+
+        {:ok, remotes}
+
+      error ->
+        error
+    end
+  end
+
+  defp remote_kind(url) do
+    cond do
+      String.starts_with?(url, ["git@", "ssh://"]) -> :ssh
+      String.starts_with?(url, "https://") -> :https
+      String.starts_with?(url, "http://") -> :http
+      String.starts_with?(url, ["file://", "/", "./", "../"]) -> :file
+      true -> :other
+    end
+  end
+
+  defp ssh_url(url) do
+    case URI.parse(url) do
+      %URI{scheme: scheme, host: host, path: path}
+      when scheme in ["http", "https"] and is_binary(host) and is_binary(path) ->
+        repository_path = String.trim_leading(path, "/")
+
+        if repository_path == "" do
+          nil
+        else
+          "git@#{host}:#{repository_path}"
+        end
+
+      _other ->
+        nil
     end
   end
 
@@ -878,6 +974,26 @@ defmodule MDTClient.Git.Core do
       else
         {:error, Error.new(:invalid_argument, "Remote #{inspect(remote)} does not exist")}
       end
+    end
+  end
+
+  # Git may store a separate pushurl. Removing it makes pushes inherit the URL
+  # we just changed and avoids leaving an HTTPS credential path behind.
+  defp clear_remote_push_urls(repository, remote) do
+    case Command.capture(repository, ["config", "--unset-all", "remote.#{remote}.pushurl"]) do
+      {:system_error, error} ->
+        {:error, error}
+
+      {_output, status} when status in [0, 5] ->
+        :ok
+
+      {output, status} ->
+        {:error,
+         Error.command(
+           ["config", "--unset-all", "remote.#{remote}.pushurl"],
+           status,
+           output
+         )}
     end
   end
 

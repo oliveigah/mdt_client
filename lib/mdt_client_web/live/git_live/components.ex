@@ -106,7 +106,7 @@ defmodule MDTClientWeb.GitLive.Components do
         />
       </button>
 
-      <.ssh_agent :if={@tab} tab={@tab} />
+      <.ssh_keys :if={@tab} tab={@tab} />
     </div>
     <script :type={Phoenix.LiveView.ColocatedHook} name=".OpenFolder">
       export default {
@@ -155,20 +155,20 @@ defmodule MDTClientWeb.GitLive.Components do
     """
   end
 
-  ## SSH agent
+  ## SSH credentials
 
   attr :tab, :map, required: true
 
-  def ssh_agent(assigns) do
+  def ssh_keys(assigns) do
     ~H"""
     <div class="relative flex shrink-0 items-center border-l border-line-soft px-1.5">
       <button
         type="button"
-        id="git-ssh-agent"
+        id="git-ssh-keys"
         phx-click="toggle_ssh"
         aria-haspopup="dialog"
         aria-expanded={to_string(@tab.ssh_open?)}
-        title="SSH agent used by this repository"
+        title="Configure SSH keys"
         class={[
           "flex cursor-pointer items-center gap-1.5 rounded px-1.5 py-1 text-[11px] transition-colors",
           "focus-visible:outline-2 focus-visible:outline-accent",
@@ -180,7 +180,10 @@ defmodule MDTClientWeb.GitLive.Components do
       >
         <.icon
           name="hero-key"
-          class={["size-3.5", if(@tab.ssh_mode == :custom, do: "text-accent", else: "text-faint")]}
+          class={[
+            "size-3.5",
+            if(@tab.repository.ssh_key, do: "text-accent", else: "text-faint")
+          ]}
         />
         <span class="hidden sm:inline">{ssh_label(@tab)}</span>
       </button>
@@ -189,66 +192,201 @@ defmodule MDTClientWeb.GitLive.Components do
         :if={@tab.ssh_open?}
         id="git-ssh-popover"
         role="dialog"
-        aria-label="SSH agent"
-        class="absolute right-0 top-9 z-40 w-80 rounded-lg border border-line bg-panel p-3 shadow-xl shadow-black/20 dark:shadow-black/50"
+        aria-label="SSH authentication"
+        class="absolute right-0 top-9 z-40 w-96 rounded-lg border border-line bg-panel p-3 shadow-xl shadow-black/20 dark:shadow-black/50"
       >
-        <p class="text-[11px] font-semibold uppercase tracking-wide text-muted">SSH agent</p>
+        <p class="text-[11px] font-semibold uppercase tracking-wide text-muted">SSH keys</p>
         <p class="mt-1 text-[11px] leading-relaxed text-faint">
-          Used for remote authentication, and for signing when this repository is
-          configured to sign with SSH. The choice applies to this tab only.
+          Choose the key pair MDT will use for SSH remotes. The paths are saved for all
+          repository tabs; the private key stays on this machine.
         </p>
 
         <form id="git-ssh-form" phx-submit="save_ssh" class="mt-3 flex flex-col gap-2">
-          <label class="flex cursor-pointer items-start gap-2 rounded-md border border-line-soft p-2 transition-colors hover:border-line">
-            <input
-              type="radio"
-              name="mode"
-              value="default"
-              checked={@tab.ssh_mode == :default}
-              class="mt-0.5 size-3.5 cursor-pointer accent-accent"
-            />
-            <span class="min-w-0">
-              <span class="block text-xs text-ink">Application default</span>
-              <span class="block text-[11px] text-faint">
-                Inherit the agent from the environment MDT was started in.
-              </span>
-            </span>
+          <label class="block text-[11px] text-muted" for="git-ssh-private-key">
+            SSH private key
           </label>
+          <div class="flex gap-1.5">
+            <input
+              type="text"
+              name="private_key"
+              id="git-ssh-private-key"
+              value={@tab.ssh_private_key}
+              placeholder="~/.ssh/id_ed25519"
+              autocomplete="off"
+              class="min-w-0 flex-1 rounded border border-line bg-deep px-2 py-1 font-mono text-[11px] text-ink outline-none transition-colors placeholder:text-faint focus:border-accent/60"
+            />
+            <.button
+              type="button"
+              id="git-browse-private-key"
+              phx-hook=".OpenSSHKey"
+              data-kind="private"
+              class="px-2 py-1 text-[11px]"
+            >
+              Browse
+            </.button>
+          </div>
 
-          <label class="flex cursor-pointer items-start gap-2 rounded-md border border-line-soft p-2 transition-colors hover:border-line">
-            <input
-              type="radio"
-              name="mode"
-              value="custom"
-              checked={@tab.ssh_mode == :custom}
-              class="mt-0.5 size-3.5 cursor-pointer accent-accent"
-            />
-            <span class="min-w-0 flex-1">
-              <span class="block text-xs text-ink">Custom socket</span>
-              <input
-                type="text"
-                name="socket"
-                id="git-ssh-socket"
-                value={@tab.ssh_socket}
-                placeholder="/run/user/1000/keyring/ssh"
-                class="mt-1.5 w-full rounded border border-line bg-deep px-2 py-1 font-mono text-[11px] text-ink outline-none transition-colors placeholder:text-faint focus:border-accent/60"
-              />
-            </span>
+          <label class="mt-1 block text-[11px] text-muted" for="git-ssh-public-key">
+            SSH public key
           </label>
+          <div class="flex gap-1.5">
+            <input
+              type="text"
+              name="public_key"
+              id="git-ssh-public-key"
+              value={@tab.ssh_public_key}
+              placeholder="~/.ssh/id_ed25519.pub"
+              autocomplete="off"
+              class="min-w-0 flex-1 rounded border border-line bg-deep px-2 py-1 font-mono text-[11px] text-ink outline-none transition-colors placeholder:text-faint focus:border-accent/60"
+            />
+            <.button
+              type="button"
+              id="git-browse-public-key"
+              phx-hook=".OpenSSHKey"
+              data-kind="public"
+              class="px-2 py-1 text-[11px]"
+            >
+              Browse
+            </.button>
+            <.button
+              type="button"
+              id="git-copy-public-key"
+              phx-click="copy_public_key"
+              phx-hook=".CopySSHKey"
+              disabled={@tab.ssh_public_key == ""}
+              title="Copy public key"
+              aria-label="Copy public key"
+              class="px-2 py-1"
+            >
+              <.icon name="hero-clipboard-document" class="size-3.5" />
+            </.button>
+          </div>
+
+          <p class="text-[10px] leading-relaxed text-faint">
+            Passphrase-protected private keys are not supported yet. MDT never copies or
+            stores key contents.
+          </p>
 
           <p :if={@tab.ssh_error} id="git-ssh-error" class="text-[11px] text-bad">
             {@tab.ssh_error}
           </p>
 
-          <div class="flex items-center justify-end gap-2">
-            <.button type="button" phx-click="toggle_ssh" variant="ghost" class="px-2 py-1">
-              Cancel
+          <div class="flex items-center justify-between gap-2">
+            <.button
+              :if={@tab.repository.ssh_key}
+              type="button"
+              id="git-clear-ssh"
+              phx-click="clear_ssh"
+              variant="ghost"
+              class="px-2 py-1 text-[11px]"
+            >
+              Clear
             </.button>
-            <.button type="submit" variant="primary" class="px-2 py-1">Apply</.button>
+            <span :if={!@tab.repository.ssh_key}></span>
+            <div class="flex items-center gap-2">
+              <.button type="button" phx-click="toggle_ssh" variant="ghost" class="px-2 py-1">
+                Cancel
+              </.button>
+              <.button type="submit" variant="primary" class="px-2 py-1">Save keys</.button>
+            </div>
           </div>
         </form>
+
+        <div :if={@tab.remotes != []} class="mt-3 border-t border-line-soft pt-3">
+          <p class="text-[11px] font-semibold uppercase tracking-wide text-muted">Remotes</p>
+          <div class="mt-1.5 flex max-h-44 flex-col gap-1.5 overflow-y-auto">
+            <div
+              :for={remote <- @tab.remotes}
+              id={"git-ssh-remote-#{slug(remote.name)}"}
+              class="rounded-md border border-line-soft bg-deep p-2"
+            >
+              <div class="flex items-center gap-2">
+                <span class="min-w-0 flex-1 truncate text-xs font-medium text-ink">
+                  {remote.name}
+                </span>
+                <span
+                  id={"git-ssh-remote-kind-#{slug(remote.name)}"}
+                  class="rounded bg-active px-1.5 py-0.5 text-[9px] uppercase text-muted"
+                >
+                  {remote.kind}
+                </span>
+              </div>
+              <p class="mt-1 truncate font-mono text-[10px] text-faint" title={remote.push_url}>
+                {remote.push_url}
+              </p>
+              <div
+                :if={remote.ssh_url}
+                class="mt-2 rounded border border-warn/30 bg-warn-soft px-2 py-1.5"
+              >
+                <p class="text-[10px] leading-relaxed text-warn">
+                  SSH keys cannot authenticate this HTTP remote.
+                </p>
+                <button
+                  type="button"
+                  id={"git-use-ssh-#{slug(remote.name)}"}
+                  phx-click="use_ssh_remote"
+                  phx-value-remote={remote.name}
+                  disabled={not is_nil(@tab.pending)}
+                  class="mt-1 cursor-pointer text-[10px] font-medium text-warn underline underline-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Change to {remote.ssh_url}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
+    <script :type={Phoenix.LiveView.ColocatedHook} name=".OpenSSHKey">
+      export default {
+        mounted() {
+          this.el.addEventListener("click", async (event) => {
+            event.preventDefault()
+            await this.pick()
+          })
+        },
+
+        async pick() {
+          const dialog = window.__TAURI__?.dialog
+          const invoke = window.__TAURI_INTERNALS__?.invoke || window.__TAURI__?.core?.invoke
+
+          if (!dialog && !invoke) {
+            return this.pushEvent("ssh_picker_unavailable", {
+              reason: "The native key picker is only available in the desktop app. Enter the path instead.",
+            })
+          }
+
+          const options = {
+            directory: false,
+            multiple: false,
+            title: this.el.dataset.kind === "private" ? "Choose an SSH private key" : "Choose an SSH public key",
+          }
+
+          try {
+            const selection = dialog
+              ? await dialog.open(options)
+              : await invoke("plugin:dialog|open", {options})
+            const first = Array.isArray(selection) ? selection[0] : selection
+            const path = first && typeof first === "object" ? first.path : first
+
+            if (path) this.pushEvent("select_ssh_key", {kind: this.el.dataset.kind, path})
+          } catch (error) {
+            this.pushEvent("ssh_picker_unavailable", {
+              reason: `The key picker could not be opened: ${error?.message || error}`,
+            })
+          }
+        }
+      }
+    </script>
+    <script :type={Phoenix.LiveView.ColocatedHook} name=".CopySSHKey">
+      export default {
+        mounted() {
+          this.handleEvent("git_copy_public_key", ({contents}) => {
+            navigator.clipboard?.writeText(contents || "")
+          })
+        }
+      }
+    </script>
     """
   end
 
@@ -2171,8 +2309,8 @@ defmodule MDTClientWeb.GitLive.Components do
 
   defp remote_branch_name(%{name: name}), do: name
 
-  defp ssh_label(%{ssh_mode: :custom}), do: "Custom agent"
-  defp ssh_label(_tab), do: "Default agent"
+  defp ssh_label(%{repository: %{ssh_key: nil}}), do: "SSH keys"
+  defp ssh_label(_tab), do: "SSH ready"
 
   defp branches(tab, kind) do
     filter = String.downcase(String.trim(tab.filter))

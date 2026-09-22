@@ -15,17 +15,63 @@ defmodule MDTClient.Git.CoreTest do
     nested = Path.join(path, "one/two")
     File.mkdir_p!(nested)
 
-    assert {:ok, %Repository{} = repository} =
-             Core.open(nested, ssh_auth_sock: "/tmp/mdt-test-agent.sock")
+    assert {:ok, %Repository{} = repository} = Core.open(nested)
 
     assert repository.path == path
     assert repository.git_dir == Path.join(path, ".git")
     assert repository.common_dir == Path.join(path, ".git")
-    assert repository.ssh_auth_sock == "/tmp/mdt-test-agent.sock"
+    assert repository.ssh_key == nil
 
-    assert {:ok, updated} = Core.with_ssh_agent(repository, "/tmp/other-agent.sock")
-    assert updated.ssh_auth_sock == "/tmp/other-agent.sock"
-    assert repository.ssh_auth_sock == "/tmp/mdt-test-agent.sock"
+    {private_key, public_key} = ssh_key_pair(path)
+
+    assert {:ok, updated} = Core.with_ssh_keys(repository, private_key, public_key)
+    assert updated.ssh_key.private_key == private_key
+    assert updated.ssh_key.public_key == public_key
+    assert repository.ssh_key == nil
+
+    assert {:ok, cleared} = Core.without_ssh_keys(updated)
+    assert cleared.ssh_key == nil
+  end
+
+  test "validates that the selected SSH keys form a pair", %{base: base, repository: repository} do
+    {first_private, _first_public} = ssh_key_pair(base, "first")
+    {_second_private, second_public} = ssh_key_pair(base, "second")
+
+    assert {:error, %Error{kind: :invalid_argument, message: message}} =
+             Core.with_ssh_keys(repository, first_private, second_public)
+
+    assert message =~ "do not form a pair"
+
+    assert {:error, %Error{kind: :invalid_argument, message: "Private key path cannot be empty"}} =
+             Core.with_ssh_keys(repository, "", second_public)
+  end
+
+  test "lists remotes and converts an HTTPS URL to SSH", %{path: path, repository: repository} do
+    git!(path, ["remote", "add", "origin", "https://github.com/example/project.git"])
+
+    git!(path, [
+      "remote",
+      "set-url",
+      "--push",
+      "origin",
+      "https://github.com/example/project.git"
+    ])
+
+    assert {:ok, [remote]} = Core.list_remotes(repository)
+    assert remote.name == "origin"
+    assert remote.kind == :https
+    assert remote.push_url == "https://github.com/example/project.git"
+    assert remote.ssh_url == "git@github.com:example/project.git"
+
+    assert {:ok, %CommandResult{action: :set_remote_url}} =
+             Core.use_ssh_remote(repository, "origin")
+
+    assert git!(path, ["remote", "get-url", "origin"]) == "git@github.com:example/project.git"
+
+    assert git!(path, ["remote", "get-url", "--push", "origin"]) ==
+             "git@github.com:example/project.git"
+
+    assert {:ok, [%{kind: :ssh, ssh_url: nil}]} = Core.list_remotes(repository)
   end
 
   test "rejects folders that are not worktrees", %{base: base} do

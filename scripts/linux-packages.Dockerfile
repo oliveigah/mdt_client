@@ -5,7 +5,7 @@
 FROM docker.io/hexpm/elixir:1.19.4-erlang-28.2-ubuntu-jammy-20260509 AS deb-build
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential ca-certificates curl git file pkg-config \
+    build-essential ca-certificates curl git openssh-client file pkg-config \
     libwebkit2gtk-4.1-dev libssl-dev libayatana-appindicator3-dev \
     librsvg2-dev libxdo-dev desktop-file-utils xdg-utils \
     && rm -rf /var/lib/apt/lists/*
@@ -65,7 +65,7 @@ COPY --from=deb-build /out /out
 FROM docker.io/library/fedora:44 AS rpm-build
 
 RUN dnf --assumeyes --setopt=install_weak_deps=False install \
-    ca-certificates curl git file gcc gcc-c++ make pkgconf-pkg-config \
+    ca-certificates curl git openssh-clients file gcc gcc-c++ make pkgconf-pkg-config \
     autoconf ncurses-devel perl tar gzip unzip \
     webkit2gtk4.1-devel openssl-devel librsvg2-devel libxdo-devel \
     desktop-file-utils xdg-utils rpm-build \

@@ -4,6 +4,7 @@ defmodule MDTClientWeb.GitLiveTest do
   import MDTClient.GitHelpers
   import Phoenix.LiveViewTest
 
+  alias MDTClient.Preferences
   alias MDTClient.VaultHelpers
   alias MDTClientWeb.GitLive.Components
 
@@ -740,10 +741,11 @@ defmodule MDTClientWeb.GitLiveTest do
     assert count(view, "#git-commits [role=option]") == 2
   end
 
-  ## SSH agent
+  ## SSH credentials
 
-  test "keeps the SSH agent choice on the tab that made it", context do
+  test "saves an SSH key pair for every repository tab", context do
     %{view: view, path: path, base: base} = context
+    {private_key, public_key} = ssh_key_pair(base)
 
     other = Path.join(base, "other")
     File.mkdir_p!(other)
@@ -752,31 +754,78 @@ defmodule MDTClientWeb.GitLiveTest do
     open(view, path)
     open(view, other)
 
-    view |> element("#git-ssh-agent") |> render_click()
+    view |> element("#git-ssh-keys") |> render_click()
     assert has_element?(view, "#git-ssh-popover")
 
     view
-    |> form("#git-ssh-form", %{"mode" => "custom", "socket" => "/tmp/mdt-agent.sock"})
+    |> form("#git-ssh-form", %{"private_key" => private_key, "public_key" => public_key})
     |> render_submit()
 
-    assert render(view) =~ "Custom agent"
+    assert render(view) =~ "SSH ready"
     refute has_element?(view, "#git-ssh-popover")
+    assert Preferences.get("git_ssh_private_key") == private_key
+    assert Preferences.get("git_ssh_public_key") == public_key
 
     [first, _second] = tab_ids(view)
     view |> element("#git-tab-#{first}") |> render_click()
 
-    assert render(view) =~ "Default agent"
+    assert render(view) =~ "SSH ready"
+
+    view |> element("#git-ssh-keys") |> render_click()
+    assert has_element?(view, "#git-ssh-private-key[value='#{private_key}']")
+    assert has_element?(view, "#git-ssh-public-key[value='#{public_key}']")
+
+    view |> element("#git-clear-ssh") |> render_click()
+    assert render(view) =~ "SSH keys"
+    assert Preferences.get("git_ssh_private_key") == nil
+    assert Preferences.get("git_ssh_public_key") == nil
   end
 
-  test "rejects an empty custom socket path", context do
+  test "rejects empty SSH key paths", context do
     %{view: view, path: path} = context
     open(view, path)
 
-    view |> element("#git-ssh-agent") |> render_click()
-    view |> form("#git-ssh-form", %{"mode" => "custom", "socket" => ""}) |> render_submit()
+    view |> element("#git-ssh-keys") |> render_click()
+
+    view
+    |> form("#git-ssh-form", %{"private_key" => "", "public_key" => ""})
+    |> render_submit()
 
     assert has_element?(view, "#git-ssh-error")
     assert has_element?(view, "#git-ssh-popover")
+    assert render(view) =~ "Private key path cannot be empty"
+  end
+
+  test "changes an HTTP remote to SSH from the key settings", context do
+    %{view: view, path: path} = context
+    git!(path, ["remote", "add", "origin", "https://github.com/example/project.git"])
+
+    git!(path, [
+      "remote",
+      "set-url",
+      "--push",
+      "origin",
+      "https://github.com/example/project.git"
+    ])
+
+    open(view, path)
+
+    view |> element("#git-ssh-keys") |> render_click()
+
+    assert has_element?(view, "#git-ssh-remote-#{slug("origin")}")
+    assert has_element?(view, "#git-use-ssh-#{slug("origin")}")
+    assert render(view) =~ "SSH keys cannot authenticate this HTTP remote"
+
+    view |> element("#git-use-ssh-#{slug("origin")}") |> render_click()
+    render_async(view)
+
+    assert git!(path, ["remote", "get-url", "origin"]) == "git@github.com:example/project.git"
+
+    assert git!(path, ["remote", "get-url", "--push", "origin"]) ==
+             "git@github.com:example/project.git"
+
+    refute has_element?(view, "#git-use-ssh-#{slug("origin")}")
+    assert view |> element("#git-ssh-remote-kind-#{slug("origin")}") |> render() =~ "ssh"
   end
 
   ## Snapshot refresh

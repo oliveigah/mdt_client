@@ -9,7 +9,12 @@ defmodule MDTClient.Preferences do
 
   use GenServer
 
-  @defaults %{"theme" => "system", "last_username" => nil}
+  @defaults %{
+    "theme" => "system",
+    "last_username" => nil,
+    "git_ssh_private_key" => nil,
+    "git_ssh_public_key" => nil
+  }
 
   @doc "Starts the preferences owner."
   def start_link(opts \\ []) do

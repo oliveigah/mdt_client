@@ -10,7 +10,7 @@ defmodule MDTClient.Git.Files do
   larger payloads.
 
   The module shares `MDTClient.Git.Repository` handles and the command runner
-  with `MDTClient.Git.Core`, so the SSH agent and safety guarantees of a tab
+  with `MDTClient.Git.Core`, so the SSH credentials and safety guarantees of a tab
   apply here too.
   """
 

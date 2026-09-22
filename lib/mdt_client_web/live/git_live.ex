@@ -4,7 +4,7 @@ defmodule MDTClientWeb.GitLive do
   inspector.
 
   Every tab owns one `MDTClient.Git.Repository` handle and the state that
-  belongs to it: snapshot, selection, SSH agent and the operation it is running.
+  belongs to it: snapshot, selection, SSH credentials and the operation it is running.
   Git work never happens inside a callback; commands run through `start_async/3`
   and always refresh the snapshot in the same task, so a successful mutation and
   the state it produced arrive together.
@@ -18,6 +18,7 @@ defmodule MDTClientWeb.GitLive do
   alias MDTClient.Git.Core
   alias MDTClient.Git.Error
   alias MDTClient.Git.Files
+  alias MDTClient.Preferences
   alias MDTClient.Tools
   alias MDTClientWeb.GitLive.Components
   alias MDTClientWeb.GitLive.Graph.Layout
@@ -238,7 +239,7 @@ defmodule MDTClientWeb.GitLive do
     {:noreply, update_tab(socket, &%{&1 | result: nil})}
   end
 
-  ## SSH agent
+  ## SSH credentials
 
   @impl true
   def handle_event("toggle_ssh", _params, socket) do
@@ -248,18 +249,21 @@ defmodule MDTClientWeb.GitLive do
   @impl true
   def handle_event("save_ssh", params, socket) do
     tab = socket.assigns.tab
-    custom? = params["mode"] == "custom"
-    socket_path = String.trim(params["socket"] || "")
+    private_key = String.trim(params["private_key"] || "")
+    public_key = String.trim(params["public_key"] || "")
 
-    case Core.with_ssh_agent(tab.repository, if(custom?, do: socket_path, else: nil)) do
+    case Core.with_ssh_keys(tab.repository, private_key, public_key) do
       {:ok, repository} ->
+        :ok = Preferences.put("git_ssh_private_key", repository.ssh_key.private_key)
+        :ok = Preferences.put("git_ssh_public_key", repository.ssh_key.public_key)
+
         {:noreply,
-         update_tab(socket, fn tab ->
+         update_all_tabs(socket, fn current ->
            %{
-             tab
-             | repository: repository,
-               ssh_mode: if(custom?, do: :custom, else: :default),
-               ssh_socket: socket_path,
+             current
+             | repository: %{current.repository | ssh_key: repository.ssh_key},
+               ssh_private_key: repository.ssh_key.private_key,
+               ssh_public_key: repository.ssh_key.public_key,
                ssh_open?: false,
                ssh_error: nil
            }
@@ -268,6 +272,64 @@ defmodule MDTClientWeb.GitLive do
       {:error, error} ->
         {:noreply, update_tab(socket, &%{&1 | ssh_error: error.message})}
     end
+  end
+
+  @impl true
+  def handle_event("clear_ssh", _params, socket) do
+    :ok = Preferences.put("git_ssh_private_key", nil)
+    :ok = Preferences.put("git_ssh_public_key", nil)
+
+    {:noreply,
+     update_all_tabs(socket, fn tab ->
+       %{
+         tab
+         | repository: %{tab.repository | ssh_key: nil},
+           ssh_private_key: "",
+           ssh_public_key: "",
+           ssh_open?: false,
+           ssh_error: nil
+       }
+     end)}
+  end
+
+  @impl true
+  def handle_event("select_ssh_key", %{"kind" => kind, "path" => path}, socket)
+      when kind in ["private", "public"] and is_binary(path) do
+    {:noreply,
+     update_tab(socket, fn tab ->
+       case kind do
+         "private" ->
+           public_key =
+             if File.regular?(path <> ".pub"), do: path <> ".pub", else: tab.ssh_public_key
+
+           %{tab | ssh_private_key: path, ssh_public_key: public_key, ssh_error: nil}
+
+         "public" ->
+           %{tab | ssh_public_key: path, ssh_error: nil}
+       end
+     end)}
+  end
+
+  @impl true
+  def handle_event("ssh_picker_unavailable", %{"reason" => reason}, socket) do
+    {:noreply, update_tab(socket, &%{&1 | ssh_error: reason})}
+  end
+
+  @impl true
+  def handle_event("copy_public_key", _params, socket) do
+    case File.read(socket.assigns.tab.ssh_public_key) do
+      {:ok, contents} ->
+        {:noreply, push_event(socket, "git_copy_public_key", %{contents: String.trim(contents)})}
+
+      {:error, reason} ->
+        message = "Could not read the public key: #{:file.format_error(reason)}"
+        {:noreply, update_tab(socket, &%{&1 | ssh_error: message})}
+    end
+  end
+
+  @impl true
+  def handle_event("use_ssh_remote", %{"remote" => remote}, socket) do
+    {:noreply, dispatch(socket, {:use_ssh_remote, remote})}
   end
 
   ## Working tree selection
@@ -450,6 +512,8 @@ defmodule MDTClientWeb.GitLive do
   end
 
   defp new_tab(repository, state) do
+    {repository, private_key, public_key, ssh_error} = apply_saved_ssh_keys(repository)
+
     %{
       id: "tab-#{System.unique_integer([:positive])}",
       path: repository.path,
@@ -459,6 +523,7 @@ defmodule MDTClientWeb.GitLive do
       graph: Layout.layout(state.snapshot.commits),
       changes: state.changes,
       stashes: state.stashes,
+      remotes: state.remotes,
       limit: @default_limit,
       filter: "",
       panel: "commit",
@@ -475,11 +540,25 @@ defmodule MDTClientWeb.GitLive do
       stash_message: "",
       commit_message: "",
       include_untracked?: true,
-      ssh_mode: if(repository.ssh_auth_sock, do: :custom, else: :default),
-      ssh_socket: repository.ssh_auth_sock || "",
+      ssh_private_key: private_key,
+      ssh_public_key: public_key,
       ssh_open?: false,
-      ssh_error: nil
+      ssh_error: ssh_error
     }
+  end
+
+  defp apply_saved_ssh_keys(repository) do
+    private_key = Preferences.get("git_ssh_private_key") || ""
+    public_key = Preferences.get("git_ssh_public_key") || ""
+
+    if private_key == "" and public_key == "" do
+      {repository, private_key, public_key, nil}
+    else
+      case Core.with_ssh_keys(repository, private_key, public_key) do
+        {:ok, repository} -> {repository, private_key, public_key, nil}
+        {:error, error} -> {repository, private_key, public_key, error.message}
+      end
+    end
   end
 
   defp current_branch_name(snapshot) do
@@ -529,8 +608,9 @@ defmodule MDTClientWeb.GitLive do
   defp load(repository, limit) do
     with {:ok, snapshot} <- Core.snapshot(repository, limit: limit),
          {:ok, changes} <- Files.status(repository),
-         {:ok, stashes} <- Core.list_stashes(repository) do
-      {:ok, %{snapshot: snapshot, changes: changes, stashes: stashes}}
+         {:ok, stashes} <- Core.list_stashes(repository),
+         {:ok, remotes} <- Core.list_remotes(repository) do
+      {:ok, %{snapshot: snapshot, changes: changes, stashes: stashes, remotes: remotes}}
     end
   end
 
@@ -538,6 +618,7 @@ defmodule MDTClientWeb.GitLive do
   defp perform(repository, :fetch), do: Core.fetch(repository)
   defp perform(repository, {:pull, strategy}), do: Core.pull(repository, strategy)
   defp perform(repository, {:push, opts}), do: Core.push(repository, opts)
+  defp perform(repository, {:use_ssh_remote, remote}), do: Core.use_ssh_remote(repository, remote)
   defp perform(repository, {:checkout_branch, name}), do: Core.checkout_branch(repository, name)
   defp perform(repository, {:checkout_commit, id}), do: Core.checkout_commit(repository, id)
 
@@ -609,6 +690,7 @@ defmodule MDTClientWeb.GitLive do
         graph: Layout.layout(snapshot.commits),
         changes: state.changes,
         stashes: state.stashes,
+        remotes: state.remotes,
         selected_commit: keep_commit(tab, snapshot, commits),
         selected_branch: keep_branch(tab, snapshot, branches),
         selected_paths: MapSet.intersection(tab.selected_paths, paths)
@@ -647,13 +729,23 @@ defmodule MDTClientWeb.GitLive do
   end
 
   defp apply_result(tab, {:error, %Error{} = error}) do
-    tab = %{tab | error: error, result: nil}
+    tab = %{
+      tab
+      | error: error,
+        result: nil,
+        ssh_open?: tab.ssh_open? or https_authentication_error?(error)
+    }
 
     cond do
       error.kind == :conflict -> %{tab | panel: "changes"}
       unmerged_branch?(error) -> %{tab | confirm: force_delete_confirmation(error)}
       true -> tab
     end
+  end
+
+  defp https_authentication_error?(%Error{message: message}) do
+    message =~ "could not read Username for 'https://" or
+      message =~ "Authentication failed for 'https://"
   end
 
   # Git refuses to delete a branch that is not fully merged; rather than hiding
@@ -871,6 +963,7 @@ defmodule MDTClientWeb.GitLive do
   defp label(:fetch), do: "Fetching"
   defp label({:pull, _strategy}), do: "Pulling"
   defp label({:push, _opts}), do: "Pushing"
+  defp label({:use_ssh_remote, _remote}), do: "Switching remote to SSH"
   defp label({:checkout_branch, _name}), do: "Checking out"
   defp label({:checkout_commit, _id}), do: "Checking out"
   defp label({:checkout_remote, _remote, _name}), do: "Checking out"
@@ -915,6 +1008,12 @@ defmodule MDTClientWeb.GitLive do
   defp find_tab(socket, id), do: Enum.find(socket.assigns.tabs, &(&1.id == id))
 
   defp update_tab(socket, fun), do: put_tab(socket, socket.assigns.active_id, fun)
+
+  defp update_all_tabs(socket, fun) do
+    socket
+    |> assign(:tabs, Enum.map(socket.assigns.tabs, fun))
+    |> sync_tab()
+  end
 
   defp put_tab(socket, nil, _fun), do: socket
 

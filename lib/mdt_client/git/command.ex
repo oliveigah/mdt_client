@@ -19,7 +19,7 @@ defmodule MDTClient.Git.Command do
   @spec capture(Repository.t(), [String.t()], keyword()) :: capture_result()
   def capture(%Repository{} = repository, args, opts \\ []) do
     capture_path(repository.path, args,
-      ssh_auth_sock: repository.ssh_auth_sock,
+      ssh_key: repository.ssh_key,
       env: Keyword.get(opts, :env, [])
     )
   end
@@ -31,7 +31,7 @@ defmodule MDTClient.Git.Command do
         {:system_error, Error.new(:git_not_found, "Git is not installed or is not on PATH")}
 
       executable ->
-        env = command_env(Keyword.get(opts, :ssh_auth_sock), Keyword.get(opts, :env, []))
+        env = command_env(Keyword.get(opts, :ssh_key), Keyword.get(opts, :env, []))
 
         try do
           System.cmd(executable, ["-C", path | args], stderr_to_stdout: true, env: env)
@@ -43,7 +43,7 @@ defmodule MDTClient.Git.Command do
     end
   end
 
-  defp command_env(ssh_auth_sock, extra) do
+  defp command_env(ssh_key, extra) do
     base = [
       {"GIT_TERMINAL_PROMPT", "0"},
       {"GIT_EDITOR", "true"},
@@ -52,11 +52,9 @@ defmodule MDTClient.Git.Command do
     ]
 
     base =
-      if is_binary(ssh_auth_sock) do
-        [{"SSH_AUTH_SOCK", ssh_auth_sock} | base]
-      else
-        base
-      end
+      if ssh_key,
+        do: [{"GIT_SSH_COMMAND", MDTClient.Git.SSHKey.command(ssh_key)} | base],
+        else: base
 
     base
     |> Map.new()

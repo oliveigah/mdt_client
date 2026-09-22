@@ -43,6 +43,20 @@ defmodule MDTClient.GitHelpers do
     git!(path, ["rev-parse", "HEAD"])
   end
 
+  def ssh_key_pair(base, name \\ "id_ed25519") do
+    private_key = Path.join(base, name)
+    executable = System.find_executable("ssh-keygen")
+    assert executable, "ssh-keygen is required by the Git SSH tests"
+
+    {output, status} =
+      System.cmd(executable, ["-q", "-t", "ed25519", "-N", "", "-f", private_key],
+        stderr_to_stdout: true
+      )
+
+    assert status == 0, "ssh-keygen failed:\n#{output}"
+    {private_key, private_key <> ".pub"}
+  end
+
   def git!(path, args) do
     {output, status} = System.cmd("git", ["-C", path | args], stderr_to_stdout: true)
     assert status == 0, "git #{Enum.join(args, " ")} failed:\n#{output}"
