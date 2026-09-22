@@ -100,6 +100,39 @@ defmodule MDTClient.Git.Core do
   def open(_path, _opts),
     do: {:error, Error.new(:invalid_argument, "Repository path must be a string")}
 
+  @doc """
+  Clones `url` into `destination` and opens the result.
+
+  The destination must not already hold anything: a clone that lands in a
+  populated folder is a mistake this cannot undo. Pass `private_key` and
+  `public_key`, or an `ssh_key`, to authenticate the same way an opened
+  repository would.
+  """
+  @spec clone(String.t(), Path.t(), keyword()) :: result(Repository.t())
+  def clone(url, destination, opts \\ []) do
+    with {:ok, url} <- text_argument(url, "Repository URL"),
+         {:ok, destination} <- clone_destination(destination),
+         {:ok, ssh_key} <- clone_ssh_key(opts),
+         :ok <- run_clone(destination, url, ssh_key) do
+      open(destination)
+    end
+  end
+
+  @doc "The folder name `git clone` would create for `url`."
+  @spec clone_name(String.t()) :: String.t()
+  def clone_name(url) when is_binary(url) do
+    url
+    |> String.trim()
+    |> String.trim_trailing("/")
+    |> String.split(~r{[/:]})
+    |> List.last()
+    |> Kernel.||("")
+    |> String.replace_suffix(".git", "")
+    |> String.replace(~r/[^A-Za-z0-9._-]/, "")
+  end
+
+  def clone_name(_url), do: ""
+
   @doc "Returns a copy of a repository handle using a validated SSH key pair."
   @spec with_ssh_keys(Repository.t(), Path.t(), Path.t()) :: result(Repository.t())
   def with_ssh_keys(%Repository{} = repository, private_key, public_key) do
@@ -610,6 +643,62 @@ defmodule MDTClient.Git.Core do
     with {:ok, operation} <- require_operation(repository),
          {:ok, args} <- abort_args(operation.kind) do
       run_mutation(repository, :abort_operation, args)
+    end
+  end
+
+  defp clone_destination(destination) when is_binary(destination) do
+    with {:ok, destination} <- text_argument(destination, "Destination folder") do
+      expanded = Path.expand(destination)
+
+      cond do
+        File.regular?(expanded) ->
+          {:error, Error.new(:invalid_argument, "The destination is a file")}
+
+        File.dir?(expanded) and File.ls!(expanded) != [] ->
+          {:error, Error.new(:invalid_argument, "The destination folder is not empty")}
+
+        true ->
+          {:ok, expanded}
+      end
+    end
+  end
+
+  defp clone_destination(_destination),
+    do: {:error, Error.new(:invalid_argument, "Destination folder must be a string")}
+
+  defp clone_ssh_key(opts) do
+    case {Keyword.get(opts, :ssh_key), Keyword.get(opts, :private_key),
+          Keyword.get(opts, :public_key)} do
+      {%SSHKey{} = ssh_key, _private, _public} -> {:ok, ssh_key}
+      {nil, nil, nil} -> {:ok, nil}
+      {nil, private, public} -> SSHKey.new(private, public)
+    end
+  end
+
+  defp run_clone(destination, url, ssh_key) do
+    parent = Path.dirname(destination)
+    args = ["clone", "--", url, destination]
+
+    with :ok <- ensure_writable(parent) do
+      case Command.capture_path(parent, args, ssh_key: ssh_key) do
+        {:system_error, error} -> {:error, error}
+        {_output, 0} -> :ok
+        {output, status} -> {:error, Error.command(args, status, output)}
+      end
+    end
+  end
+
+  defp ensure_writable(path) do
+    case File.mkdir_p(path) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        {:error,
+         Error.new(
+           :invalid_argument,
+           "Could not create #{path}: #{:file.format_error(reason)}"
+         )}
     end
   end
 

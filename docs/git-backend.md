@@ -57,6 +57,7 @@ for targeted refreshes.
 
 The core currently supports:
 
+- cloning a remote repository into an empty folder;
 - creating, checking out, renaming, and deleting local branches;
 - checking out a remote branch into a local tracking branch;
 - detached commit checkout;
@@ -81,9 +82,8 @@ rewrite, it changes descendant object IDs and can stop for conflict resolution.
 
 ## File boundary
 
-`MDTClient.Git.Files` owns the working tree. Today it exposes one read-only
-function, `status/1`, which lists the changed repository paths as
-`MDTClient.Git.FileChange` structs:
+`MDTClient.Git.Files` owns the working tree. `status/1` lists the changed
+repository paths as `MDTClient.Git.FileChange` structs:
 
 ```elixir
 {:ok, changes} = MDTClient.Git.Files.status(repository)
@@ -98,9 +98,23 @@ because they need different actions. The underlying command is
 `git status --porcelain=v2 -z`, whose NUL terminated records keep file names
 with spaces, quotes, or newlines intact.
 
-Diffs, file contents, editing, and discard are deliberately still absent. Stage,
-unstage, and path-limited stash remain in `Git.Core`: they accept only
-repository paths and perform Git index or object database mutations. Keeping
+`diff/3` reads one path at a time, on one side of the index:
+
+```elixir
+{:ok, diff} = MDTClient.Git.Files.diff(repository, "lib/app.ex", side: :staged)
+```
+
+It returns a `MDTClient.Git.FileDiff` holding `MDTClient.Git.DiffHunk`s of
+`MDTClient.Git.DiffLine`s, each line carrying the numbers it has on both sides.
+An untracked path has nothing in the repository to compare against, so passing
+`untracked: true` reads it against an empty file instead. A binary file is
+flagged rather than rendered, and `:lines` caps how much is parsed so opening a
+generated file cannot flood the caller. Diffs are read on request, never as part
+of a snapshot, so branch and graph refreshes stay cheap.
+
+File editing and discard are deliberately still absent. Stage, unstage, and
+path-limited stash remain in `Git.Core`: they accept only repository paths and
+perform Git index or object database mutations. Keeping
 file content outside the core lets graph and branch state refresh independently
 from larger diff payloads, while both APIs share the same repository handle and
 command runner, so a tab's SSH credentials apply to either.
@@ -116,7 +130,11 @@ rows, lanes, and edges.
 
 The graph is the primary surface: a right click, a row menu, or the inspector's
 Actions button opens the same commit menu, and every entry maps to one `Core`
-call. Folder selection goes through the Tauri dialog plugin; because the window
-loads the local Phoenix server over loopback, that call is only permitted by the
-`local-server` capability described in `README.md`. When the picker cannot run
-at all — a browser, say — the UI falls back to a dialog asking for a path.
+call. A dirty worktree takes a row of its own above the newest commit, drawn by
+`Layout.pending_row/1`, and opening a file diff replaces the graph until it is
+closed. The open folders are remembered by `MDTClientWeb.GitLive.Session`, and a
+timer refreshes the active tab so work done outside MDT appears on its own. Folder selection goes through the Tauri dialog plugin; because the window loads
+the local Phoenix server over loopback, that call is only permitted by the
+`local-server` capability described in `README.md`. The same chooser offers
+`Core.clone/3` for a repository that is not on this machine yet, and falls back
+to a typed path where the picker cannot run at all, such as a browser.

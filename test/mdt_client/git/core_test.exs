@@ -352,4 +352,60 @@ defmodule MDTClient.Git.CoreTest do
     assert snapshot.head == detached_head
     assert Enum.any?(snapshot.commits, &(&1.id == detached_head))
   end
+
+  describe "clone/3" do
+    test "clones a repository into a new folder and opens it", context do
+      %{base: base, path: path} = context
+      destination = Path.join([base, "cloned", "target"])
+
+      assert {:ok, %Repository{} = clone} = Core.clone(path, destination)
+      assert clone.path == destination
+      assert File.read!(Path.join(destination, "README.md")) == "initial\n"
+
+      assert {:ok, snapshot} = Core.snapshot(clone)
+      assert snapshot.current_branch == "main"
+      assert length(snapshot.commits) == 1
+    end
+
+    test "refuses a destination that already holds something", context do
+      %{base: base, path: path} = context
+      destination = Path.join(base, "occupied")
+      File.mkdir_p!(destination)
+      File.write!(Path.join(destination, "keep.txt"), "keep\n")
+
+      assert {:error, %Error{kind: :invalid_argument}} = Core.clone(path, destination)
+      assert File.exists?(Path.join(destination, "keep.txt"))
+
+      file = Path.join(base, "a-file")
+      File.write!(file, "")
+      assert {:error, %Error{kind: :invalid_argument}} = Core.clone(path, file)
+    end
+
+    test "reports what Git said when the source cannot be cloned", %{base: base} do
+      assert {:error, %Error{kind: :command_failed} = error} =
+               Core.clone(Path.join(base, "missing.git"), Path.join(base, "nowhere"))
+
+      assert error.message =~ "repository"
+    end
+
+    test "validates its arguments", %{base: base, path: path} do
+      assert {:error, %Error{kind: :invalid_argument}} = Core.clone("", Path.join(base, "x"))
+      assert {:error, %Error{kind: :invalid_argument}} = Core.clone(path, "")
+
+      assert {:error, %Error{kind: :invalid_argument}} =
+               Core.clone(path, Path.join(base, "keys"),
+                 private_key: "/nope",
+                 public_key: "/nope"
+               )
+    end
+
+    test "clone_name/1 derives the folder Git would create" do
+      assert Core.clone_name("git@github.com:owner/mdt_client.git") == "mdt_client"
+      assert Core.clone_name("https://github.com/owner/mdt-client") == "mdt-client"
+      assert Core.clone_name("https://host/group/project.git/") == "project"
+      assert Core.clone_name("/srv/git/local-repo") == "local-repo"
+      assert Core.clone_name("") == ""
+      assert Core.clone_name(nil) == ""
+    end
+  end
 end

@@ -2,12 +2,13 @@ defmodule MDTClient.Git.Files do
   @moduledoc """
   The read-only working-tree boundary of the Git backend.
 
-  `status/1` is the only entry point: it lists the repository paths Git
-  considers changed as `MDTClient.Git.FileChange` structs, which is what the
-  action panel needs to build a selection for `MDTClient.Git.Core.stage/2`,
-  `unstage/2`, and `stash/3`. Diffs, file contents, editing, and discard are
-  deliberately not part of it, so branch and graph refreshes never pay for
-  larger payloads.
+  `status/1` lists the repository paths Git considers changed as
+  `MDTClient.Git.FileChange` structs, which is what the action panel needs to
+  build a selection for `MDTClient.Git.Core.stage/2`, `unstage/2`, and
+  `stash/3`. `diff/3` reads the unified diff of a single path on request, so
+  branch and graph refreshes never pay for diff payloads.
+
+  Editing and discarding files are deliberately still absent.
 
   The module shares `MDTClient.Git.Repository` handles and the command runner
   with `MDTClient.Git.Core`, so the SSH credentials and safety guarantees of a tab
@@ -15,9 +16,14 @@ defmodule MDTClient.Git.Files do
   """
 
   alias MDTClient.Git.Command
+  alias MDTClient.Git.DiffHunk
+  alias MDTClient.Git.DiffLine
   alias MDTClient.Git.Error
   alias MDTClient.Git.FileChange
+  alias MDTClient.Git.FileDiff
   alias MDTClient.Git.Repository
+
+  @default_line_limit 4_000
 
   # Porcelain v2 reports the index and working-tree side of every path with two
   # single letter codes. A dot means "no change on this side".
@@ -155,5 +161,179 @@ defmodule MDTClient.Git.Files do
   defp invalid(record) do
     {:error,
      Error.new(:invalid_output, "Git returned an unreadable status record: #{inspect(record)}")}
+  end
+
+  @doc """
+  Returns the unified diff of one repository path.
+
+  `:side` selects which half of the change to read: `:unstaged` (the default)
+  compares the working tree against the index, `:staged` compares the index
+  against HEAD. Pass `untracked: true` for a path Git does not track yet, whose
+  whole content reads as added. `:lines` caps how much is parsed, so opening a
+  generated file cannot flood the caller.
+  """
+  @spec diff(Repository.t(), Path.t(), keyword()) :: {:ok, FileDiff.t()} | {:error, Error.t()}
+  def diff(%Repository{} = repository, path, opts \\ []) do
+    with {:ok, side} <- diff_side(Keyword.get(opts, :side, :unstaged)),
+         {:ok, limit} <- line_limit(Keyword.get(opts, :lines, @default_line_limit)),
+         {:ok, relative} <- repository_path(repository, path),
+         {:ok, output} <-
+           read_diff(repository, side, relative, Keyword.get(opts, :untracked, false)) do
+      {:ok, parse_diff(output, path, side, limit)}
+    end
+  end
+
+  defp diff_side(side) when side in [:staged, :unstaged], do: {:ok, side}
+
+  defp diff_side(_side),
+    do: {:error, Error.new(:invalid_argument, "Diff side must be :staged or :unstaged")}
+
+  defp line_limit(lines) when is_integer(lines) and lines > 0, do: {:ok, lines}
+
+  defp line_limit(_lines),
+    do: {:error, Error.new(:invalid_argument, "Line limit must be a positive integer")}
+
+  # An untracked file has nothing to compare against inside the repository, so
+  # Git reads it against an empty file instead. That form reports "differences
+  # found" with exit status 1, which is a result rather than a failure here.
+  defp read_diff(repository, :unstaged, relative, true) do
+    args = ["diff", "--no-color", "--no-ext-diff", "--no-index", "--", "/dev/null", relative]
+
+    case Command.capture(repository, args) do
+      {:system_error, error} -> {:error, error}
+      {output, status} when status in [0, 1] -> {:ok, output}
+      {output, status} -> {:error, Error.command(args, status, output)}
+    end
+  end
+
+  defp read_diff(_repository, :staged, _relative, true) do
+    {:ok, ""}
+  end
+
+  defp read_diff(repository, side, relative, _untracked?) do
+    staged = if side == :staged, do: ["--cached"], else: []
+    args = ["diff", "--no-color", "--no-ext-diff"] ++ staged ++ ["--", pathspec(relative)]
+
+    Command.run(repository, args)
+  end
+
+  defp pathspec(relative), do: ":(top,literal)" <> relative
+
+  defp repository_path(repository, path) when is_binary(path) and path != "" do
+    relative = Path.relative_to(Path.expand(path, repository.path), repository.path)
+
+    if relative == "." or Path.type(relative) == :absolute or
+         String.starts_with?(relative, "../") do
+      {:error, Error.new(:invalid_argument, "File path is outside the repository")}
+    else
+      {:ok, relative}
+    end
+  end
+
+  defp repository_path(_repository, _path),
+    do: {:error, Error.new(:invalid_argument, "File path must be a non-empty string")}
+
+  defp parse_diff(output, path, side, limit) do
+    state =
+      output
+      |> String.split("\n")
+      |> Enum.reduce(
+        %{hunks: [], hunk: nil, old: 0, new: 0, count: 0, binary?: false, truncated?: false},
+        &diff_line/2
+      )
+      |> close_hunk()
+
+    %FileDiff{
+      path: path,
+      side: side,
+      hunks: Enum.reverse(state.hunks),
+      binary?: state.binary?,
+      truncated?: state.truncated?
+    }
+    |> cap(limit)
+  end
+
+  defp diff_line(_line, %{truncated?: true} = state), do: state
+
+  defp diff_line("@@" <> _rest = line, state) do
+    state = close_hunk(state)
+
+    case Regex.run(~r/^@@+ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@+ ?(.*)$/, line,
+           capture: :all_but_first
+         ) do
+      [old, new, heading] ->
+        old = String.to_integer(old)
+        new = String.to_integer(new)
+
+        %{
+          state
+          | hunk: %DiffHunk{
+              header: line,
+              heading: if(heading == "", do: nil, else: heading),
+              old_start: old,
+              new_start: new,
+              lines: []
+            },
+            old: old,
+            new: new
+        }
+
+      _unreadable ->
+        %{state | hunk: nil}
+    end
+  end
+
+  defp diff_line("Binary files " <> _rest, state), do: %{state | binary?: true}
+  defp diff_line("GIT binary patch" <> _rest, state), do: %{state | binary?: true}
+  defp diff_line(_line, %{hunk: nil} = state), do: state
+  defp diff_line("\\" <> _no_newline, state), do: state
+
+  defp diff_line("+" <> text, state) do
+    add_line(state, %DiffLine{kind: :added, text: text, new_line: state.new}, 0, 1)
+  end
+
+  defp diff_line("-" <> text, state) do
+    add_line(state, %DiffLine{kind: :removed, text: text, old_line: state.old}, 1, 0)
+  end
+
+  defp diff_line(" " <> text, state) do
+    line = %DiffLine{kind: :context, text: text, old_line: state.old, new_line: state.new}
+    add_line(state, line, 1, 1)
+  end
+
+  defp diff_line("", state), do: state
+  defp diff_line(_line, state), do: state
+
+  defp add_line(state, line, old_step, new_step) do
+    %{
+      state
+      | hunk: %{state.hunk | lines: [line | state.hunk.lines]},
+        old: state.old + old_step,
+        new: state.new + new_step,
+        count: state.count + 1
+    }
+  end
+
+  defp close_hunk(%{hunk: nil} = state), do: state
+
+  defp close_hunk(%{hunk: hunk} = state) do
+    hunk = %{hunk | lines: Enum.reverse(hunk.lines)}
+    %{state | hunks: [hunk | state.hunks], hunk: nil}
+  end
+
+  defp cap(%FileDiff{} = diff, limit) do
+    {hunks, _kept} =
+      Enum.reduce_while(diff.hunks, {[], 0}, fn hunk, {hunks, kept} ->
+        room = limit - kept
+
+        cond do
+          room <= 0 -> {:halt, {hunks, kept}}
+          length(hunk.lines) <= room -> {:cont, {[hunk | hunks], kept + length(hunk.lines)}}
+          true -> {:halt, {[%{hunk | lines: Enum.take(hunk.lines, room)} | hunks], limit}}
+        end
+      end)
+
+    hunks = Enum.reverse(hunks)
+    %{diff | hunks: hunks, truncated?: hunks != diff.hunks}
   end
 end

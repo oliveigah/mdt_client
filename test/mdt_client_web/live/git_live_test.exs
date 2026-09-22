@@ -633,7 +633,12 @@ defmodule MDTClientWeb.GitLiveTest do
     open(view, path)
 
     view |> element("#git-panel-changes") |> render_click()
-    assert has_element?(view, "#git-changes-empty")
+
+    # Both sides stay on screen even when they are empty, unstaged first.
+    assert has_element?(view, "#git-unstaged")
+    assert has_element?(view, "#git-staged")
+    assert has_element?(view, "#git-unstaged-empty")
+    assert has_element?(view, "#git-staged-empty")
     assert has_element?(view, "#git-stashes-empty")
 
     File.write!(Path.join(path, "README.md"), "changed\n")
@@ -872,4 +877,338 @@ defmodule MDTClientWeb.GitLiveTest do
   end
 
   defp slug(value), do: Components.slug(value)
+
+  ## Stashes, working tree and the WIP row
+
+  test "stashes are listed in the branch panel", context do
+    %{view: view, path: path} = context
+    File.write!(Path.join(path, "README.md"), "changed\n")
+    open(view, path)
+
+    assert count(view, "#git-branches #git-stashes-empty") == 1
+
+    view |> element("#git-panel-changes") |> render_click()
+    view |> element("#git-select-all-paths") |> render_click()
+
+    view
+    |> form("#git-stash-form", %{"message" => "left panel stash", "include_untracked" => "true"})
+    |> render_submit()
+
+    render_async(view)
+
+    # The list belongs to the branch panel, not the inspector.
+    assert count(view, "#git-branches #git-stashes") == 1
+    assert count(view, "#git-inspector #git-stashes") == 0
+    assert view |> element("#git-branches #git-stash-0") |> render() =~ "left panel stash"
+
+    view |> element("#git-stashes-toggle") |> render_click()
+    refute has_element?(view, "#git-stashes")
+  end
+
+  test "a dirty worktree gets a WIP row above the newest commit", context do
+    %{view: view, path: path} = context
+    open(view, path)
+
+    refute has_element?(view, "#git-wip-row")
+
+    File.write!(Path.join(path, "README.md"), "changed\n")
+    File.write!(Path.join(path, "fresh.txt"), "fresh\n")
+    view |> element("#git-refresh") |> render_click()
+    render_async(view)
+
+    assert has_element?(view, "#git-wip-row")
+    row = view |> element("#git-wip-row") |> render()
+    assert row =~ "WIP"
+    assert row =~ "~2"
+
+    # It is the way into the working tree from the graph.
+    view |> element("#git-select-wip") |> render_click()
+    assert has_element?(view, "#git-working-tree")
+    assert has_element?(view, "#git-select-wip[aria-pressed=true]")
+  end
+
+  test "an empty repository with changes still shows the WIP row", context do
+    %{view: view, base: base} = context
+    fresh = Path.join(base, "unborn")
+    File.mkdir_p!(fresh)
+    git!(fresh, ["init", "--initial-branch=main"])
+    File.write!(Path.join(fresh, "first.txt"), "first\n")
+
+    open(view, fresh)
+
+    assert has_element?(view, "#git-wip-row")
+    refute has_element?(view, "#git-commits-empty")
+  end
+
+  test "stages one file from its own row", context do
+    %{view: view, path: path} = context
+    File.write!(Path.join(path, "one.txt"), "one\n")
+    File.write!(Path.join(path, "two.txt"), "two\n")
+    open(view, path)
+
+    view |> element("#git-panel-changes") |> render_click()
+    view |> element("#git-move-unstaged-#{slug("one.txt")}") |> render_click()
+    render_async(view)
+
+    assert git!(path, ["diff", "--cached", "--name-only"]) == "one.txt"
+
+    view |> element("#git-move-staged-#{slug("one.txt")}") |> render_click()
+    render_async(view)
+
+    assert git!(path, ["diff", "--cached", "--name-only"]) == ""
+  end
+
+  test "stages and unstages every file on one side", context do
+    %{view: view, path: path} = context
+    File.write!(Path.join(path, "one.txt"), "one\n")
+    File.write!(Path.join(path, "two.txt"), "two\n")
+    open(view, path)
+
+    view |> element("#git-panel-changes") |> render_click()
+    view |> element("#git-unstaged-all") |> render_click()
+    render_async(view)
+
+    assert git!(path, ["diff", "--cached", "--name-only"]) == "one.txt\ntwo.txt"
+    assert has_element?(view, "#git-unstaged-empty")
+
+    view |> element("#git-staged-all") |> render_click()
+    render_async(view)
+
+    assert git!(path, ["diff", "--cached", "--name-only"]) == ""
+    assert has_element?(view, "#git-staged-empty")
+  end
+
+  ## Diffs
+
+  test "opens a file diff in the middle panel and closes it again", context do
+    %{view: view, path: path} = context
+    File.write!(Path.join(path, "README.md"), "changed line\n")
+    open(view, path)
+
+    view |> element("#git-panel-changes") |> render_click()
+    view |> element("#git-diff-unstaged-#{slug("README.md")}") |> render_click()
+    render_async(view)
+
+    assert has_element?(view, "#git-diff")
+    assert has_element?(view, "#git-diff-body")
+    refute has_element?(view, "#git-commits")
+
+    body = view |> element("#git-diff-body") |> render()
+    assert body =~ "changed line"
+    assert body =~ "initial"
+
+    view |> element("#git-close-diff") |> render_click()
+
+    refute has_element?(view, "#git-diff")
+    assert has_element?(view, "#git-commits")
+  end
+
+  test "the diff follows a file across the index and reports an untracked one", context do
+    %{view: view, path: path} = context
+    File.write!(Path.join(path, "brand new.txt"), "hello\n")
+    open(view, path)
+
+    view |> element("#git-panel-changes") |> render_click()
+    view |> element("#git-diff-unstaged-#{slug("brand new.txt")}") |> render_click()
+    render_async(view)
+
+    assert view |> element("#git-diff-body") |> render() =~ "hello"
+
+    # Staging empties the unstaged side, so the view moves to the staged one.
+    view |> element("#git-move-unstaged-#{slug("brand new.txt")}") |> render_click()
+    render_async(view)
+
+    assert has_element?(view, "#git-diff-side-staged[aria-pressed=true]")
+    assert view |> element("#git-diff-body") |> render() =~ "hello"
+
+    view |> element("#git-diff-side-unstaged") |> render_click()
+    render_async(view)
+
+    assert has_element?(view, "#git-diff-empty")
+  end
+
+  test "closing the diff hands the graph back, selection intact", context do
+    %{view: view, path: path, initial_commit: initial} = context
+    File.write!(Path.join(path, "README.md"), "changed\n")
+    open(view, path)
+
+    view |> element("#git-panel-changes") |> render_click()
+    view |> element("#git-diff-unstaged-#{slug("README.md")}") |> render_click()
+    render_async(view)
+    assert has_element?(view, "#git-diff")
+
+    view |> element("#git-close-diff") |> render_click()
+
+    assert has_element?(view, "#git-select-commit-#{initial}")
+    view |> element("#git-select-commit-#{initial}") |> render_click()
+    assert has_element?(view, "#git-commit-details")
+    refute has_element?(view, "#git-diff")
+  end
+
+  ## Sessions and background refresh
+
+  test "the folders that were open come back", context do
+    %{view: view, path: path, base: base, conn: conn} = context
+
+    other = Path.join(base, "other")
+    File.mkdir_p!(other)
+    git!(other, ["init", "--initial-branch=main"])
+    git!(other, ["config", "user.name", "MDT Test"])
+    git!(other, ["config", "user.email", "mdt@example.test"])
+    commit_file(other, "other.txt", "other\n", "other commit")
+
+    open(view, path)
+    open(view, other)
+    [first, _second] = tab_ids(view)
+    view |> element("#git-tab-#{first}") |> render_click()
+
+    {:ok, reopened, _html} = live(conn, ~p"/tools/git")
+    render_async(reopened)
+
+    assert count(reopened, "#git-tabs [role=tab]") == 2
+    assert render(reopened) =~ Path.basename(path)
+    assert render(reopened) =~ "other"
+
+    # Order and the tab that was in front are both restored.
+    assert [restored_first, _] = tab_ids(reopened)
+    assert has_element?(reopened, "#git-tab-#{restored_first}[aria-selected=true]")
+    assert render(reopened) =~ "initial commit"
+  end
+
+  test "a folder that has gone away is dropped quietly", context do
+    %{view: view, base: base, conn: conn} = context
+
+    doomed = Path.join(base, "doomed")
+    File.mkdir_p!(doomed)
+    git!(doomed, ["init", "--initial-branch=main"])
+    open(view, doomed)
+    assert count(view, "#git-tabs [role=tab]") == 1
+
+    File.rm_rf!(doomed)
+
+    {:ok, reopened, _html} = live(conn, ~p"/tools/git")
+    render_async(reopened)
+
+    assert has_element?(reopened, "#git-empty-state")
+    refute has_element?(reopened, "#git-open-error")
+
+    # And it is not tried again on the next visit.
+    {:ok, again, _html} = live(conn, ~p"/tools/git")
+    render_async(again)
+    assert has_element?(again, "#git-empty-state")
+  end
+
+  test "closing a tab forgets it", context do
+    %{view: view, path: path, conn: conn} = context
+    open(view, path)
+    [id] = tab_ids(view)
+    view |> element("#git-close-tab-#{id}") |> render_click()
+
+    {:ok, reopened, _html} = live(conn, ~p"/tools/git")
+    render_async(reopened)
+
+    assert has_element?(reopened, "#git-empty-state")
+  end
+
+  test "work done outside the app is picked up on its own", context do
+    %{view: view, path: path} = context
+    open(view, path)
+
+    assert count(view, "#git-commits [role=option]") == 1
+
+    commit_file(path, "outside.txt", "outside\n", "made outside")
+
+    send(view.pid, :auto_refresh)
+    render_async(view)
+
+    assert count(view, "#git-commits [role=option]") == 2
+    assert render(view) =~ "made outside"
+    # A background refresh stays quiet: no spinner, no result banner.
+    refute has_element?(view, "#git-operation-status")
+    refute has_element?(view, "#git-result")
+  end
+
+  test "a background refresh holds off while a dialog is open", context do
+    %{view: view, path: path} = context
+    open(view, path)
+
+    view |> element("#git-open-folder") |> render_click()
+    assert has_element?(view, "#git-open-dialog")
+
+    commit_file(path, "outside.txt", "outside\n", "made outside")
+    send(view.pid, :auto_refresh)
+    render_async(view)
+
+    assert count(view, "#git-commits [role=option]") == 1
+  end
+
+  ## Cloning
+
+  test "clones a repository into a new folder and opens it", context do
+    %{view: view, path: path, base: base} = context
+
+    view |> element("#git-open-folder") |> render_click()
+    view |> element("#git-open-mode-clone") |> render_click()
+    assert has_element?(view, "#git-clone-form")
+
+    destination = Path.join(base, "clones")
+
+    view
+    |> form("#git-clone-form", %{"url" => path, "parent" => destination, "name" => "copy"})
+    |> render_submit()
+
+    render_async(view)
+
+    assert File.exists?(Path.join([destination, "copy", "README.md"]))
+    refute has_element?(view, "#git-open-dialog")
+    assert count(view, "#git-tabs [role=tab]") == 1
+    assert render(view) =~ "copy"
+    assert render(view) =~ "initial commit"
+  end
+
+  test "a clone that cannot run keeps the form and says why", context do
+    %{view: view, base: base} = context
+
+    view |> element("#git-open-folder") |> render_click()
+    view |> element("#git-open-mode-clone") |> render_click()
+
+    view
+    |> form("#git-clone-form", %{"url" => "", "parent" => base, "name" => "nope"})
+    |> render_submit()
+
+    assert has_element?(view, "#git-open-dialog-error")
+    assert render(view) =~ "address of the repository"
+
+    view
+    |> form("#git-clone-form", %{
+      "url" => Path.join(base, "missing.git"),
+      "parent" => base,
+      "name" => "nope"
+    })
+    |> render_submit()
+
+    render_async(view)
+
+    assert has_element?(view, "#git-clone-form")
+    assert has_element?(view, "#git-open-dialog-error")
+  end
+
+  test "the clone name defaults to the one Git would use", context do
+    %{view: view, path: path, base: base} = context
+
+    view |> element("#git-open-folder") |> render_click()
+    view |> element("#git-open-mode-clone") |> render_click()
+
+    view
+    |> form("#git-clone-form", %{
+      "url" => path,
+      "parent" => Path.join(base, "defaulted"),
+      "name" => ""
+    })
+    |> render_submit()
+
+    render_async(view)
+
+    assert File.dir?(Path.join([base, "defaulted", Path.basename(path), ".git"]))
+  end
 end

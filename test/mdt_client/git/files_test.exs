@@ -5,6 +5,7 @@ defmodule MDTClient.Git.FilesTest do
 
   alias MDTClient.Git.Core
   alias MDTClient.Git.FileChange
+  alias MDTClient.Git.FileDiff
   alias MDTClient.Git.Files
 
   setup :initialized_repository
@@ -145,5 +146,102 @@ defmodule MDTClient.Git.FilesTest do
 
     assert Enum.map(Enum.filter(changes, &FileChange.staged?/1), & &1.path) == ["staged.txt"]
     assert Enum.map(Enum.filter(changes, &FileChange.unstaged?/1), & &1.path) == ["README.md"]
+  end
+
+  describe "diff/3" do
+    setup %{path: path} do
+      File.write!(Path.join(path, "counted.txt"), Enum.map_join(1..10, "", &"line #{&1}\n"))
+      git!(path, ["add", "-A"])
+      git!(path, ["commit", "-m", "add counted"])
+      :ok
+    end
+
+    test "reads the working tree against the index", context do
+      %{path: path, repository: repository} = context
+      File.write!(Path.join(path, "counted.txt"), "line 1\nCHANGED\nline 3\n")
+
+      assert {:ok, %FileDiff{side: :unstaged, binary?: false} = diff} =
+               Files.diff(repository, "counted.txt")
+
+      assert %{added: 1, removed: 8} = FileDiff.counts(diff)
+
+      lines = Enum.flat_map(diff.hunks, & &1.lines)
+      assert %{kind: :context, text: "line 1", old_line: 1, new_line: 1} = hd(lines)
+      assert Enum.any?(lines, &(&1.kind == :added and &1.text == "CHANGED" and &1.new_line == 2))
+      assert Enum.any?(lines, &(&1.kind == :removed and &1.text == "line 2" and &1.old_line == 2))
+    end
+
+    test "reads the index against HEAD", context do
+      %{path: path, repository: repository} = context
+      File.write!(Path.join(path, "counted.txt"), "staged only\n")
+      git!(path, ["add", "--", "counted.txt"])
+
+      assert {:ok, staged} = Files.diff(repository, "counted.txt", side: :staged)
+      assert %{added: 1, removed: 10} = FileDiff.counts(staged)
+
+      # The working tree now matches the index, so that side has nothing to show.
+      assert {:ok, %FileDiff{hunks: []}} = Files.diff(repository, "counted.txt")
+    end
+
+    test "reads an untracked file as entirely added", context do
+      %{path: path, repository: repository} = context
+      File.write!(Path.join(path, "fresh file.txt"), "one\ntwo\n")
+
+      assert {:ok, diff} = Files.diff(repository, "fresh file.txt", untracked: true)
+      assert %{added: 2, removed: 0} = FileDiff.counts(diff)
+      assert Enum.map(Enum.flat_map(diff.hunks, & &1.lines), & &1.text) == ["one", "two"]
+
+      # Nothing about it is staged yet.
+      assert {:ok, %FileDiff{hunks: []}} =
+               Files.diff(repository, "fresh file.txt", side: :staged, untracked: true)
+    end
+
+    test "carries the hunk heading and starting lines", context do
+      %{path: path, repository: repository} = context
+
+      File.write!(
+        Path.join(path, "counted.txt"),
+        Enum.map_join(1..10, "", fn
+          8 -> "line 8 changed\n"
+          line -> "line #{line}\n"
+        end)
+      )
+
+      assert {:ok, diff} = Files.diff(repository, "counted.txt")
+      assert [hunk] = diff.hunks
+      assert hunk.header =~ "@@"
+      assert hunk.old_start > 1
+      assert hunk.new_start > 1
+    end
+
+    test "flags a binary file instead of rendering it", context do
+      %{path: path, repository: repository} = context
+      File.write!(Path.join(path, "blob.bin"), <<0, 1, 2, 0, 255>>)
+      git!(path, ["add", "-A"])
+      git!(path, ["commit", "-m", "add blob"])
+      File.write!(Path.join(path, "blob.bin"), <<0, 9, 9, 0, 1>>)
+
+      assert {:ok, %FileDiff{binary?: true, hunks: []}} = Files.diff(repository, "blob.bin")
+    end
+
+    test "stops at the line budget and says so", context do
+      %{path: path, repository: repository} = context
+      File.write!(Path.join(path, "counted.txt"), Enum.map_join(1..400, "", &"new #{&1}\n"))
+
+      assert {:ok, %FileDiff{truncated?: true} = diff} =
+               Files.diff(repository, "counted.txt", lines: 5)
+
+      assert Enum.sum(Enum.map(diff.hunks, &length(&1.lines))) == 5
+
+      assert {:ok, %FileDiff{truncated?: false}} =
+               Files.diff(repository, "counted.txt", lines: 5_000)
+    end
+
+    test "refuses paths outside the repository and bad options", %{repository: repository} do
+      assert {:error, %{kind: :invalid_argument}} = Files.diff(repository, "../escape.txt")
+      assert {:error, %{kind: :invalid_argument}} = Files.diff(repository, "")
+      assert {:error, %{kind: :invalid_argument}} = Files.diff(repository, "a.txt", side: :both)
+      assert {:error, %{kind: :invalid_argument}} = Files.diff(repository, "a.txt", lines: 0)
+    end
   end
 end

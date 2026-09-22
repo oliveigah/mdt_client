@@ -34,6 +34,25 @@ defmodule MDTClientWeb.GitLive.Graph.Layout do
   @spec colors() :: pos_integer()
   def colors, do: @colors
 
+  @doc """
+  The row a dirty worktree occupies above the newest commit.
+
+  It carries no commit, sits in the lane the newest commit uses, and draws a
+  single edge down into it, so uncommitted work reads as the tip of the branch
+  it will land on.
+  """
+  @spec pending_row(t()) :: Row.t()
+  def pending_row(%__MODULE__{rows: []}), do: %Row{commit: nil, lane: 0, color: color(0)}
+
+  def pending_row(%__MODULE__{rows: [newest | _rest]}) do
+    %Row{
+      commit: nil,
+      lane: newest.lane,
+      color: newest.color,
+      outgoing: [{newest.lane, newest.lane, newest.color}]
+    }
+  end
+
   @doc "Lays out `commits`, which must already be in topological order."
   @spec layout([Commit.t()]) :: t()
   def layout(commits) when is_list(commits) do

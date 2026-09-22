@@ -13,16 +13,20 @@ The app boots to a sign in screen (`/`), which leads to the tool picker
   curl import/export. `Ctrl+Enter` sends; the history and the request/response
   split are drag resizable.
 * **Git GUI** (`/tools/git`) — a repository tab per folder, over three resizable
-  panels: branches with tracking state on the left, a lane-drawn commit graph in
-  the middle, and an inspector on the right that switches between commit
-  metadata and the working tree. The graph is where work happens: right click
-  any commit (or use its row menu, or the inspector's Actions button) for
-  checkout, branch creation, cherry-pick, revert, merge, rebase, message edits
-  and resets. Refs sit in their own column beside the graph, a monitor marking a
-  local branch, a cloud a remote one and a tick the branch HEAD is on. The
-  working-tree mode stages, unstages and stashes the paths you select. Folders
-  are chosen with the native desktop picker, and each tab picks its own SSH
-  agent. `docs/git-backend.md` covers the backend it drives.
+  panels: branches and stashes on the left, a lane-drawn commit graph in the
+  middle, and an inspector on the right that switches between commit metadata
+  and the working tree. The graph is where work happens: right click any commit
+  (or use its row menu, or the inspector's Actions button) for checkout, branch
+  creation, cherry-pick, revert, merge, rebase, message edits and resets. Refs
+  sit in their own column beside the graph, a monitor marking a local branch, a
+  cloud a remote one and a tick the branch HEAD is on, and uncommitted work
+  takes a dashed WIP row above the newest commit. The working tree keeps
+  unstaged and staged files in their own lists, stages, unstages and stashes the
+  paths you select, and opens any file's diff over the graph. Folders are chosen
+  with the native desktop picker or cloned from a remote, they come back in
+  their tabs the next time you open the tool, and the active one refreshes on a
+  timer so work done elsewhere shows up. `docs/git-backend.md` covers the
+  backend it drives.
 
 Signing in takes a username and a password. The password is stretched into an
 encryption key, and everything that identity persists — today the HTTP client's

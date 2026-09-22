@@ -17,14 +17,17 @@ defmodule MDTClientWeb.GitLive do
   alias MDTClient.Git.CommandResult
   alias MDTClient.Git.Core
   alias MDTClient.Git.Error
+  alias MDTClient.Git.FileChange
   alias MDTClient.Git.Files
   alias MDTClient.Preferences
   alias MDTClient.Tools
+  alias MDTClientWeb.GitLive.Session
   alias MDTClientWeb.GitLive.Components
   alias MDTClientWeb.GitLive.Graph.Layout
 
   @limits [500, 1_000, 2_500, 5_000]
   @default_limit 500
+  @refresh_interval :timer.seconds(5)
 
   @impl true
   def mount(_params, _session, socket) do
@@ -40,7 +43,27 @@ defmodule MDTClientWeb.GitLive do
      |> assign(:tab, nil)
      |> assign(:opening, nil)
      |> assign(:open_error, nil)
-     |> assign(:open_dialog, nil)}
+     |> assign(:open_dialog, nil)
+     |> assign(:restore_order, [])
+     |> assign(:restore_active, nil)
+     |> restore_session()}
+  end
+
+  # The folders that were open last time come back, in the order they were in.
+  # A folder that has since moved or stopped being a worktree is dropped without
+  # complaint: it is not something the reader asked for right now.
+  defp restore_session(socket) do
+    if connected?(socket) do
+      paths = Session.repositories()
+      schedule_refresh()
+
+      socket
+      |> assign(:restore_order, paths)
+      |> assign(:restore_active, Session.active_repository())
+      |> then(fn socket -> Enum.reduce(paths, socket, &start_open(&2, &1, :restore)) end)
+    else
+      socket
+    end
   end
 
   @impl true
@@ -92,12 +115,7 @@ defmodule MDTClientWeb.GitLive do
 
       <Components.menu_overlay :if={@tab && @tab.menu} tab={@tab} />
 
-      <Components.open_dialog
-        :if={@open_dialog}
-        reason={@open_dialog.reason}
-        error={@open_dialog.error}
-        path={@open_dialog.path}
-      />
+      <Components.open_dialog :if={@open_dialog} dialog={@open_dialog} />
 
       <Components.confirm_dialog :if={@tab && @tab.confirm} confirm={@tab.confirm} />
     </Layouts.app>
@@ -115,15 +133,58 @@ defmodule MDTClientWeb.GitLive do
       path ->
         {:noreply,
          socket
-         |> assign(:opening, path)
          |> assign(:open_error, nil)
          |> assign(:open_dialog, nil)
+         |> start_open(path, :manual)}
+    end
+  end
+
+  @impl true
+  def handle_event("clone_repository", params, socket) do
+    url = String.trim(params["url"] || "")
+    parent = String.trim(params["parent"] || "")
+    name = String.trim(params["name"] || "")
+    name = if name == "", do: Core.clone_name(url), else: name
+
+    cond do
+      url == "" ->
+        {:noreply, clone_failed(socket, "Enter the address of the repository to clone")}
+
+      parent == "" ->
+        {:noreply, clone_failed(socket, "Choose the folder the clone should go into")}
+
+      name == "" ->
+        {:noreply, clone_failed(socket, "Give the new folder a name")}
+
+      true ->
+        destination = Path.join(Path.expand(parent), name)
+        keys = saved_ssh_keys()
+
+        {:noreply,
+         socket
+         |> put_dialog(url: url, parent: parent, name: name, error: nil, cloning: destination)
          |> start_async({:open, System.unique_integer([:positive])}, fn ->
-           with {:ok, repository} <- Core.open(path) do
-             {:ok, repository, load(repository, @default_limit)}
-           end
+           {:manual, destination,
+            with {:ok, repository} <- Core.clone(url, destination, keys) do
+              {:ok, repository, load(repository, @default_limit)}
+            end}
          end)}
     end
+  end
+
+  @impl true
+  def handle_event("clone_parent_selected", %{"path" => path}, socket) do
+    {:noreply, put_dialog(socket, parent: path)}
+  end
+
+  @impl true
+  def handle_event("set_open_mode", %{"mode" => mode}, socket) when mode in ~w(open clone) do
+    {:noreply, put_dialog(socket, mode: mode, error: nil)}
+  end
+
+  @impl true
+  def handle_event("open_repository_dialog", _params, socket) do
+    {:noreply, put_dialog(socket, [])}
   end
 
   @impl true
@@ -140,7 +201,9 @@ defmodule MDTClientWeb.GitLive do
 
   @impl true
   def handle_event("select_tab", %{"id" => id}, socket) do
-    {:noreply, socket |> assign(:active_id, id) |> sync_tab()}
+    socket = socket |> assign(:active_id, id) |> sync_tab() |> remember_session()
+
+    {:noreply, auto_refresh(socket)}
   end
 
   @impl true
@@ -160,14 +223,19 @@ defmodule MDTClientWeb.GitLive do
         true -> hd(tabs).id
       end
 
-    {:noreply, socket |> assign(tabs: tabs, active_id: active_id) |> sync_tab()}
+    {:noreply,
+     socket
+     |> assign(tabs: tabs, active_id: active_id)
+     |> sync_tab()
+     |> remember_session()}
   end
 
   ## Selection
 
   @impl true
   def handle_event("select_commit", %{"id" => id}, socket) do
-    {:noreply, update_tab(socket, &%{&1 | selected_commit: id, panel: "commit", menu: nil})}
+    {:noreply,
+     update_tab(socket, &%{&1 | selected_commit: id, panel: "commit", menu: nil, diff: nil})}
   end
 
   @impl true
@@ -335,6 +403,34 @@ defmodule MDTClientWeb.GitLive do
   ## Working tree selection
 
   @impl true
+  def handle_event("toggle_stashes", _params, socket) do
+    {:noreply, update_tab(socket, &%{&1 | stashes_open?: not &1.stashes_open?})}
+  end
+
+  @impl true
+  def handle_event("view_diff", %{"path" => path, "side" => side}, socket) do
+    case {socket.assigns.tab, diff_side(side)} do
+      {%{} = tab, side} when not is_nil(side) ->
+        socket =
+          put_tab(
+            socket,
+            tab.id,
+            &%{&1 | diff: %{path: path, side: side, diff: nil, error: nil, pinned?: true}}
+          )
+
+        {:noreply, refresh_diff(socket)}
+
+      _unknown ->
+        {:noreply, socket}
+    end
+  end
+
+  @impl true
+  def handle_event("close_diff", _params, socket) do
+    {:noreply, update_tab(socket, &%{&1 | diff: nil})}
+  end
+
+  @impl true
   def handle_event("toggle_path", %{"path" => path}, socket) do
     {:noreply,
      update_tab(socket, fn tab ->
@@ -422,20 +518,45 @@ defmodule MDTClientWeb.GitLive do
     end
   end
 
+  ## Background refresh
+
+  @impl true
+  def handle_info(:auto_refresh, socket) do
+    schedule_refresh()
+    {:noreply, auto_refresh(socket)}
+  end
+
+  # Work done outside MDT should show up without being asked for, but not while
+  # the reader is in the middle of something the refresh would disturb.
+  defp auto_refresh(socket) do
+    case socket.assigns.tab do
+      %{pending: nil, menu: nil, confirm: nil, action: nil} = tab ->
+        if socket.assigns.open_dialog, do: socket, else: run(socket, tab, :refresh, quiet: true)
+
+      _busy ->
+        socket
+    end
+  end
+
+  defp schedule_refresh, do: Process.send_after(self(), :auto_refresh, @refresh_interval)
+
   ## Async results
 
   @impl true
-  def handle_async({:open, _ref}, {:ok, result}, socket) do
-    socket = assign(socket, :opening, nil)
+  def handle_async({:open, _ref}, {:ok, {kind, path, result}}, socket) do
+    socket = finished_opening(socket, path)
 
-    case result do
-      {:ok, repository, {:ok, state}} ->
-        {:noreply, open_tab(socket, repository, state)}
+    case {result, kind} do
+      {{:ok, repository, {:ok, state}}, _kind} ->
+        {:noreply, open_tab(socket, repository, state, kind)}
 
-      {:ok, _repository, {:error, error}} ->
+      {_failure, :restore} ->
+        {:noreply, forget_repository(socket, path)}
+
+      {{:ok, _repository, {:error, error}}, :manual} ->
         {:noreply, open_failed(socket, error)}
 
-      {:error, error} ->
+      {{:error, error}, :manual} ->
         {:noreply, open_failed(socket, error)}
     end
   end
@@ -445,6 +566,7 @@ defmodule MDTClientWeb.GitLive do
     {:noreply,
      socket
      |> assign(:opening, nil)
+     |> put_dialog(cloning: nil)
      |> open_failed(Error.new(:command_failed, "Opening the folder failed: #{inspect(reason)}"))}
   end
 
@@ -472,23 +594,105 @@ defmodule MDTClientWeb.GitLive do
 
   ## Opening
 
-  defp open_tab(socket, repository, state) do
-    case Enum.find(socket.assigns.tabs, &(&1.path == repository.path)) do
-      nil ->
-        tab = new_tab(repository, state)
+  defp start_open(socket, path, kind) do
+    socket
+    |> assign(:opening, if(kind == :manual, do: path, else: socket.assigns.opening))
+    |> start_async({:open, System.unique_integer([:positive])}, fn ->
+      {kind, path,
+       with {:ok, repository} <- Core.open(path) do
+         {:ok, repository, load(repository, @default_limit)}
+       end}
+    end)
+  end
 
-        socket
-        |> assign(:tabs, socket.assigns.tabs ++ [tab])
-        |> assign(:active_id, tab.id)
-        |> assign(:open_error, nil)
-        |> sync_tab()
+  defp finished_opening(socket, path) do
+    socket = put_dialog_if_open(socket, cloning: nil)
 
-      existing ->
-        socket
-        |> assign(:active_id, existing.id)
-        |> assign(:open_error, nil)
-        |> sync_tab()
+    if socket.assigns.opening == path, do: assign(socket, :opening, nil), else: socket
+  end
+
+  defp open_tab(socket, repository, state, kind) do
+    socket =
+      case Enum.find(socket.assigns.tabs, &(&1.path == repository.path)) do
+        nil ->
+          tab = new_tab(repository, state)
+
+          socket
+          |> assign(:tabs, order_tabs(socket, socket.assigns.tabs ++ [tab]))
+          |> activate(tab, kind)
+
+        existing ->
+          activate(socket, existing, kind)
+      end
+
+    socket =
+      socket
+      |> assign(:open_error, nil)
+      |> assign(:open_dialog, nil)
+      |> sync_tab()
+
+    # Restoring changes nothing about which folders are remembered, and writing
+    # a half restored list would lose the rest if the app stopped right now.
+    if kind == :manual, do: remember_session(socket), else: socket
+  end
+
+  # A restored folder only takes focus if it was the active one last time, so
+  # tabs coming back in parallel cannot fight over the selection.
+  defp activate(socket, tab, :manual), do: assign(socket, :active_id, tab.id)
+
+  defp activate(socket, tab, :restore) do
+    if is_nil(socket.assigns.active_id) or tab.path == socket.assigns.restore_active do
+      assign(socket, :active_id, tab.id)
+    else
+      socket
     end
+  end
+
+  # Restored folders land in whatever order Git answers, so the saved order is
+  # reapplied; anything opened since keeps its place at the end.
+  defp order_tabs(socket, tabs) do
+    order = socket.assigns.restore_order
+
+    Enum.sort_by(tabs, fn tab ->
+      case Enum.find_index(order, &(&1 == tab.path)) do
+        nil -> length(order)
+        index -> index
+      end
+    end)
+  end
+
+  defp remember_session(socket) do
+    Session.remember(Enum.map(socket.assigns.tabs, & &1.path), active_path(socket))
+    socket
+  end
+
+  defp forget_repository(socket, path) do
+    Session.forget(path)
+    socket
+  end
+
+  defp active_path(socket) do
+    case socket.assigns.tab ||
+           Enum.find(socket.assigns.tabs, &(&1.id == socket.assigns.active_id)) do
+      nil -> nil
+      tab -> tab.path
+    end
+  end
+
+  defp saved_ssh_keys do
+    [
+      private_key: Preferences.get("git_ssh_private_key") || nil,
+      public_key: Preferences.get("git_ssh_public_key") || nil
+    ]
+    |> Enum.reject(fn {_key, value} -> value in [nil, ""] end)
+  end
+
+  defp clone_failed(socket, message) do
+    put_dialog(socket, error: Error.new(:invalid_argument, message), cloning: nil)
+  end
+
+  defp put_dialog_if_open(socket, attrs) do
+    if socket.assigns.open_dialog, do: put_dialog(socket, attrs), else: socket
   end
 
   # With no tab open the empty state carries the message; otherwise it has
@@ -506,7 +710,18 @@ defmodule MDTClientWeb.GitLive do
   defp open_dialog(socket, reason), do: put_dialog(socket, reason: reason)
 
   defp put_dialog(socket, attrs) do
-    dialog = socket.assigns.open_dialog || %{reason: nil, error: nil, path: ""}
+    dialog =
+      socket.assigns.open_dialog ||
+        %{
+          reason: nil,
+          error: nil,
+          path: "",
+          mode: "open",
+          url: "",
+          parent: "",
+          name: "",
+          cloning: nil
+        }
 
     assign(socket, :open_dialog, Enum.into(attrs, dialog))
   end
@@ -539,6 +754,8 @@ defmodule MDTClientWeb.GitLive do
       pending_label: nil,
       stash_message: "",
       commit_message: "",
+      stashes_open?: true,
+      diff: nil,
       include_untracked?: true,
       ssh_private_key: private_key,
       ssh_public_key: public_key,
@@ -586,32 +803,69 @@ defmodule MDTClientWeb.GitLive do
 
   # One command at a time per tab: two Git processes in the same worktree race
   # for the index lock, and the second failure would be the one shown.
-  defp run(socket, %{pending: pending} = tab, _action) when not is_nil(pending) do
+  defp run(socket, tab, action, opts \\ [])
+
+  defp run(socket, %{pending: pending} = tab, _action, _opts) when not is_nil(pending) do
     put_tab(socket, tab.id, &%{&1 | menu: nil, confirm: nil})
   end
 
-  defp run(socket, tab, action) do
+  defp run(socket, tab, action, opts) do
     task = {:git, tab.id, System.unique_integer([:positive])}
     repository = tab.repository
     limit = tab.limit
+    diff = tab.diff && Map.take(tab.diff, [:path, :side, :pinned?])
+    # A refresh on a timer should not flash a spinner over the toolbar.
+    label = if Keyword.get(opts, :quiet, false), do: nil, else: label(action)
 
     socket
     |> put_tab(
       tab.id,
-      &%{&1 | pending: task, pending_label: label(action), menu: nil, confirm: nil, error: nil}
+      &%{&1 | pending: task, pending_label: label, menu: nil, confirm: nil, error: nil}
     )
-    |> start_async(task, fn -> {perform(repository, action), load(repository, limit)} end)
+    |> start_async(task, fn -> {perform(repository, action), load(repository, limit, diff)} end)
   end
 
   # Every command reloads the state it may have changed, so the UI never shows a
   # result without the snapshot that produced it.
-  defp load(repository, limit) do
+  defp load(repository, limit, diff \\ nil) do
     with {:ok, snapshot} <- Core.snapshot(repository, limit: limit),
          {:ok, changes} <- Files.status(repository),
          {:ok, stashes} <- Core.list_stashes(repository),
          {:ok, remotes} <- Core.list_remotes(repository) do
-      {:ok, %{snapshot: snapshot, changes: changes, stashes: stashes, remotes: remotes}}
+      {:ok,
+       %{
+         snapshot: snapshot,
+         changes: changes,
+         stashes: stashes,
+         remotes: remotes,
+         diff: load_diff(repository, changes, diff)
+       }}
     end
+  end
+
+  # The open diff travels with the rest of the state, so staging a file updates
+  # the view instead of leaving yesterday's lines on screen.
+  defp load_diff(_repository, _changes, nil), do: nil
+
+  defp load_diff(repository, changes, %{path: path} = request) do
+    case Enum.find(changes, &(&1.path == path)) do
+      nil ->
+        {request, :gone}
+
+      change ->
+        side = if request.pinned?, do: request.side, else: readable_side(change, request.side)
+        {request, Files.diff(repository, path, side: side, untracked: change.untracked?)}
+    end
+  end
+
+  # Staging a file empties its unstaged side; following it across keeps the view
+  # on the change the reader was looking at.
+  defp readable_side(change, :unstaged) do
+    if is_nil(change.unstaged) and not is_nil(change.staged), do: :staged, else: :unstaged
+  end
+
+  defp readable_side(change, :staged) do
+    if is_nil(change.staged) and not is_nil(change.unstaged), do: :unstaged, else: :staged
   end
 
   defp perform(_repository, :refresh), do: :ok
@@ -675,8 +929,27 @@ defmodule MDTClientWeb.GitLive do
       |> Map.merge(%{pending: nil, pending_label: nil})
       |> apply_result(result)
 
-    put_tab(socket, tab.id, fn _current -> tab end)
+    socket
+    |> put_tab(tab.id, fn _current -> tab end)
+    |> refresh_diff(state)
   end
+
+  # A diff opened while a command was running is left waiting for an answer, so
+  # it is fetched as soon as the tab is free again.
+  defp refresh_diff(socket) do
+    case socket.assigns.tab do
+      %{diff: %{diff: nil, error: nil}, pending: nil} = tab ->
+        run(socket, tab, :refresh, quiet: true)
+
+      _settled ->
+        socket
+    end
+  end
+
+  # After a load that failed there is nothing to chase: the repository itself is
+  # unreadable, and asking again would only spin.
+  defp refresh_diff(socket, {:ok, _state}), do: refresh_diff(socket)
+  defp refresh_diff(socket, _failed), do: socket
 
   defp apply_state(tab, {:ok, state}) do
     snapshot = state.snapshot
@@ -693,11 +966,24 @@ defmodule MDTClientWeb.GitLive do
         remotes: state.remotes,
         selected_commit: keep_commit(tab, snapshot, commits),
         selected_branch: keep_branch(tab, snapshot, branches),
-        selected_paths: MapSet.intersection(tab.selected_paths, paths)
+        selected_paths: MapSet.intersection(tab.selected_paths, paths),
+        diff: keep_diff(tab, state.diff)
     }
   end
 
   defp apply_state(tab, {:error, %Error{} = error}), do: %{tab | error: error}
+
+  # A result that answers a different request than the one on screen is stale:
+  # the reader opened another file while this load was in flight.
+  defp keep_diff(%{diff: %{path: path} = open} = _tab, {%{path: path}, outcome}) do
+    case outcome do
+      :gone -> nil
+      {:ok, diff} -> %{open | diff: diff, side: diff.side, error: nil, pinned?: false}
+      {:error, error} -> %{open | diff: nil, error: error, pinned?: false}
+    end
+  end
+
+  defp keep_diff(tab, _stale), do: tab.diff
 
   defp keep_commit(tab, snapshot, commits) do
     cond do
@@ -781,6 +1067,10 @@ defmodule MDTClientWeb.GitLive do
   defp requested("abort", _params, _tab), do: :abort
   defp requested("stage", _params, tab), do: {:stage, selected_paths(tab)}
   defp requested("unstage", _params, tab), do: {:unstage, selected_paths(tab)}
+  defp requested("stage_path", %{"path" => path}, _tab), do: {:stage, [path]}
+  defp requested("unstage_path", %{"path" => path}, _tab), do: {:unstage, [path]}
+  defp requested("stage_all", _params, tab), do: {:stage, side_paths(tab, :unstaged)}
+  defp requested("unstage_all", _params, tab), do: {:unstage, side_paths(tab, :staged)}
 
   defp requested("merge", %{"revision" => revision}, _tab), do: {:merge, revision}
   defp requested("rebase", %{"revision" => revision}, _tab), do: {:rebase, revision}
@@ -905,6 +1195,16 @@ defmodule MDTClientWeb.GitLive do
   end
 
   defp selected_paths(tab), do: tab.selected_paths |> MapSet.to_list() |> Enum.sort()
+
+  defp side_paths(tab, :staged),
+    do: tab.changes |> Enum.filter(&FileChange.staged?/1) |> Enum.map(& &1.path)
+
+  defp side_paths(tab, :unstaged),
+    do: tab.changes |> Enum.filter(&FileChange.unstaged?/1) |> Enum.map(& &1.path)
+
+  defp diff_side("staged"), do: :staged
+  defp diff_side("unstaged"), do: :unstaged
+  defp diff_side(_side), do: nil
 
   defp nil_if_empty(""), do: nil
   defp nil_if_empty(value), do: value

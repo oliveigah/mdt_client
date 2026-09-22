@@ -9,6 +9,7 @@ defmodule MDTClientWeb.GitLive.Components do
   use MDTClientWeb, :html
 
   alias MDTClient.Git.FileChange
+  alias MDTClient.Git.FileDiff
   alias MDTClient.Git.Operation
   alias MDTClientWeb.GitLive.Graph.Layout
 
@@ -93,9 +94,9 @@ defmodule MDTClientWeb.GitLive.Components do
       <button
         type="button"
         id="git-open-folder"
-        phx-hook=".OpenFolder"
-        title="Open a repository folder"
-        aria-label="Open a repository folder"
+        phx-click="open_repository_dialog"
+        title="Open or clone a repository"
+        aria-label="Open or clone a repository"
         class="flex w-9 shrink-0 cursor-pointer items-center justify-center border-l border-line-soft text-muted transition-colors hover:bg-hover hover:text-ink focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
       >
         <.icon :if={is_nil(@opening)} name="hero-plus" class="size-4" />
@@ -133,7 +134,7 @@ defmodule MDTClientWeb.GitLive.Components do
             directory: true,
             multiple: false,
             recursive: false,
-            title: "Open a Git repository",
+            title: this.el.dataset.title || "Open a Git repository",
           }
 
           try {
@@ -143,7 +144,7 @@ defmodule MDTClientWeb.GitLive.Components do
             const first = Array.isArray(selection) ? selection[0] : selection
             const path = first && typeof first === "object" ? first.path : first
 
-            if (path) this.pushEvent("open_repository", {path})
+            if (path) this.pushEvent(this.el.dataset.event || "open_repository", {path})
           } catch (error) {
             this.pushEvent("folder_dialog_unavailable", {
               reason: `The folder picker could not be opened: ${error?.message || error}`,
@@ -403,13 +404,23 @@ defmodule MDTClientWeb.GitLive.Components do
         </span>
         <h1 class="text-base font-semibold">No repository open</h1>
         <p class="mt-1.5 text-[13px] leading-relaxed text-muted">
-          Open a folder to browse its branches, walk its history and stage work.
-          Every folder you open gets its own tab.
+          Open a folder on this machine, or clone one from a remote. Either way it
+          gets its own tab, and the tabs come back the next time you are here.
         </p>
 
-        <.button id="git-empty-open" phx-hook=".OpenFolder" variant="primary" class="mt-5">
-          <.icon name="hero-folder-open" class="size-4" /> Open folder
-        </.button>
+        <div class="mt-5 flex items-center justify-center gap-2">
+          <.button id="git-empty-open" phx-click="open_repository_dialog" variant="primary">
+            <.icon name="hero-folder-open" class="size-4" /> Open folder
+          </.button>
+          <.button
+            id="git-empty-clone"
+            phx-click="set_open_mode"
+            phx-value-mode="clone"
+            variant="secondary"
+          >
+            <.icon name="hero-cloud-arrow-down" class="size-4" /> Clone
+          </.button>
+        </div>
 
         <.error_notice :if={@error} id="git-open-error" error={@error} />
       </div>
@@ -418,14 +429,14 @@ defmodule MDTClientWeb.GitLive.Components do
   end
 
   @doc """
-  The fallback used when the native picker cannot run, such as in a browser.
+  The chooser for bringing a repository into the app.
 
-  It carries the reason so the failure is never silent, and it can be opened
-  with repositories already in tabs, which the empty state cannot.
+  It offers both ways of starting: picking a folder already on this machine, or
+  cloning one from a remote into a new folder. The typed path is kept alongside
+  the native picker so the tool still works where the picker cannot run, such as
+  a browser, and so a path can simply be pasted.
   """
-  attr :reason, :string, default: nil
-  attr :error, :any, default: nil
-  attr :path, :string, default: ""
+  attr :dialog, :map, required: true
 
   def open_dialog(assigns) do
     ~H"""
@@ -444,14 +455,14 @@ defmodule MDTClientWeb.GitLive.Components do
           </span>
           <div class="min-w-0 flex-1">
             <p id="git-open-dialog-title" class="text-[13px] font-semibold text-ink">
-              Open a repository
+              Add a repository
             </p>
             <p
-              :if={@reason}
+              :if={@dialog.reason}
               id="git-open-dialog-reason"
               class="mt-1 text-[11px] leading-relaxed text-muted"
             >
-              {@reason}
+              {@dialog.reason}
             </p>
           </div>
           <button
@@ -466,30 +477,163 @@ defmodule MDTClientWeb.GitLive.Components do
           </button>
         </div>
 
-        <form id="git-manual-open" phx-submit="open_repository" class="mt-3 flex items-center gap-2">
-          <input
-            type="text"
-            name="path"
-            value={@path}
-            placeholder="/path/to/repository"
-            aria-label="Repository path"
-            phx-mounted={JS.focus()}
-            class="w-full rounded-md border border-line bg-deep px-2.5 py-1.5 font-mono text-xs text-ink outline-none transition-colors placeholder:text-faint focus:border-accent/60"
+        <div class="mt-3 flex items-center gap-0.5 rounded-md border border-line-soft p-0.5">
+          <.open_mode_tab dialog={@dialog} mode="open" label="Open a folder" icon="hero-folder" />
+          <.open_mode_tab
+            dialog={@dialog}
+            mode="clone"
+            label="Clone a remote"
+            icon="hero-cloud-arrow-down"
           />
-          <.button type="submit" variant="primary">Open</.button>
-        </form>
-
-        <.error_notice :if={@error} id="git-open-dialog-error" error={@error} class="mt-3" />
-
-        <div class="mt-3 flex items-center justify-between gap-2">
-          <p class="text-[11px] text-faint">Any folder inside the worktree works.</p>
-          <.button id="git-retry-picker" phx-hook=".OpenFolder" variant="ghost" class="px-2 py-1">
-            <.icon name="hero-arrow-path" class="size-3.5" /> Try the picker again
-          </.button>
         </div>
+
+        <%= if @dialog.mode == "clone" do %>
+          <form id="git-clone-form" phx-submit="clone_repository" class="mt-3 flex flex-col gap-2">
+            <label class="flex flex-col gap-1">
+              <span class="text-[10px] uppercase tracking-wide text-faint">Repository URL</span>
+              <input
+                type="text"
+                name="url"
+                id="git-clone-url"
+                value={@dialog.url}
+                placeholder="git@github.com:owner/project.git"
+                autocomplete="off"
+                phx-mounted={JS.focus()}
+                class={dialog_input()}
+              />
+            </label>
+
+            <label class="flex flex-col gap-1">
+              <span class="text-[10px] uppercase tracking-wide text-faint">Clone into</span>
+              <span class="flex items-center gap-2">
+                <input
+                  type="text"
+                  name="parent"
+                  id="git-clone-parent"
+                  value={@dialog.parent}
+                  placeholder="/home/you/projects"
+                  autocomplete="off"
+                  class={dialog_input()}
+                />
+                <.button
+                  type="button"
+                  id="git-clone-browse"
+                  phx-hook=".OpenFolder"
+                  data-event="clone_parent_selected"
+                  data-title="Choose where to clone"
+                  variant="secondary"
+                  class="shrink-0 px-2 py-1.5"
+                >
+                  Browse
+                </.button>
+              </span>
+            </label>
+
+            <label class="flex flex-col gap-1">
+              <span class="text-[10px] uppercase tracking-wide text-faint">Folder name</span>
+              <input
+                type="text"
+                name="name"
+                id="git-clone-name"
+                value={@dialog.name}
+                placeholder="taken from the URL"
+                autocomplete="off"
+                class={dialog_input()}
+              />
+            </label>
+
+            <.error_notice :if={@dialog.error} id="git-open-dialog-error" error={@dialog.error} />
+
+            <div class="flex items-center justify-between gap-2">
+              <p class="min-w-0 truncate text-[11px] text-faint">
+                <%= if @dialog.cloning do %>
+                  Cloning into {@dialog.cloning}…
+                <% else %>
+                  A new folder is created; it must not exist yet.
+                <% end %>
+              </p>
+              <.button
+                type="submit"
+                id="git-clone-submit"
+                disabled={not is_nil(@dialog.cloning)}
+                variant="primary"
+              >
+                <.icon
+                  :if={@dialog.cloning}
+                  name="hero-arrow-path"
+                  class="size-4 motion-safe:animate-spin"
+                /> Clone
+              </.button>
+            </div>
+          </form>
+        <% else %>
+          <div class="mt-3 flex flex-col gap-2">
+            <.button
+              id="git-choose-folder"
+              phx-hook=".OpenFolder"
+              variant="secondary"
+              class="w-full py-2"
+            >
+              <.icon name="hero-folder-open" class="size-4" /> Choose a folder…
+            </.button>
+
+            <form id="git-manual-open" phx-submit="open_repository" class="flex items-center gap-2">
+              <input
+                type="text"
+                name="path"
+                id="git-open-path"
+                value={@dialog.path}
+                placeholder="or type a path"
+                aria-label="Repository path"
+                autocomplete="off"
+                class={dialog_input()}
+              />
+              <.button type="submit" variant="primary">Open</.button>
+            </form>
+
+            <.error_notice :if={@dialog.error} id="git-open-dialog-error" error={@dialog.error} />
+
+            <p class="text-[11px] text-faint">Any folder inside the worktree works.</p>
+          </div>
+        <% end %>
       </div>
     </div>
     """
+  end
+
+  attr :dialog, :map, required: true
+  attr :mode, :string, required: true
+  attr :label, :string, required: true
+  attr :icon, :string, required: true
+
+  defp open_mode_tab(assigns) do
+    ~H"""
+    <button
+      type="button"
+      id={"git-open-mode-#{@mode}"}
+      phx-click="set_open_mode"
+      phx-value-mode={@mode}
+      aria-pressed={to_string(@dialog.mode == @mode)}
+      class={[
+        "flex flex-1 cursor-pointer items-center justify-center gap-1.5 rounded px-2 py-1 text-[11px] transition-colors",
+        "focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent",
+        if(@dialog.mode == @mode,
+          do: "bg-active text-ink",
+          else: "text-muted hover:bg-hover hover:text-ink"
+        )
+      ]}
+    >
+      <.icon name={@icon} class="size-3.5" />
+      {@label}
+    </button>
+    """
+  end
+
+  defp dialog_input do
+    [
+      "w-full rounded-md border border-line bg-deep px-2.5 py-1.5 font-mono text-xs text-ink",
+      "outline-none transition-colors placeholder:text-faint focus:border-accent/60"
+    ]
   end
 
   ## Branch panel
@@ -575,6 +719,8 @@ defmodule MDTClientWeb.GitLive.Components do
           tab={@tab}
         />
       </div>
+
+      <.stash_list tab={@tab} />
     </aside>
     <script :type={Phoenix.LiveView.ColocatedHook} name=".RowMenu">
       export default {
@@ -942,8 +1088,10 @@ defmodule MDTClientWeb.GitLive.Components do
         </button>
       </div>
 
+      <.diff_view :if={@tab.diff} tab={@tab} />
+
       <div
-        :if={@rows != []}
+        :if={is_nil(@tab.diff) and @rows != []}
         id="git-commit-columns"
         aria-hidden="true"
         class="flex h-6 shrink-0 items-center gap-2 border-b border-line-soft bg-panel/60 pl-2 pr-1 text-[10px] uppercase tracking-wider text-faint"
@@ -960,13 +1108,20 @@ defmodule MDTClientWeb.GitLive.Components do
       </div>
 
       <div
+        :if={is_nil(@tab.diff)}
         id="git-commits"
         phx-hook=".RowMenu"
         role="listbox"
         aria-label="Commits"
         class="min-h-0 flex-1 overflow-y-auto"
       >
-        <p :if={@rows == []} id="git-commits-empty" class="px-3 py-8 text-center text-xs text-faint">
+        <.pending_row :if={@tab.changes != []} tab={@tab} lanes={@lanes} />
+
+        <p
+          :if={@rows == [] and @tab.changes == []}
+          id="git-commits-empty"
+          class="px-3 py-8 text-center text-xs text-faint"
+        >
           This repository has no commits yet.
         </p>
         <.commit_row :for={row <- @rows} row={row} tab={@tab} lanes={@lanes} />
@@ -974,6 +1129,182 @@ defmodule MDTClientWeb.GitLive.Components do
     </section>
     """
   end
+
+  attr :tab, :map, required: true
+  attr :lanes, :integer, required: true
+
+  defp pending_row(assigns) do
+    assigns =
+      assigns
+      |> assign(:row, Layout.pending_row(assigns.tab.graph))
+      |> assign(:unstaged, Enum.count(assigns.tab.changes, &FileChange.unstaged?/1))
+      |> assign(:staged, Enum.count(assigns.tab.changes, &FileChange.staged?/1))
+
+    ~H"""
+    <div
+      id="git-wip-row"
+      class={[
+        "group relative flex items-center transition-colors",
+        if(@tab.panel == "changes", do: "bg-active", else: "hover:bg-hover")
+      ]}
+      style={"height: #{row_height()}px"}
+    >
+      <button
+        type="button"
+        id="git-select-wip"
+        phx-click="set_panel"
+        phx-value-panel="changes"
+        aria-pressed={to_string(@tab.panel == "changes")}
+        title="Uncommitted changes in the working tree"
+        class="flex h-full min-w-0 flex-1 cursor-pointer items-center gap-2 pl-2 pr-1 text-left focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
+      >
+        <span class="hidden shrink-0 @[44rem]:block" style={ref_column_style()}></span>
+
+        <.graph_cell row={@row} lanes={@lanes} pending />
+
+        <span class="flex min-w-0 flex-1 items-center gap-1.5">
+          <span class="shrink-0 rounded border border-dashed border-line px-1 py-px font-mono text-[10px] leading-4 text-muted">
+            // WIP
+          </span>
+          <span class="min-w-0 truncate text-[13px] text-muted">Uncommitted changes</span>
+        </span>
+
+        <span class="flex shrink-0 items-center gap-1.5 pr-1 font-mono text-[11px]">
+          <span :if={@unstaged > 0} class="text-warn" title={"#{@unstaged} unstaged"}>
+            ~{@unstaged}
+          </span>
+          <span :if={@staged > 0} class="text-ok" title={"#{@staged} staged"}>+{@staged}</span>
+        </span>
+      </button>
+      <span class="mr-1 size-5 shrink-0"></span>
+    </div>
+    """
+  end
+
+  attr :tab, :map, required: true
+
+  defp diff_view(assigns) do
+    assigns = assign(assigns, :open, assigns.tab.diff)
+
+    ~H"""
+    <div id="git-diff" class="flex min-h-0 flex-1 flex-col">
+      <div class="flex h-8 shrink-0 items-center gap-2 border-b border-line-soft bg-panel/60 px-2.5">
+        <.icon name="hero-document-magnifying-glass" class="size-3.5 shrink-0 text-accent" />
+        <span class="min-w-0 truncate font-mono text-xs text-ink" title={@open.path}>
+          {@open.path}
+        </span>
+
+        <div class="flex shrink-0 items-center gap-0.5">
+          <.diff_side_tab tab={@tab} side={:unstaged} label="Unstaged" />
+          <.diff_side_tab tab={@tab} side={:staged} label="Staged" />
+        </div>
+
+        <span :if={@open.diff} class="shrink-0 font-mono text-[10px] text-ok">
+          +{FileDiff.counts(@open.diff).added}
+        </span>
+        <span :if={@open.diff} class="shrink-0 font-mono text-[10px] text-bad">
+          −{FileDiff.counts(@open.diff).removed}
+        </span>
+
+        <div class="flex-1"></div>
+
+        <button
+          type="button"
+          id="git-close-diff"
+          phx-click="close_diff"
+          title="Back to the graph"
+          aria-label="Back to the graph"
+          class="flex size-6 shrink-0 cursor-pointer items-center justify-center rounded text-faint transition-colors hover:bg-hover hover:text-ink focus-visible:outline-2 focus-visible:outline-accent"
+        >
+          <.icon name="hero-x-mark" class="size-4" />
+        </button>
+      </div>
+
+      <div class="min-h-0 flex-1 overflow-auto bg-deep">
+        <%= cond do %>
+          <% @open.error -> %>
+            <.error_notice id="git-diff-error" error={@open.error} class="m-2.5" />
+          <% is_nil(@open.diff) -> %>
+            <p
+              id="git-diff-loading"
+              class="flex items-center justify-center gap-2 p-8 text-xs text-muted"
+            >
+              <.icon name="hero-arrow-path" class="size-4 text-accent motion-safe:animate-spin" />
+              Reading the diff…
+            </p>
+          <% @open.diff.binary? -> %>
+            <p id="git-diff-binary" class="p-8 text-center text-xs text-muted">
+              Git treats this file as binary, so there is nothing to show line by line.
+            </p>
+          <% @open.diff.hunks == [] -> %>
+            <p id="git-diff-empty" class="p-8 text-center text-xs text-muted">
+              Nothing changed on this side of the index.
+            </p>
+          <% true -> %>
+            <div id="git-diff-body" class="min-w-max py-1 font-mono text-xs leading-5">
+              <div :for={hunk <- @open.diff.hunks}>
+                <div class="flex bg-accent-soft/30 px-2 py-0.5 text-[11px] text-accent">
+                  <span class="whitespace-pre">{hunk.header}</span>
+                </div>
+                <div :for={line <- hunk.lines} class={["flex", diff_line_class(line.kind)]}>
+                  <span class="w-12 shrink-0 select-none pr-2 text-right text-ink/35">
+                    {line.old_line}
+                  </span>
+                  <span class="w-12 shrink-0 select-none pr-2 text-right text-ink/35">
+                    {line.new_line}
+                  </span>
+                  <span class="w-4 shrink-0 select-none text-center">{diff_sign(line.kind)}</span>
+                  <code class="whitespace-pre pr-4">{line.text}</code>
+                </div>
+              </div>
+              <p
+                :if={@open.diff.truncated?}
+                id="git-diff-truncated"
+                class="px-2 py-2 text-[11px] text-warn"
+              >
+                This diff is longer than the view shows; the rest was left out.
+              </p>
+            </div>
+        <% end %>
+      </div>
+    </div>
+    """
+  end
+
+  attr :tab, :map, required: true
+  attr :side, :atom, required: true
+  attr :label, :string, required: true
+
+  defp diff_side_tab(assigns) do
+    ~H"""
+    <button
+      type="button"
+      id={"git-diff-side-#{@side}"}
+      phx-click="view_diff"
+      phx-value-path={@tab.diff.path}
+      phx-value-side={@side}
+      aria-pressed={to_string(@tab.diff.side == @side)}
+      class={[
+        "cursor-pointer rounded px-1.5 py-0.5 text-[10px] transition-colors",
+        "focus-visible:outline-2 focus-visible:outline-accent",
+        if(@tab.diff.side == @side,
+          do: "bg-active text-ink",
+          else: "text-muted hover:bg-hover hover:text-ink"
+        )
+      ]}
+    >
+      {@label}
+    </button>
+    """
+  end
+
+  defp diff_line_class(:added), do: "bg-ok-soft/30 text-ink"
+  defp diff_line_class(:removed), do: "bg-bad-soft/30 text-ink"
+  defp diff_line_class(_kind), do: "text-ink/80"
+
+  defp diff_sign(:added), do: "+"
+  defp diff_sign(:removed), do: "−"
+  defp diff_sign(_kind), do: ""
 
   attr :row, :map, required: true
   attr :tab, :map, required: true
@@ -1066,8 +1397,16 @@ defmodule MDTClientWeb.GitLive.Components do
   attr :row, :map, required: true
   attr :lanes, :integer, required: true
   attr :head, :string, default: nil
+  attr :pending, :boolean, default: false
 
   defp graph_cell(assigns) do
+    assigns =
+      assign(
+        assigns,
+        :head?,
+        not is_nil(assigns.row.commit) and assigns.row.commit.id == assigns.head
+      )
+
     ~H"""
     <span
       class="shrink-0 overflow-hidden"
@@ -1104,11 +1443,12 @@ defmodule MDTClientWeb.GitLive.Components do
         <circle
           cx={lane_center(@row.lane)}
           cy={div(row_height(), 2)}
-          r={if @row.commit.id == @head, do: 5, else: 4}
+          r={if @head? or @pending, do: 5, else: 4}
           class={lane_color(@row.color)}
-          fill="currentColor"
-          stroke="var(--color-app)"
-          stroke-width={if @row.commit.id == @head, do: 2, else: 0}
+          fill={if @pending, do: "var(--color-app)", else: "currentColor"}
+          stroke={if @pending, do: "currentColor", else: "var(--color-app)"}
+          stroke-width={if @head? or @pending, do: 2, else: 0}
+          stroke-dasharray={if @pending, do: "3 2"}
         />
       </svg>
     </span>
@@ -1865,30 +2205,27 @@ defmodule MDTClientWeb.GitLive.Components do
 
     ~H"""
     <div id="git-working-tree" class="flex flex-col gap-3 p-2.5">
-      <div
-        :if={@tab.changes == []}
-        class="rounded-md border border-line-soft p-4 text-center"
-        id="git-changes-empty"
-      >
-        <.icon name="hero-check-circle" class="mx-auto size-5 text-ok" />
-        <p class="mt-1 text-xs text-muted">The working tree is clean.</p>
-      </div>
-
+      <%!-- Both sides stay on screen whatever the counts are, so the shape of
+            the panel never changes underneath the pointer. --%>
       <.file_section
-        :if={@staged != []}
-        id="git-staged"
-        title="Staged"
-        files={@staged}
-        side={:staged}
-        tab={@tab}
-      />
-      <.file_section
-        :if={@unstaged != []}
         id="git-unstaged"
-        title="Unstaged"
+        title="Unstaged files"
         files={@unstaged}
         side={:unstaged}
         tab={@tab}
+        empty="Nothing to stage."
+        action="stage_all"
+        action_label="Stage all"
+      />
+      <.file_section
+        id="git-staged"
+        title="Staged files"
+        files={@staged}
+        side={:staged}
+        tab={@tab}
+        empty="Nothing staged yet."
+        action="unstage_all"
+        action_label="Unstage all"
       />
 
       <div :if={@tab.changes != []} class="flex flex-col gap-2 rounded-md border border-line-soft p-2">
@@ -1995,8 +2332,6 @@ defmodule MDTClientWeb.GitLive.Components do
           <.icon name="hero-check" class="size-3.5" /> Commit {length(@staged)} file(s)
         </.button>
       </form>
-
-      <.stash_list tab={@tab} />
     </div>
     """
   end
@@ -2006,15 +2341,32 @@ defmodule MDTClientWeb.GitLive.Components do
   attr :files, :list, required: true
   attr :side, :atom, required: true
   attr :tab, :map, required: true
+  attr :empty, :string, required: true
+  attr :action, :string, required: true
+  attr :action_label, :string, required: true
 
   defp file_section(assigns) do
     ~H"""
     <div>
       <div class="mb-1 flex items-center gap-1.5 px-0.5">
         <span class="text-[10px] font-semibold uppercase tracking-wider text-muted">{@title}</span>
-        <span class="font-mono text-[10px] text-faint">{length(@files)}</span>
+        <span class="font-mono text-[10px] text-faint">({length(@files)})</span>
+        <div class="flex-1"></div>
+        <button
+          type="button"
+          id={"#{@id}-all"}
+          phx-click="request"
+          phx-value-action={@action}
+          disabled={@files == [] or not is_nil(@tab.pending)}
+          class="cursor-pointer rounded border border-line-soft px-1.5 py-0.5 text-[10px] text-muted transition-colors hover:bg-hover hover:text-ink disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline-2 focus-visible:outline-accent"
+        >
+          {@action_label}
+        </button>
       </div>
-      <div id={@id} role="listbox" aria-multiselectable="true" aria-label={"#{@title} files"}>
+      <p :if={@files == []} id={"#{@id}-empty"} class="px-1.5 py-1 text-[11px] text-faint">
+        {@empty}
+      </p>
+      <div id={@id} role="listbox" aria-multiselectable="true" aria-label={@title}>
         <.file_row :for={file <- @files} file={file} side={@side} tab={@tab} />
       </div>
     </div>
@@ -2033,109 +2385,175 @@ defmodule MDTClientWeb.GitLive.Components do
         :state,
         if(assigns.side == :staged, do: assigns.file.staged, else: assigns.file.unstaged)
       )
+      |> assign(:open?, open_diff?(assigns.tab, assigns.file.path, assigns.side))
 
     ~H"""
-    <button
-      type="button"
-      id={"git-file-#{@side}-#{slug(@file.path)}"}
-      role="option"
-      aria-selected={to_string(@selected)}
-      phx-click="toggle_path"
-      phx-value-path={@file.path}
-      class={[
-        "flex w-full cursor-pointer items-center gap-2 rounded px-1.5 py-1 text-left transition-colors",
-        "focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent",
-        if(@selected, do: "bg-accent-soft/60", else: "hover:bg-hover")
-      ]}
-    >
-      <span class={[
-        "flex size-3.5 shrink-0 items-center justify-center rounded-sm border transition-all",
-        if(@selected, do: "border-accent bg-accent text-deep", else: "border-line text-transparent")
-      ]}>
-        <.icon name="hero-check-micro" class="size-2.5" />
-      </span>
-      <span class={["w-4 shrink-0 text-center font-mono text-[10px] font-bold", state_color(@state)]}>
-        {state_code(@state)}
-      </span>
-      <span class="min-w-0 flex-1 truncate text-[11px] text-ink" title={@file.path}>
-        {@file.path}
-      </span>
-      <span
-        :if={@file.original_path}
-        class="shrink-0 truncate font-mono text-[10px] text-faint"
-        title={"renamed from #{@file.original_path}"}
+    <div class={[
+      "group flex items-center gap-1 rounded pr-1 transition-colors",
+      cond do
+        @open? -> "bg-active"
+        @selected -> "bg-accent-soft/60"
+        true -> "hover:bg-hover"
+      end
+    ]}>
+      <button
+        type="button"
+        id={"git-file-#{@side}-#{slug(@file.path)}"}
+        role="option"
+        aria-selected={to_string(@selected)}
+        phx-click="toggle_path"
+        phx-value-path={@file.path}
+        class="flex min-w-0 flex-1 cursor-pointer items-center gap-2 px-1.5 py-1 text-left focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
       >
-        ←
-      </span>
-    </button>
+        <span class={[
+          "flex size-3.5 shrink-0 items-center justify-center rounded-sm border transition-all",
+          if(@selected,
+            do: "border-accent bg-accent text-deep",
+            else: "border-line text-transparent"
+          )
+        ]}>
+          <.icon name="hero-check-micro" class="size-2.5" />
+        </span>
+        <span class={[
+          "w-4 shrink-0 text-center font-mono text-[10px] font-bold",
+          state_color(@state)
+        ]}>
+          {state_code(@state)}
+        </span>
+        <span class="min-w-0 flex-1 truncate text-[11px] text-ink" title={@file.path}>
+          {@file.path}
+        </span>
+        <span
+          :if={@file.original_path}
+          class="shrink-0 truncate font-mono text-[10px] text-faint"
+          title={"renamed from #{@file.original_path}"}
+        >
+          ←
+        </span>
+      </button>
+
+      <button
+        type="button"
+        id={"git-diff-#{@side}-#{slug(@file.path)}"}
+        phx-click="view_diff"
+        phx-value-path={@file.path}
+        phx-value-side={@side}
+        title={"View the #{@side} diff of #{@file.path}"}
+        aria-label={"View the #{@side} diff of #{@file.path}"}
+        class={[
+          "flex size-5 shrink-0 cursor-pointer items-center justify-center rounded transition-all",
+          "hover:bg-panel hover:text-accent focus:opacity-100 focus-visible:outline-2 focus-visible:outline-accent",
+          "group-hover:opacity-100",
+          if(@open?, do: "text-accent opacity-100", else: "text-faint opacity-0")
+        ]}
+      >
+        <.icon name="hero-document-magnifying-glass" class="size-3.5" />
+      </button>
+
+      <button
+        type="button"
+        id={"git-move-#{@side}-#{slug(@file.path)}"}
+        phx-click="request"
+        phx-value-action={if @side == :staged, do: "unstage_path", else: "stage_path"}
+        phx-value-path={@file.path}
+        disabled={not is_nil(@tab.pending)}
+        title={if @side == :staged, do: "Unstage #{@file.path}", else: "Stage #{@file.path}"}
+        aria-label={if @side == :staged, do: "Unstage #{@file.path}", else: "Stage #{@file.path}"}
+        class="flex size-5 shrink-0 cursor-pointer items-center justify-center rounded text-faint opacity-0 transition-all hover:bg-panel hover:text-ink focus:opacity-100 disabled:cursor-not-allowed focus-visible:outline-2 focus-visible:outline-accent group-hover:opacity-100"
+      >
+        <.icon
+          name={if @side == :staged, do: "hero-minus-circle", else: "hero-plus-circle"}
+          class="size-3.5"
+        />
+      </button>
+    </div>
     """
   end
+
+  defp open_diff?(%{diff: %{path: path, side: side}}, path, side), do: true
+  defp open_diff?(_tab, _path, _side), do: false
 
   attr :tab, :map, required: true
 
   def stash_list(assigns) do
     ~H"""
-    <div>
-      <div class="mb-1 flex items-center gap-1.5 px-0.5">
+    <div class="shrink-0 border-t border-line-soft">
+      <button
+        type="button"
+        id="git-stashes-toggle"
+        phx-click="toggle_stashes"
+        aria-expanded={to_string(@tab.stashes_open?)}
+        aria-controls="git-stashes"
+        class="flex w-full cursor-pointer items-center gap-1.5 px-2.5 py-1.5 text-left transition-colors hover:bg-hover focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
+      >
+        <.icon
+          name="hero-chevron-right"
+          class={["size-3 text-faint transition-transform", @tab.stashes_open? && "rotate-90"]}
+        />
         <span class="text-[10px] font-semibold uppercase tracking-wider text-muted">Stashes</span>
-        <span class="font-mono text-[10px] text-faint">{length(@tab.stashes)}</span>
-      </div>
+        <span class="font-mono text-[10px] text-faint">({length(@tab.stashes)})</span>
+      </button>
 
-      <p :if={@tab.stashes == []} id="git-stashes-empty" class="px-0.5 text-[11px] text-faint">
-        Nothing stashed yet.
-      </p>
-
-      <div :if={@tab.stashes != []} id="git-stashes" class="flex flex-col gap-1">
-        <div
-          :for={stash <- @tab.stashes}
-          id={"git-stash-#{stash.index}"}
-          class="rounded-md border border-line-soft p-1.5 transition-colors hover:border-line"
-        >
-          <p class="truncate text-[11px] text-ink" title={stash.summary}>{stash.summary}</p>
-          <p class="flex items-center gap-1.5 font-mono text-[10px] text-faint">
-            <span>{stash.reference}</span>
-            <span>·</span>
-            <span title={absolute_time(stash.created_at)}>{relative_time(stash.created_at)}</span>
-          </p>
-          <div class="mt-1 flex items-center gap-1">
-            <button
-              type="button"
-              id={"git-stash-apply-#{stash.index}"}
-              phx-click="request"
-              phx-value-action="apply_stash"
-              phx-value-reference={stash.reference}
-              disabled={not is_nil(@tab.pending)}
-              class={stash_action()}
-            >
-              Apply
-            </button>
-            <button
-              type="button"
-              id={"git-stash-pop-#{stash.index}"}
-              phx-click="request"
-              phx-value-action="pop_stash"
-              phx-value-reference={stash.reference}
-              disabled={not is_nil(@tab.pending)}
-              class={stash_action()}
-            >
-              Pop
-            </button>
-            <button
-              type="button"
-              id={"git-stash-drop-#{stash.index}"}
-              phx-click="request"
-              phx-value-action="drop_stash"
-              phx-value-reference={stash.reference}
-              disabled={not is_nil(@tab.pending)}
-              class={[stash_action(), "hover:border-bad/50 hover:text-bad"]}
-            >
-              Drop
-            </button>
-          </div>
-        </div>
-        <p class="px-0.5 text-[10px] leading-relaxed text-faint">
-          Applying or popping restores the complete stash, not a selection of its paths.
+      <div :if={@tab.stashes_open?} class="max-h-52 overflow-y-auto px-1.5 pb-2">
+        <p :if={@tab.stashes == []} id="git-stashes-empty" class="px-1 py-1 text-[11px] text-faint">
+          Nothing stashed yet.
         </p>
+
+        <div :if={@tab.stashes != []} id="git-stashes" class="flex flex-col gap-1">
+          <div
+            :for={stash <- @tab.stashes}
+            id={"git-stash-#{stash.index}"}
+            class="group rounded-md border border-line-soft p-1.5 transition-colors hover:border-line"
+          >
+            <p class="truncate text-[11px] text-ink" title={stash.summary}>{stash.summary}</p>
+            <p class="flex items-center gap-1.5 font-mono text-[10px] text-faint">
+              <span>{stash.reference}</span>
+              <span>·</span>
+              <span title={absolute_time(stash.created_at)}>{relative_time(stash.created_at)}</span>
+            </p>
+            <div class="mt-1 flex items-center gap-1">
+              <button
+                type="button"
+                id={"git-stash-apply-#{stash.index}"}
+                phx-click="request"
+                phx-value-action="apply_stash"
+                phx-value-reference={stash.reference}
+                disabled={not is_nil(@tab.pending)}
+                title="Restore the complete stash and keep it in the list"
+                class={stash_action()}
+              >
+                Apply
+              </button>
+              <button
+                type="button"
+                id={"git-stash-pop-#{stash.index}"}
+                phx-click="request"
+                phx-value-action="pop_stash"
+                phx-value-reference={stash.reference}
+                disabled={not is_nil(@tab.pending)}
+                title="Restore the complete stash and remove it from the list"
+                class={stash_action()}
+              >
+                Pop
+              </button>
+              <button
+                type="button"
+                id={"git-stash-drop-#{stash.index}"}
+                phx-click="request"
+                phx-value-action="drop_stash"
+                phx-value-reference={stash.reference}
+                disabled={not is_nil(@tab.pending)}
+                title="Delete the stash without restoring it"
+                class={[stash_action(), "hover:border-bad/50 hover:text-bad"]}
+              >
+                Drop
+              </button>
+            </div>
+          </div>
+          <p class="px-0.5 text-[10px] leading-relaxed text-faint">
+            Applying or popping restores the complete stash, not a selection of its paths.
+          </p>
+        </div>
       </div>
     </div>
     """
