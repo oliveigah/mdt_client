@@ -404,6 +404,30 @@ defmodule MDTClientWeb.GitLiveTest do
     assert git!(path, ["rev-parse", "--abbrev-ref", "HEAD"]) == "feature"
   end
 
+  test "a label's menu keeps the unfolded list open until it is dealt with", context do
+    %{view: view, path: path} = context
+    for name <- ~w(alpha beta), do: git!(path, ["branch", name])
+    open(view, path)
+
+    head = head_commit(path)
+    beta = slug("refs/heads/beta")
+    pinned = "#git-refs-#{head}[data-pinned]"
+
+    from_graph = %{"kind" => "branch", "id" => "refs/heads/beta", "x" => 10, "y" => 10}
+
+    # Reaching the menu takes the pointer off the list, so the list holds on.
+    render_hook(view, "open_menu", Map.put(from_graph, "anchor", "git-ref-all-#{beta}"))
+    assert has_element?(view, pinned)
+
+    render_hook(view, "close_menu", %{})
+    refute has_element?(view, pinned)
+
+    # The same branch opened from the branch panel leaves the graph alone.
+    render_hook(view, "open_menu", Map.put(from_graph, "anchor", "git-branch-#{beta}"))
+    assert has_element?(view, "#git-branch-menu-#{beta}[role=menu]")
+    refute has_element?(view, pinned)
+  end
+
   test "a lone ref keeps its chip on show", context do
     %{view: view, path: path} = context
     open(view, path)

@@ -764,8 +764,10 @@ defmodule MDTClientWeb.GitLive.Components do
           })
         },
 
+        // The anchor says which control the menu came from, so a branch label in
+        // the graph can stay unfolded while its menu is open.
         openMenu(row, x, y) {
-          this.pushEvent("open_menu", {kind: row.dataset.menuKind, id: row.dataset.menuId, x, y})
+          this.pushEvent("open_menu", {kind: row.dataset.menuKind, id: row.dataset.menuId, anchor: row.id, x, y})
         }
       }
     </script>
@@ -1394,6 +1396,7 @@ defmodule MDTClientWeb.GitLive.Components do
         :if={@row.commit.labels != []}
         commit={@row.commit}
         selected_branch={@selected_branch}
+        menu={@menu}
       />
       <div
         :if={@row.commit.labels == []}
@@ -1538,6 +1541,7 @@ defmodule MDTClientWeb.GitLive.Components do
 
   attr :commit, :map, required: true
   attr :selected_branch, :string, default: nil
+  attr :menu, :map, default: nil
 
   defp ref_column(assigns) do
     refs = ordered_refs(assigns.commit.labels)
@@ -1547,6 +1551,7 @@ defmodule MDTClientWeb.GitLive.Components do
       |> assign(:refs, refs)
       |> assign(:primary, hd(refs))
       |> assign(:rest, tl(refs))
+      |> assign(:pinned?, ref_menu_open?(assigns.menu, refs))
 
     ~H"""
     <div
@@ -1578,6 +1583,7 @@ defmodule MDTClientWeb.GitLive.Components do
         :if={@rest != []}
         id={"git-refs-#{@commit.id}"}
         data-ref-list
+        data-pinned={@pinned?}
         class="fixed left-0 top-0 z-40 hidden max-h-[calc(100vh-1rem)] w-max max-w-80 flex-col items-end gap-1 overflow-y-auto rounded-md border border-line bg-panel p-1 shadow-xl shadow-black/20 data-open:flex data-up:flex-col-reverse dark:shadow-black/50"
       >
         <.ref_button
@@ -1622,8 +1628,12 @@ defmodule MDTClientWeb.GitLive.Components do
         },
 
         // A patch puts the server's markup back, which folds the list away. The
-        // pointer has not moved, so unfold it again, picking up the new state.
-        updated() { if (this.open) this.show() },
+        // pointer has not moved, so unfold it again, picking up the new state,
+        // then follow the pin in case a menu from here just opened or closed.
+        updated() {
+          if (this.open) this.show()
+          this.sync()
+        },
 
         destroyed() {
           clearTimeout(this.timer)
@@ -1631,10 +1641,12 @@ defmodule MDTClientWeb.GitLive.Components do
         },
 
         // Open at once, but give the pointer a moment to come back before
-        // folding, so brushing past the edge does not snap the list shut.
+        // folding, so brushing past the edge does not snap the list shut. While
+        // a menu opened from one of the chips is up, the list stays put: the
+        // pointer has to leave it to reach that menu.
         sync() {
           clearTimeout(this.timer)
-          if (this.hovered || this.focused) {
+          if (this.hovered || this.focused || this.list()?.hasAttribute("data-pinned")) {
             if (!this.open) this.show()
           } else {
             this.timer = setTimeout(() => this.hide(), 120)
@@ -1717,6 +1729,15 @@ defmodule MDTClientWeb.GitLive.Components do
     </button>
     """
   end
+
+  # Whether the open menu belongs to one of these chips, rather than to the same
+  # branch opened from the branch panel.
+  defp ref_menu_open?(%{kind: :branch, id: id, anchor: anchor}, refs) do
+    anchor in ["git-ref-#{slug(id)}", "git-ref-all-#{slug(id)}"] and
+      Enum.any?(refs, &(&1.full_name == id))
+  end
+
+  defp ref_menu_open?(_menu, _refs), do: false
 
   @doc """
   Refs in the order a reader looks for them.
