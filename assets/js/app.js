@@ -25,12 +25,13 @@ import {LiveSocket} from "phoenix_live_view"
 import {hooks as colocatedHooks} from "phoenix-colocated/mdt_client"
 import topbar from "../vendor/topbar"
 import {initZoom} from "./zoom"
+import {NoticeTimer} from "./notice_timer"
 
 const csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute("content")
 const liveSocket = new LiveSocket("/live", Socket, {
   longPollFallbackMs: 2500,
   params: {_csrf_token: csrfToken},
-  hooks: {...colocatedHooks},
+  hooks: {...colocatedHooks, NoticeTimer},
   // Modifier keys are not sent by default, but shortcuts like Ctrl+Enter need them.
   metadata: {
     keydown: (e, _el) => ({
@@ -95,4 +96,3 @@ if (process.env.NODE_ENV === "development") {
     window.liveReloader = reloader
   })
 }
-

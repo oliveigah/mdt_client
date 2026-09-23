@@ -2187,8 +2187,18 @@ defmodule MDTClientWeb.GitLive.Components do
 
       <div class="min-h-0 flex-1 overflow-y-auto">
         <.operation_banner :if={@tab.snapshot.operation} tab={@tab} />
-        <.error_notice :if={@tab.error} id="git-error" error={@tab.error} class="m-2.5" />
-        <.result_notice :if={@tab.result} result={@tab.result} />
+        <div :if={@tab.notices != []} id="git-notices" class="m-2.5 space-y-2.5">
+          <%= for notice <- ordered_notices(@tab.notices) do %>
+            <.error_notice
+              :if={notice.kind == :error}
+              id={"git-notice-#{notice.id}"}
+              error={notice.content}
+              dismiss_id={notice.id}
+              class=""
+            />
+            <.result_notice :if={notice.kind == :success} notice={notice} />
+          <% end %>
+        </div>
         <.action_form :if={@tab.action} tab={@tab} />
 
         <%= cond do %>
@@ -2209,6 +2219,11 @@ defmodule MDTClientWeb.GitLive.Components do
       </div>
     </aside>
     """
+  end
+
+  defp ordered_notices(notices) do
+    Enum.filter(notices, &(&1.kind == :error)) ++
+      Enum.filter(notices, &(&1.kind == :success))
   end
 
   attr :tab, :map, required: true
@@ -3014,6 +3029,7 @@ defmodule MDTClientWeb.GitLive.Components do
   attr :id, :string, default: nil
   attr :error, :map, required: true
   attr :class, :any, default: "mt-4"
+  attr :dismiss_id, :string, default: nil
 
   def error_notice(assigns) do
     ~H"""
@@ -3052,31 +3068,48 @@ defmodule MDTClientWeb.GitLive.Components do
           phx-no-curly-interpolation
         ><%= String.trim(@error.message) %></pre>
       </div>
+      <button
+        :if={@dismiss_id}
+        type="button"
+        id={"git-dismiss-notice-#{@dismiss_id}"}
+        phx-click="dismiss_notice"
+        phx-value-id={@dismiss_id}
+        title="Dismiss"
+        aria-label="Dismiss error"
+        class="flex size-5 shrink-0 cursor-pointer items-center justify-center rounded text-faint transition-colors hover:bg-hover hover:text-ink"
+      >
+        <.icon name="hero-x-mark" class="size-3.5" />
+      </button>
     </div>
     """
   end
 
-  attr :result, :map, required: true
+  attr :notice, :map, required: true
 
   def result_notice(assigns) do
     ~H"""
     <div
-      id="git-result"
-      class="m-2.5 flex items-start gap-2 rounded-md border border-ok/30 bg-ok-soft/20 p-2.5"
+      id={"git-notice-#{@notice.id}"}
+      role="status"
+      phx-hook="NoticeTimer"
+      data-notice-id={@notice.id}
+      data-timeout="6000"
+      class="flex items-start gap-2 rounded-md border border-ok/30 bg-ok-soft/20 p-2.5"
     >
       <.icon name="hero-check-circle" class="mt-px size-4 shrink-0 text-ok" />
       <div class="min-w-0 flex-1">
-        <p class="text-[11px] font-semibold text-ok">{result_title(@result)}</p>
+        <p class="text-[11px] font-semibold text-ok">{result_title(@notice.content)}</p>
         <pre
-          :if={@result.output != ""}
+          :if={@notice.content.output != ""}
           class="mt-0.5 max-h-28 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-muted"
           phx-no-curly-interpolation
-        ><%= @result.output %></pre>
+        ><%= @notice.content.output %></pre>
       </div>
       <button
         type="button"
-        id="git-dismiss-result"
-        phx-click="dismiss_result"
+        id={"git-dismiss-notice-#{@notice.id}"}
+        phx-click="dismiss_notice"
+        phx-value-id={@notice.id}
         title="Dismiss"
         aria-label="Dismiss"
         class="flex size-5 shrink-0 cursor-pointer items-center justify-center rounded text-faint transition-colors hover:bg-hover hover:text-ink"

@@ -347,8 +347,12 @@ defmodule MDTClientWeb.GitLive do
   end
 
   @impl true
-  def handle_event("dismiss_result", _params, socket) do
-    {:noreply, update_tab(socket, &%{&1 | result: nil})}
+  def handle_event("dismiss_notice", %{"id" => id}, socket) do
+    {:noreply,
+     update_tab(
+       socket,
+       &%{&1 | notices: Enum.reject(&1.notices, fn notice -> notice.id == id end)}
+     )}
   end
 
   ## SSH credentials
@@ -707,7 +711,11 @@ defmodule MDTClientWeb.GitLive do
         error = Error.new(:command_failed, "The Git command stopped: #{inspect(reason)}")
 
         {:noreply,
-         put_tab(socket, tab.id, &%{&1 | pending: nil, pending_label: nil, error: error})}
+         put_tab(socket, tab.id, fn current ->
+           current
+           |> Map.merge(%{pending: nil, pending_label: nil})
+           |> add_notice(:error, error)
+         end)}
 
       _stale ->
         {:noreply, socket}
@@ -872,8 +880,7 @@ defmodule MDTClientWeb.GitLive do
       menu: nil,
       action: nil,
       confirm: nil,
-      error: nil,
-      result: nil,
+      notices: [],
       pending: nil,
       pending_label: nil,
       stash_message: "",
@@ -957,7 +964,7 @@ defmodule MDTClientWeb.GitLive do
     socket
     |> put_tab(
       tab.id,
-      &%{&1 | pending: task, pending_label: label, menu: nil, confirm: nil, error: nil}
+      &%{&1 | pending: task, pending_label: label, menu: nil, confirm: nil}
     )
     |> start_async(task, fn ->
       result = perform(repository, action)
@@ -1206,7 +1213,7 @@ defmodule MDTClientWeb.GitLive do
     }
   end
 
-  defp apply_state(tab, {:error, %Error{} = error}), do: %{tab | error: error}
+  defp apply_state(tab, {:error, %Error{} = error}), do: add_notice(tab, :error, error)
 
   defp clear_refresh_check(socket, tab_id) do
     assign(socket, :refresh_checks, Map.delete(socket.assigns.refresh_checks, tab_id))
@@ -1252,7 +1259,7 @@ defmodule MDTClientWeb.GitLive do
   defp apply_result(tab, :ok), do: tab
 
   defp apply_result(tab, {:ok, %CommandResult{} = result}) do
-    tab = %{tab | result: result, error: nil}
+    tab = add_notice(tab, :success, result)
 
     # The draft that produced the commit or stash is spent once Git accepted it.
     case result.action do
@@ -1263,18 +1270,26 @@ defmodule MDTClientWeb.GitLive do
   end
 
   defp apply_result(tab, {:error, %Error{} = error}) do
-    tab = %{
+    tab =
       tab
-      | error: error,
-        result: nil,
-        ssh_open?: tab.ssh_open? or https_authentication_error?(error)
-    }
+      |> add_notice(:error, error)
+      |> Map.put(:ssh_open?, tab.ssh_open? or https_authentication_error?(error))
 
     cond do
       error.kind == :conflict -> %{tab | panel: "changes"}
       unmerged_branch?(error) -> %{tab | confirm: force_delete_confirmation(error)}
       true -> tab
     end
+  end
+
+  defp add_notice(tab, kind, content) do
+    notice = %{
+      id: Integer.to_string(System.unique_integer([:positive])),
+      kind: kind,
+      content: content
+    }
+
+    %{tab | notices: tab.notices ++ [notice]}
   end
 
   defp https_authentication_error?(%Error{message: message}) do
