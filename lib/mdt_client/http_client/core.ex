@@ -6,6 +6,9 @@ defmodule MDTClient.HttpClient.Core do
   vault must be unlocked.
   """
 
+  require Logger
+
+  alias MDTClient.Accounts
   alias MDTClient.HttpClient.HistoryMetadata
   alias MDTClient.HttpClient.Resources
 
@@ -22,6 +25,11 @@ defmodule MDTClient.HttpClient.Core do
   @spec request_recorded(String.t(), Req.Request.t(), HistoryMetadata.t() | map()) ::
           {{:ok, Req.Response.t()} | {:error, Exception.t()}, pos_integer(), non_neg_integer()}
   def request_recorded(username, %Req.Request{} = request, metadata \\ %{}) do
+    log_metadata = [user: Accounts.normalize(username), system: :http_client]
+    method = request.method |> to_string() |> String.upcase()
+    host = request.url.host
+
+    Logger.info("request started method=#{method} host=#{inspect(host)}", log_metadata)
     started_at = DateTime.utc_now()
     result = Req.request(request)
     completed_at = DateTime.utc_now()
@@ -32,6 +40,20 @@ defmodule MDTClient.HttpClient.Core do
       |> HistoryMetadata.with_timing(started_at, completed_at)
 
     identifier = Resources.record(username, metadata, request, response_from(result))
+
+    case result do
+      {:ok, response} ->
+        Logger.info(
+          "request finished method=#{method} host=#{inspect(host)} status=#{response.status} duration_ms=#{metadata.duration_ms} history_id=#{identifier}",
+          log_metadata
+        )
+
+      {:error, error} ->
+        Logger.warning(
+          "request failed method=#{method} host=#{inspect(host)} error=#{inspect(error.__struct__)} duration_ms=#{metadata.duration_ms} history_id=#{identifier}",
+          log_metadata
+        )
+    end
 
     {result, identifier, metadata.duration_ms}
   end

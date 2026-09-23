@@ -27,9 +27,9 @@ The app boots to a sign in screen (`/`), which leads to the tool picker
   its own tab, with unstaged and staged in separate lists. Either way a file
   opens its diff over the graph. Folders are chosen
   with the native desktop picker or cloned from a remote, they come back in
-  their tabs the next time you open the tool, and the active one refreshes on a
-  timer so work done elsewhere shows up. `docs/git-backend.md` covers the
-  backend it drives.
+  their tabs the next time you open the tool, and the active one checks for
+  outside changes once a minute so work done elsewhere shows up.
+  `docs/git-backend.md` covers the backend it drives.
 
 Signing in takes a username and a password. The password is stretched into an
 encryption key, and everything that identity persists — today the HTTP client's
@@ -38,8 +38,30 @@ with it. An unknown username creates a profile; two identities cannot read each
 other's data even when they share a password, and there is no way to recover a
 forgotten one. `docs/vault.md` covers the design and its limits.
 
+**Export and import** (`/transfer`, the arrows in the title bar) moves
+everything the signed in identity keeps between installations in one
+`.mdtexport` file, named after it and encrypted with its own sign in password.
+Importing opens a file with that password by default, or another one for a file
+exported elsewhere, shows what it holds, and then merges it with the data
+already there — or replaces that data, if asked. Each system with data to keep
+joins by implementing `MDTClient.Transfer.Participant`, including how its data
+merges; `docs/transfer.md` covers the design, the file format, and how to add
+one.
+
 The HTTP client executes requests through Req and persists request history
 between app restarts, encrypted at rest.
+
+MDT writes a rotating execution log to `~/.mdt_client/logs/mdt.log` (or
+`<data_dir>/logs/mdt.log` when the data directory is configured). Set
+`MDT_LOG_DIR` to place it elsewhere. The log includes UTC timestamps, levels,
+and `user`, `system`, and request ID tags where available. It records sign in
+outcomes, Git actions and failures, HTTP request timing and status, transfer
+outcomes, and normal Phoenix/OTP errors. HTTP lifecycle entries omit request
+and response bodies; Git lifecycle entries omit command arguments and remote
+URLs. The active file is limited to 10 MB; the five most recent compressed
+archives are kept beside it, and the oldest is removed on rotation. Logs are
+plaintext diagnostic data and may contain details from
+framework or dependency errors, so review them before sharing.
 
 Both themes live in `assets/css/app.css` as one set of tokens: the dark values
 follow the "Oliveigah Dark" Zed theme and the light ones override them under
@@ -53,7 +75,7 @@ is `http://127.0.0.1:<port>` rather than the `tauri://` scheme. Tauri treats
 that as a *remote* origin and rejects every IPC call coming from it unless a
 capability names the origin explicitly, which is what
 `src-tauri/capabilities/local-server.json` does. Anything that calls into Rust
-has to be granted there: the folder picker through the dialog plugin, and
+has to be granted there: the open and save pickers through the dialog plugin, and
 `set_webview_zoom` through the app permission in `src-tauri/permissions/`.
 Without the grant the call is rejected, which is quiet — the zoom shortcuts, for
 instance, silently fall back to scaling the page with CSS. The Rust side has to

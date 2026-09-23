@@ -73,6 +73,7 @@ different keys and cannot read each other's files.
 
     ~/.mdt_client/
       preferences.json                  plaintext — theme, last_username
+      logs/mdt.log                      plaintext — execution diagnostics
       identities/<sha256(username)>/
         vault.json                      version, username, kdf params, salt, verifier
         http_history.bin                AES-256-GCM
@@ -85,6 +86,11 @@ history does not, the history is damaged, not the password wrong.
 `preferences.json` stays in the clear so the app can render the theme before
 anyone logs in. It deliberately holds one piece of user data, `last_username`,
 to prefill the login form.
+
+The rotating execution log is also plaintext. It lives outside the identity
+vault so startup and sign in failures can be diagnosed before an identity is
+unlocked. It contains usernames and operational metadata, but application
+events should never include passwords, request bodies, or Git command arguments.
 
 ## Sign-in
 
@@ -104,8 +110,11 @@ looks like data loss.
 
 `Vault.Store` is a `DynamicSupervisor` plus a `Registry`. Unlocking starts one
 process per store for that user, holding the derived key and an ETS table;
-locking terminates it, so key and plaintext leave memory together. The key is
-never written to disk and never reaches the browser — the session cookie holds
+locking terminates it, so key and plaintext leave memory together. One of
+those processes, `Vault.Keyring`, holds nothing but the key and seals and
+opens with it on request, for code that needs the identity's key without
+owning a store — exports, today. The key is never written to disk and never
+reaches the browser — the session cookie holds
 only an opaque token, and Phoenix session cookies are signed but readable.
 
 Every `Resources` and `Core` function takes the username. A LiveView left over
@@ -115,6 +124,8 @@ than silently reading whoever logged in next.
 ## Deliberately not built
 
 **No recovery.** Forget the password and that user's history is unrecoverable.
+Exports (`docs/transfer.md`) are sealed with the same password, so they are no
+way around it either.
 
 **No password change yet.** The design permits it as decrypt-all /
 re-encrypt-all.

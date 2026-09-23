@@ -92,6 +92,14 @@ defmodule MDTClientWeb.Layouts do
           </span>
           <span class="hidden text-xs text-muted sm:inline">{@current_scope.user.username}</span>
           <.link
+            navigate={~p"/transfer"}
+            id="transfer-link"
+            title="Export and import"
+            class="flex size-7 items-center justify-center rounded text-muted transition-colors hover:bg-hover hover:text-ink"
+          >
+            <.icon name="hero-arrows-right-left" class="size-4" />
+          </.link>
+          <.link
             href={~p"/logout"}
             method="delete"
             title="Lock and sign out"

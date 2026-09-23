@@ -14,6 +14,8 @@ defmodule MDTClientWeb.GitLive do
   """
   use MDTClientWeb, :live_view
 
+  require Logger
+
   alias MDTClient.Git.CommandResult
   alias MDTClient.Git.Core
   alias MDTClient.Git.Error
@@ -27,7 +29,7 @@ defmodule MDTClientWeb.GitLive do
 
   @limits [500, 1_000, 2_500, 5_000]
   @default_limit 500
-  @refresh_interval :timer.seconds(5)
+  @refresh_interval :timer.seconds(60)
 
   @impl true
   def mount(_params, _session, socket) do
@@ -659,6 +661,7 @@ defmodule MDTClientWeb.GitLive do
   @impl true
   def handle_async({:open, _ref}, {:ok, {kind, path, result}}, socket) do
     socket = finished_opening(socket, path)
+    log_open_result(socket.assigns.current_scope.user.username, kind, path, result)
 
     case {result, kind} do
       {{:ok, repository, {:ok, state}}, _kind} ->
@@ -677,6 +680,11 @@ defmodule MDTClientWeb.GitLive do
 
   @impl true
   def handle_async({:open, _ref}, {:exit, reason}, socket) do
+    Logger.warning("git repository open task exited kind=#{exit_kind(reason)}",
+      user: socket.assigns.current_scope.user.username,
+      system: :git_gui
+    )
+
     {:noreply,
      socket
      |> assign(:opening, nil)
@@ -931,19 +939,78 @@ defmodule MDTClientWeb.GitLive do
     task = {:git, tab.id, System.unique_integer([:positive])}
     repository = tab.repository
     limit = tab.limit
+    username = socket.assigns.current_scope.user.username
 
     reads = requested_reads(tab)
 
     # A refresh on a timer should not flash a spinner over the toolbar.
     label = if Keyword.get(opts, :quiet, false), do: nil, else: label(action)
 
+    if action != :refresh do
+      Logger.info(
+        "git action started action=#{label(action)} repository=#{inspect(repository.path)}",
+        user: username,
+        system: :git_gui
+      )
+    end
+
     socket
     |> put_tab(
       tab.id,
       &%{&1 | pending: task, pending_label: label, menu: nil, confirm: nil, error: nil}
     )
-    |> start_async(task, fn -> {perform(repository, action), load(repository, limit, reads)} end)
+    |> start_async(task, fn ->
+      result = perform(repository, action)
+      state = load(repository, limit, reads)
+      log_action_result(username, repository.path, action, result, state)
+      {result, state}
+    end)
   end
+
+  defp log_action_result(username, path, action, result, state) do
+    metadata = [user: username, system: :git_gui]
+    context = "action=#{label(action)} repository=#{inspect(path)}"
+
+    case {result, state} do
+      {{:error, %Error{} = error}, _state} ->
+        Logger.warning("git action failed #{context} kind=#{error.kind}", metadata)
+
+      {_result, {:error, %Error{} = error}} ->
+        Logger.warning("git refresh failed #{context} kind=#{error.kind}", metadata)
+
+      _success when action != :refresh ->
+        Logger.info("git action completed #{context}", metadata)
+
+      _refresh ->
+        :ok
+    end
+  end
+
+  defp log_open_result(username, kind, path, result) do
+    metadata = [user: username, system: :git_gui]
+
+    case result do
+      {:ok, _repository, {:ok, _state}} ->
+        Logger.info("git repository opened path=#{inspect(path)} source=#{kind}", metadata)
+
+      {:ok, _repository, {:error, %Error{} = error}} ->
+        Logger.warning(
+          "git repository load failed path=#{inspect(path)} kind=#{error.kind}",
+          metadata
+        )
+
+      {:error, %Error{} = error} ->
+        Logger.warning(
+          "git repository open failed path=#{inspect(path)} kind=#{error.kind}",
+          metadata
+        )
+    end
+  end
+
+  defp exit_kind({%{__struct__: module}, _stack}), do: inspect(module)
+  defp exit_kind(%{__struct__: module}), do: inspect(module)
+  defp exit_kind(reason) when is_atom(reason), do: to_string(reason)
+  defp exit_kind(_reason), do: "other"
 
   defp requested_reads(tab) do
     %{

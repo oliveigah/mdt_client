@@ -1,5 +1,9 @@
 import Config
 
+if log_dir = System.get_env("MDT_LOG_DIR") do
+  config :mdt_client, log_dir: Path.expand(log_dir)
+end
+
 # config/runtime.exs is executed for all environments, including
 # during releases. It is executed after compilation and before the
 # system starts, so it is typically used to load production configuration

@@ -10,6 +10,8 @@ defmodule MDTClient.HttpClient.Requests do
 
   use GenServer
 
+  require Logger
+
   alias MDTClient.Accounts
   alias MDTClient.HttpClient.Core
   alias MDTClient.HttpClient.Translation
@@ -92,6 +94,7 @@ defmodule MDTClient.HttpClient.Requests do
         Process.demonitor(task.ref, [:flush])
         terminate_task(task.pid)
         broadcast(state.username, {:http_request_cancelled, request_id})
+        Logger.info("request cancelled", user: state.username, system: :http_client)
 
         {:reply, :ok, %{state | requests: requests, refs: Map.delete(state.refs, task.ref)}}
     end
@@ -125,6 +128,11 @@ defmodule MDTClient.HttpClient.Requests do
       {request_id, refs} ->
         broadcast(state.username, {:http_request_failed, request_id, inspect(reason)})
 
+        Logger.warning("request task exited kind=#{exit_kind(reason)}",
+          user: state.username,
+          system: :http_client
+        )
+
         {:noreply, %{state | refs: refs, requests: Map.delete(state.requests, request_id)}}
     end
   end
@@ -151,4 +159,9 @@ defmodule MDTClient.HttpClient.Requests do
   end
 
   defp topic(username), do: "http-requests:" <> Accounts.id(username)
+
+  defp exit_kind({%{__struct__: module}, _stack}), do: inspect(module)
+  defp exit_kind(%{__struct__: module}), do: inspect(module)
+  defp exit_kind(reason) when is_atom(reason), do: to_string(reason)
+  defp exit_kind(_reason), do: "other"
 end

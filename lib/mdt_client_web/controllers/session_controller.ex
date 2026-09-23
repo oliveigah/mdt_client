@@ -8,6 +8,8 @@ defmodule MDTClientWeb.SessionController do
 
   use MDTClientWeb, :controller
 
+  require Logger
+
   alias MDTClient.Accounts
   alias MDTClient.Preferences
   alias MDTClient.Vault.Store
@@ -19,6 +21,7 @@ defmodule MDTClientWeb.SessionController do
       {:ok, profile, key} ->
         :ok = Store.open(profile.username, key)
         :ok = Preferences.put("last_username", profile.username)
+        Logger.info("vault unlocked", user: profile.username, system: :auth)
 
         conn
         |> renew()
@@ -26,6 +29,7 @@ defmodule MDTClientWeb.SessionController do
         |> redirect(to: ~p"/tools")
 
       {:error, reason} ->
+        Logger.warning("sign in failed reason=#{reason}", system: :auth)
         # Reported inline on the form rather than as a toast: it belongs next
         # to the field that caused it, and it should not fade away.
         redirect(conn, to: ~p"/?#{[username: username, error: reason]}")
@@ -38,6 +42,7 @@ defmodule MDTClientWeb.SessionController do
     with {:ok, %{username: username}} <- Session.fetch(token) do
       :ok = Store.close(username)
       :ok = Session.delete(token)
+      Logger.info("vault locked", user: username, system: :auth)
     end
 
     conn |> renew() |> redirect(to: ~p"/")

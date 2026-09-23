@@ -69,6 +69,49 @@ defmodule MDTClient.HttpClient.ResourcesTest do
            ] = Resources.summaries(username)
   end
 
+  test "rewrites the whole history, numbering the entries afresh", %{username: username} do
+    old = record(username, "https://example.test/old")
+
+    entries =
+      for path <- ["/first", "/second"] do
+        request = Req.new(url: "https://example.test" <> path)
+        response = %Req.Response{status: 201, body: "created"}
+        metadata = HistoryMetadata.with_search_text(HistoryMetadata.new(%{}), request, response)
+        {metadata, request, response}
+      end
+
+    :ok =
+      Resources.rewrite(username, fn current ->
+        # Given oldest first and without identifiers.
+        assert [{%HistoryMetadata{}, %Req.Request{url: %URI{path: "/old"}}, _}] = current
+        entries
+      end)
+
+    assert [
+             {second, _, %Req.Request{url: %URI{path: "/second"}}, _},
+             {first, _, %Req.Request{url: %URI{path: "/first"}}, _}
+           ] = Resources.all(username)
+
+    assert old < first and first < second
+    assert Resources.get(username, old) == :error
+    assert {:ok, {^second, _, _, {:response, 201, _, 7}}} = Resources.outline(username, second)
+    assert [{^first, _, _, _}] = Resources.search(username, "/first")
+    assert record(username, "https://example.test/next") > second
+  end
+
+  test "a rewrite keeps a request recorded while it runs", %{username: username} do
+    record(username, "https://example.test/before")
+
+    :ok =
+      Resources.rewrite(username, fn current ->
+        record(username, "https://example.test/meanwhile")
+        current
+      end)
+
+    assert [_, _] = Resources.all(username)
+    assert [_] = Resources.search(username, "meanwhile")
+  end
+
   test "deletes one entry and keeps the rest", %{username: username} do
     kept = record(username, "https://example.test/one")
     dropped = record(username, "https://example.test/two")

@@ -7,8 +7,12 @@ defmodule MDTClient.Application do
 
   @impl true
   def start(_type, _args) do
+    :ok = MDTClient.LogFile.install()
     pubsub = System.get_env("ELIXIRKIT_PUBSUB")
     discard_legacy_history()
+
+    require Logger
+    Logger.info("MDT starting", system: :app)
 
     children = [
       MDTClientWeb.Telemetry,

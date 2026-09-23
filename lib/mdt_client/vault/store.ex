@@ -15,7 +15,9 @@ defmodule MDTClient.Vault.Store do
 
   @registry MDTClient.Vault.Registry
   @supervisor MDTClient.Vault.DynamicSupervisor
-  @stores [MDTClient.HttpClient.Resources, MDTClient.HttpClient.Requests]
+  # Started in reverse and closed in order, so the keyring comes up first and
+  # goes down last.
+  @stores [MDTClient.HttpClient.Resources, MDTClient.HttpClient.Requests, MDTClient.Vault.Keyring]
 
   @doc false
   def child_spec(_opts) do

@@ -27,6 +27,8 @@ defmodule MDTClient.HttpClient.Resources do
   @type metadata :: HistoryMetadata.t()
   @type response :: Req.Response.t() | Exception.t()
   @type entry :: {history_id(), metadata(), Req.Request.t(), response()}
+  @typedoc "An entry without the identifier this table gave it."
+  @type history_data :: {metadata(), Req.Request.t(), response()}
   @type outline ::
           {history_id(), metadata(), Req.Request.t(),
            {:response, non_neg_integer(), map(), non_neg_integer()} | {:error, Exception.t()}}
@@ -160,6 +162,26 @@ defmodule MDTClient.HttpClient.Resources do
     GenServer.call(Store.via(__MODULE__, username), :clear)
   end
 
+  @doc """
+  Rewrites this identity's whole history in one step.
+
+  `fun` is given the current entries, oldest first and without identifiers,
+  and returns the new history the same way; it runs in the process that owns
+  the table, so deletes and clears cannot interleave with it. Returned
+  metadata must already carry its search text.
+
+  The result is numbered afresh from the counter, in the order returned, so an
+  identifier held from before — an open tab, a selection — finds nothing
+  afterwards instead of landing on a different request. A request recorded
+  while `fun` runs is kept, since only the entries it was given are removed.
+  """
+  @spec rewrite(String.t(), ([history_data()] -> [history_data()])) :: :ok
+  def rewrite(username, fun) when is_function(fun, 1) do
+    # Writing a large history can take a while, and a caller that gave up
+    # partway would not know whether it landed.
+    GenServer.call(Store.via(__MODULE__, username), {:rewrite, fun}, :infinity)
+  end
+
   @impl true
   def init(opts) do
     # So that `terminate/2` gets to flush on logout and on app shutdown.
@@ -171,7 +193,7 @@ defmodule MDTClient.HttpClient.Resources do
     :ok = File.mkdir_p(Path.dirname(path))
 
     table = :ets.new(:http_history, [:public, :ordered_set, read_concurrency: true])
-    restore(table, path, key)
+    restore(table, path, key, username)
     outlines = :ets.new(:http_history_outlines, [:public, :set, read_concurrency: true])
     build_outlines(table, outlines)
 
@@ -205,6 +227,37 @@ defmodule MDTClient.HttpClient.Resources do
     true = :ets.delete_all_objects(state.table)
     true = :ets.delete_all_objects(state.outlines)
     :ok = :atomics.put(counter(state.username), 1, 0)
+    {:reply, :ok, flushed(state)}
+  end
+
+  @impl true
+  def handle_call({:rewrite, fun}, _from, state) do
+    before = :ets.tab2list(state.table)
+
+    entries =
+      before
+      |> Enum.map(fn {_identifier, metadata, request, response} ->
+        {metadata, request, response}
+      end)
+      |> fun.()
+
+    count = length(entries)
+    last = :atomics.add_get(counter(state.username), 1, count)
+
+    entries
+    |> Enum.with_index(last - count + 1)
+    |> Enum.each(fn {{metadata, request, response}, identifier} ->
+      true = :ets.insert(state.table, {identifier, metadata, request, response})
+      true = :ets.insert(state.outlines, {identifier, response_outline(response)})
+    end)
+
+    # Written before the old entries go, so a reader never sees the history
+    # empty partway.
+    Enum.each(before, fn {identifier, _metadata, _request, _response} ->
+      true = :ets.delete(state.table, identifier)
+      true = :ets.delete(state.outlines, identifier)
+    end)
+
     {:reply, :ok, flushed(state)}
   end
 
@@ -264,14 +317,18 @@ defmodule MDTClient.HttpClient.Resources do
         :ok
 
       {:error, reason} ->
-        Logger.error("could not write history to #{state.path}: #{:file.format_error(reason)}")
+        Logger.error("could not write history to #{state.path}: #{:file.format_error(reason)}",
+          user: state.username,
+          system: :http_client
+        )
+
         :ok
     end
   end
 
   # A file that will not decrypt is kept, not overwritten: the key was already
   # proven by the verifier, so this is corruption rather than a wrong password.
-  defp restore(table, path, key) do
+  defp restore(table, path, key, username) do
     case File.read(path) do
       {:ok, blob} ->
         case Vault.open(key, blob) do
@@ -280,7 +337,7 @@ defmodule MDTClient.HttpClient.Resources do
             :ok
 
           _unreadable ->
-            quarantine(path)
+            quarantine(path, username)
         end
 
       {:error, _reason} ->
@@ -290,9 +347,14 @@ defmodule MDTClient.HttpClient.Resources do
 
   # Timestamped so a second failed start cannot overwrite the copy kept by the
   # first, which would turn a recoverable problem into data loss.
-  defp quarantine(path) do
+  defp quarantine(path, username) do
     corrupt = "#{path}.#{System.system_time(:second)}.corrupt"
-    Logger.warning("history at #{path} could not be decrypted; kept as #{corrupt}")
+
+    Logger.warning("history at #{path} could not be decrypted; kept as #{corrupt}",
+      user: username,
+      system: :http_client
+    )
+
     File.rename(path, corrupt)
     :ok
   end

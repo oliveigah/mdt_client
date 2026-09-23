@@ -74,6 +74,15 @@ defmodule MDTClient.Accounts do
     end
   end
 
+  @doc """
+  How an identity's key is derived from its password: the KDF parameters and
+  the base64 salt, as stored in `vault.json`. None of it is secret.
+  """
+  @spec kdf(String.t()) :: {:ok, map()} | {:error, :unreadable_vault}
+  def kdf(username) do
+    with {:ok, meta} <- read_vault(username), do: {:ok, meta["kdf"]}
+  end
+
   @doc "The profile shown in the app chrome."
   @spec profile(String.t()) :: profile()
   def profile(username) do
