@@ -23,7 +23,7 @@ defmodule MDTClient.Git.Files do
   alias MDTClient.Git.FileDiff
   alias MDTClient.Git.Repository
 
-  @default_line_limit 4_000
+  @default_line_limit 2_000
 
   # Porcelain v2 reports the index and working-tree side of every path with two
   # single letter codes. A dot means "no change on this side".

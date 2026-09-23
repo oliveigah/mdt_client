@@ -6,6 +6,19 @@ defmodule MDTClient.HttpClient.Utils do
   @methods ~w(GET POST PUT PATCH DELETE HEAD OPTIONS)
   @body_types [{"None", "none"}, {"JSON", "json"}, {"Text", "text"}, {"Form", "form"}]
   @auth_types [{"No auth", "none"}, {"Bearer token", "bearer"}, {"Basic", "basic"}]
+  @timeout_options [
+    {"30s", "30000"},
+    {"60s", "60000"},
+    {"120s", "120000"},
+    {"Infinity", "infinity"}
+  ]
+  @timeout_values %{
+    "30000" => 30_000,
+    "60000" => 60_000,
+    "120000" => 120_000,
+    "infinity" => :infinity
+  }
+  @default_timeout "infinity"
 
   @doc "The HTTP methods offered by the method picker."
   def methods, do: @methods
@@ -15,6 +28,35 @@ defmodule MDTClient.HttpClient.Utils do
 
   @doc "The `{label, value}` pairs for the auth type picker."
   def auth_types, do: @auth_types
+
+  @doc "The fixed timeout choices offered by the request editor."
+  def timeout_options, do: @timeout_options
+
+  @doc "The timeout assigned to new requests."
+  def default_timeout, do: @default_timeout
+
+  @doc "Parses one of the supported request timeout choices."
+  def parse_timeout_ms(timeout) when is_binary(timeout) do
+    case Map.fetch(@timeout_values, timeout) do
+      {:ok, value} -> {:ok, value}
+      :error -> {:error, :invalid_timeout}
+    end
+  end
+
+  def parse_timeout_ms(:infinity), do: {:ok, :infinity}
+  def parse_timeout_ms(timeout) when timeout in [30_000, 60_000, 120_000], do: {:ok, timeout}
+
+  def parse_timeout_ms(_timeout), do: {:error, :invalid_timeout}
+
+  @doc "Maps persisted Req timeouts onto the supported editor choices."
+  def timeout_value(:infinity), do: "infinity"
+  def timeout_value(timeout) when is_integer(timeout) and timeout <= 30_000, do: "30000"
+  def timeout_value(timeout) when is_integer(timeout) and timeout <= 60_000, do: "60000"
+  def timeout_value(timeout) when is_integer(timeout) and timeout <= 120_000, do: "120000"
+  def timeout_value(_timeout), do: @default_timeout
+
+  @doc "Builds an ID for a background request execution."
+  def new_request_id, do: new_id("request")
 
   @doc "Builds the editor state for one request tab."
   def new_request(attrs \\ %{}) do
@@ -35,6 +77,7 @@ defmodule MDTClient.HttpClient.Utils do
         auth_token: "",
         auth_username: "",
         auth_password: "",
+        timeout_ms: @default_timeout,
         editor_tab: "params",
         response_tab: "body",
         state: :idle,
@@ -112,6 +155,25 @@ defmodule MDTClient.HttpClient.Utils do
   def format_bytes(bytes) when bytes < 1024 * 1024, do: "#{Float.round(bytes / 1024, 1)} KB"
   def format_bytes(bytes), do: "#{Float.round(bytes / (1024 * 1024), 1)} MB"
 
+  @doc "Returns the best available size for a Req response body."
+  @spec response_body_size(Req.Response.t()) :: non_neg_integer()
+  def response_body_size(%Req.Response{headers: headers, body: body}) do
+    actual_size =
+      cond do
+        is_binary(body) -> byte_size(body)
+        is_nil(body) -> 0
+        true -> :erlang.external_size(body)
+      end
+
+    declared_size =
+      headers
+      |> Map.get("content-length", [])
+      |> List.first()
+      |> parse_content_length()
+
+    max(actual_size, declared_size)
+  end
+
   @doc "The reason phrase for a status code."
   def status_text(status) do
     Map.get(
@@ -159,6 +221,15 @@ defmodule MDTClient.HttpClient.Utils do
       _ -> Calendar.strftime(date, "%b %-d, %Y")
     end
   end
+
+  defp parse_content_length(value) when is_binary(value) do
+    case Integer.parse(value) do
+      {size, ""} when size >= 0 -> size
+      _invalid -> 0
+    end
+  end
+
+  defp parse_content_length(_value), do: 0
 
   defp new_id(prefix), do: "#{prefix}-#{System.unique_integer([:positive])}"
 end

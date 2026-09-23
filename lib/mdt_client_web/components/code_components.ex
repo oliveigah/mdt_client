@@ -9,9 +9,14 @@ defmodule MDTClientWeb.CodeComponents do
   use Phoenix.Component
 
   @token ~r/("(?:[^"\\]|\\.)*"\s*:)|("(?:[^"\\]|\\.)*")|(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)|(\btrue\b|\bfalse\b|\bnull\b)|([\{\}\[\]])|([,:])/
+  @highlight_limit 100_000
+
+  @doc "Whether content is large enough to skip per-token server rendering."
+  def large_content?(content) when is_binary(content), do: byte_size(content) > @highlight_limit
 
   @doc """
-  Renders `content` with line numbers.
+  Renders `content` with highlighting and line numbers. Large content uses a
+  compact plain-text node to keep rendering responsive.
 
   ## Examples
 
@@ -23,17 +28,37 @@ defmodule MDTClientWeb.CodeComponents do
   attr :class, :any, default: nil
 
   def code_block(assigns) do
-    assigns = assign(assigns, :lines, String.split(assigns.content, "\n"))
+    assigns =
+      if large_content?(assigns.content) do
+        assign(assigns, large?: true, lines: [])
+      else
+        assign(assigns, large?: false, lines: String.split(assigns.content, "\n"))
+      end
 
     ~H"""
-    <div id={@id} class={["overflow-auto bg-deep font-mono text-xs leading-[1.45rem]", @class]}>
-      <div class="min-w-max py-1.5">
-        <div :for={{line, number} <- Enum.with_index(@lines, 1)} class="flex hover:bg-panel/60">
-          <span class="w-10 shrink-0 select-none pr-3 text-right text-ink/40 dark:text-ink/25">{number}</span>
-          <code class="whitespace-pre pr-4" phx-no-format><span :for={{class, text} <- tokenize(line, @language)} class={class}>{text}</span></code>
+    <%= if @large? do %>
+      <pre
+        id={@id}
+        data-renderer="plain"
+        class={[
+          "overflow-auto whitespace-pre bg-deep p-2.5 font-mono text-xs leading-[1.45rem] text-ink",
+          @class
+        ]}
+      >{@content}</pre>
+    <% else %>
+      <div
+        id={@id}
+        data-renderer="highlighted"
+        class={["overflow-auto bg-deep font-mono text-xs leading-[1.45rem]", @class]}
+      >
+        <div class="min-w-max py-1.5">
+          <div :for={{line, number} <- Enum.with_index(@lines, 1)} class="flex hover:bg-panel/60">
+            <span class="w-10 shrink-0 select-none pr-3 text-right text-ink/40 dark:text-ink/25">{number}</span>
+            <code class="whitespace-pre pr-4" phx-no-format><span :for={{class, text} <- tokenize(line, @language)} class={class}>{text}</span></code>
+          </div>
         </div>
       </div>
-    </div>
+    <% end %>
     """
   end
 

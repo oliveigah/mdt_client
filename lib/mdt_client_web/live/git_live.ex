@@ -41,9 +41,11 @@ defmodule MDTClientWeb.GitLive do
      |> assign(:tabs, [])
      |> assign(:active_id, nil)
      |> assign(:tab, nil)
+     |> assign_graph(nil)
      |> assign(:opening, nil)
      |> assign(:open_error, nil)
      |> assign(:open_dialog, nil)
+     |> assign(:refresh_checks, %{})
      |> assign(:restore_order, [])
      |> assign(:restore_active, nil)
      |> restore_session()}
@@ -77,7 +79,7 @@ defmodule MDTClientWeb.GitLive do
       >
         <Components.tab_bar tabs={@tabs} active_id={@active_id} tab={@tab} opening={@opening} />
 
-        <%= if @tab do %>
+        <%= if @active_id do %>
           <div class="flex min-h-0 flex-1 overflow-hidden">
             <Components.branch_panel tab={@tab} />
 
@@ -92,7 +94,20 @@ defmodule MDTClientWeb.GitLive do
               label="Resize the branch panel"
             />
 
-            <Components.graph_panel tab={@tab} limits={@limits} />
+            <Components.graph_panel
+              snapshot={@graph_snapshot}
+              graph={@graph_layout}
+              changes={@graph_changes}
+              pending={@graph_pending}
+              pending_label={@graph_pending_label}
+              limit={@graph_limit}
+              panel={@graph_panel}
+              selected_commit={@graph_selected_commit}
+              selected_branch={@graph_selected_branch}
+              menu={@graph_menu}
+              diff={@graph_diff}
+              limits={@limits}
+            />
 
             <.resizer
               id="git-inspector-resizer"
@@ -250,9 +265,7 @@ defmodule MDTClientWeb.GitLive do
         %{
           tab
           | selected_commit: id,
-            # Browsing commits with the file list open should keep showing files.
-            panel: if(tab.panel == "changes", do: "changes", else: "commit"),
-            changes_scope: :commit,
+            panel: "commit",
             commit_changes: nil,
             menu: nil,
             diff: nil
@@ -279,11 +292,7 @@ defmodule MDTClientWeb.GitLive do
 
   @impl true
   def handle_event("show_working_tree", _params, socket) do
-    {:noreply,
-     update_tab(
-       socket,
-       &%{&1 | changes_scope: :working_tree, panel: "changes", diff: nil, menu: nil}
-     )}
+    {:noreply, update_tab(socket, &%{&1 | panel: "changes", diff: nil, menu: nil})}
   end
 
   @impl true
@@ -494,6 +503,16 @@ defmodule MDTClientWeb.GitLive do
   end
 
   @impl true
+  def handle_event("prepare_stash", _params, socket) do
+    {:noreply, update_tab(socket, &%{&1 | stashing?: true})}
+  end
+
+  @impl true
+  def handle_event("cancel_stash", _params, socket) do
+    {:noreply, update_tab(socket, &%{&1 | stashing?: false, stash_message: ""})}
+  end
+
+  @impl true
   def handle_event("stash_selected", params, socket) do
     tab = socket.assigns.tab
     message = String.trim(params["message"] || "")
@@ -568,7 +587,7 @@ defmodule MDTClientWeb.GitLive do
   defp auto_refresh(socket) do
     case socket.assigns.tab do
       %{pending: nil, menu: nil, confirm: nil, action: nil} = tab ->
-        if socket.assigns.open_dialog, do: socket, else: run(socket, tab, :refresh, quiet: true)
+        if socket.assigns.open_dialog, do: socket, else: start_refresh_check(socket, tab)
 
       _busy ->
         socket
@@ -577,7 +596,65 @@ defmodule MDTClientWeb.GitLive do
 
   defp schedule_refresh, do: Process.send_after(self(), :auto_refresh, @refresh_interval)
 
+  defp start_refresh_check(socket, tab) do
+    if Map.has_key?(socket.assigns.refresh_checks, tab.id) do
+      socket
+    else
+      task = {:git_check, tab.id, System.unique_integer([:positive])}
+      repository = tab.repository
+      fingerprint = tab.fingerprint
+      limit = tab.limit
+      reads = requested_reads(tab)
+
+      socket
+      |> assign(:refresh_checks, Map.put(socket.assigns.refresh_checks, tab.id, task))
+      |> start_async(task, fn ->
+        case Core.fingerprint(repository) do
+          {:ok, ^fingerprint} -> {:unchanged, fingerprint}
+          {:ok, _changed} -> {:changed, load(repository, limit, reads)}
+          {:error, error} -> {:error, error}
+        end
+      end)
+    end
+  end
+
   ## Async results
+
+  @impl true
+  def handle_async(
+        {:git_check, tab_id, _ref} = task,
+        {:ok, {:changed, state}},
+        socket
+      ) do
+    case Map.fetch(socket.assigns.refresh_checks, tab_id) do
+      {:ok, ^task} ->
+        socket = clear_refresh_check(socket, tab_id)
+
+        case find_tab(socket, tab_id) do
+          %{pending: nil} = tab when tab_id == socket.assigns.active_id ->
+            tab = apply_state(tab, state)
+
+            {:noreply,
+             socket
+             |> put_tab(tab.id, fn _current -> tab end)
+             |> refresh_reads(state)}
+
+          _unchanged_or_busy ->
+            {:noreply, socket}
+        end
+
+      _stale ->
+        {:noreply, socket}
+    end
+  end
+
+  @impl true
+  def handle_async({:git_check, tab_id, _ref} = task, _outcome, socket) do
+    case Map.fetch(socket.assigns.refresh_checks, tab_id) do
+      {:ok, ^task} -> {:noreply, clear_refresh_check(socket, tab_id)}
+      _stale -> {:noreply, socket}
+    end
+  end
 
   @impl true
   def handle_async({:open, _ref}, {:ok, {kind, path, result}}, socket) do
@@ -772,7 +849,9 @@ defmodule MDTClientWeb.GitLive do
       name: Path.basename(repository.path),
       repository: repository,
       snapshot: state.snapshot,
-      graph: Layout.layout(state.snapshot.commits),
+      graph: state.graph,
+      commits_by_id: state.commits_by_id,
+      fingerprint: state.fingerprint,
       changes: state.changes,
       stashes: state.stashes,
       remotes: state.remotes,
@@ -790,11 +869,11 @@ defmodule MDTClientWeb.GitLive do
       pending: nil,
       pending_label: nil,
       stash_message: "",
+      stashing?: false,
       commit_message: "",
       stashes_open?: true,
       diff: nil,
       commit_changes: nil,
-      changes_scope: :working_tree,
       include_untracked?: true,
       ssh_private_key: private_key,
       ssh_public_key: public_key,
@@ -853,10 +932,7 @@ defmodule MDTClientWeb.GitLive do
     repository = tab.repository
     limit = tab.limit
 
-    reads = %{
-      diff: tab.diff && Map.take(tab.diff, [:path, :side, :commit, :pinned?]),
-      commit: commit_changes_wanted(tab)
-    }
+    reads = requested_reads(tab)
 
     # A refresh on a timer should not flash a spinner over the toolbar.
     label = if Keyword.get(opts, :quiet, false), do: nil, else: label(action)
@@ -869,23 +945,48 @@ defmodule MDTClientWeb.GitLive do
     |> start_async(task, fn -> {perform(repository, action), load(repository, limit, reads)} end)
   end
 
+  defp requested_reads(tab) do
+    %{
+      diff: tab.diff && Map.take(tab.diff, [:path, :side, :commit, :pinned?]),
+      commit: commit_changes_wanted(tab)
+    }
+  end
+
   # Every command reloads the state it may have changed, so the UI never shows a
   # result without the snapshot that produced it.
   # The file list of a commit is only fetched while it is on screen; the graph
   # does not need it, and it is one more Git process per refresh.
-  defp commit_changes_wanted(%{panel: "changes", changes_scope: :commit} = tab),
-    do: tab.selected_commit
-
+  # The inspector shows a commit's files as soon as one is picked, so they are
+  # fetched with the rest of its metadata rather than on a second click.
+  defp commit_changes_wanted(%{panel: "commit"} = tab), do: tab.selected_commit
   defp commit_changes_wanted(_tab), do: nil
 
   defp load(repository, limit, reads \\ %{diff: nil, commit: nil}) do
-    with {:ok, snapshot} <- Core.snapshot(repository, limit: limit),
-         {:ok, changes} <- Files.status(repository),
-         {:ok, stashes} <- Core.list_stashes(repository),
-         {:ok, remotes} <- Core.list_remotes(repository) do
+    [snapshot, changes, stashes, remotes, fingerprint_sources] =
+      [
+        fn -> Core.snapshot(repository, limit: limit) end,
+        fn -> Files.status(repository) end,
+        fn -> Core.list_stashes(repository) end,
+        fn -> Core.list_remotes(repository) end,
+        fn -> Core.fingerprint_sources(repository) end
+      ]
+      |> Enum.map(&Task.async/1)
+      |> Task.await_many(:infinity)
+
+    with {:ok, snapshot} <- snapshot,
+         {:ok, changes} <- changes,
+         {:ok, stashes} <- stashes,
+         {:ok, remotes} <- remotes,
+         {:ok, fingerprint_sources} <- fingerprint_sources do
       {:ok,
        %{
          snapshot: snapshot,
+         graph: Layout.layout(snapshot.commits),
+         commits_by_id: Map.new(snapshot.commits, &{&1.id, &1}),
+         commit_ids: MapSet.new(snapshot.commits, & &1.id),
+         branch_names: MapSet.new(snapshot.branches, & &1.full_name),
+         paths: MapSet.new(changes, & &1.path),
+         fingerprint: Core.fingerprint(repository, changes, fingerprint_sources),
          changes: changes,
          stashes: stashes,
          remotes: remotes,
@@ -1020,26 +1121,29 @@ defmodule MDTClientWeb.GitLive do
 
   defp apply_state(tab, {:ok, state}) do
     snapshot = state.snapshot
-    commits = MapSet.new(snapshot.commits, & &1.id)
-    branches = MapSet.new(snapshot.branches, & &1.full_name)
-    paths = MapSet.new(state.changes, & &1.path)
 
     %{
       tab
       | snapshot: snapshot,
-        graph: Layout.layout(snapshot.commits),
+        graph: if(snapshot.commits == tab.snapshot.commits, do: tab.graph, else: state.graph),
+        commits_by_id: state.commits_by_id,
+        fingerprint: state.fingerprint,
         changes: state.changes,
         stashes: state.stashes,
         remotes: state.remotes,
-        selected_commit: keep_commit(tab, snapshot, commits),
-        selected_branch: keep_branch(tab, snapshot, branches),
-        selected_paths: MapSet.intersection(tab.selected_paths, paths),
+        selected_commit: keep_commit(tab, snapshot, state.commit_ids),
+        selected_branch: keep_branch(tab, snapshot, state.branch_names),
+        selected_paths: MapSet.intersection(tab.selected_paths, state.paths),
         diff: keep_diff(tab, state.diff),
         commit_changes: keep_commit_changes(tab, state.commit_changes)
     }
   end
 
   defp apply_state(tab, {:error, %Error{} = error}), do: %{tab | error: error}
+
+  defp clear_refresh_check(socket, tab_id) do
+    assign(socket, :refresh_checks, Map.delete(socket.assigns.refresh_checks, tab_id))
+  end
 
   # A result that answers a different request than the one on screen is stale:
   # the reader opened another file while this load was in flight.
@@ -1086,7 +1190,7 @@ defmodule MDTClientWeb.GitLive do
     # The draft that produced the commit or stash is spent once Git accepted it.
     case result.action do
       :commit -> %{tab | commit_message: ""}
-      :stash -> %{tab | stash_message: ""}
+      :stash -> %{tab | stash_message: "", stashing?: false}
       _other -> tab
     end
   end
@@ -1402,6 +1506,45 @@ defmodule MDTClientWeb.GitLive do
   end
 
   defp sync_tab(socket) do
-    assign(socket, :tab, Enum.find(socket.assigns.tabs, &(&1.id == socket.assigns.active_id)))
+    tab = Enum.find(socket.assigns.tabs, &(&1.id == socket.assigns.active_id))
+
+    socket
+    |> assign(:tab, tab)
+    |> assign_graph(tab)
+  end
+
+  # The commit graph is the largest tree in this LiveView. Keeping its inputs as
+  # independent assigns lets LiveView skip it when an unrelated tab field, such
+  # as an inspector draft or SSH form value, changes.
+  defp assign_graph(socket, nil) do
+    assign(socket,
+      graph_snapshot: nil,
+      graph_layout: nil,
+      graph_changes: [],
+      graph_pending: nil,
+      graph_pending_label: nil,
+      graph_limit: @default_limit,
+      graph_panel: "commit",
+      graph_selected_commit: nil,
+      graph_selected_branch: nil,
+      graph_menu: nil,
+      graph_diff: nil
+    )
+  end
+
+  defp assign_graph(socket, tab) do
+    assign(socket,
+      graph_snapshot: tab.snapshot,
+      graph_layout: tab.graph,
+      graph_changes: tab.changes,
+      graph_pending: tab.pending,
+      graph_pending_label: tab.pending_label,
+      graph_limit: tab.limit,
+      graph_panel: tab.panel,
+      graph_selected_commit: tab.selected_commit,
+      graph_selected_branch: tab.selected_branch,
+      graph_menu: tab.menu,
+      graph_diff: tab.diff
+    )
   end
 end

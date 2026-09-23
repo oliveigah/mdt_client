@@ -14,20 +14,26 @@ defmodule MDTClient.HttpClient.Core do
   @spec request(String.t(), Req.Request.t(), HistoryMetadata.t() | map()) ::
           {:ok, Req.Response.t()} | {:error, Exception.t()}
   def request(username, %Req.Request{} = request, metadata \\ %{}) do
+    {result, _identifier, _duration_ms} = request_recorded(username, request, metadata)
+    result
+  end
+
+  @doc "Executes and records a request, returning its history ID and measured duration."
+  @spec request_recorded(String.t(), Req.Request.t(), HistoryMetadata.t() | map()) ::
+          {{:ok, Req.Response.t()} | {:error, Exception.t()}, pos_integer(), non_neg_integer()}
+  def request_recorded(username, %Req.Request{} = request, metadata \\ %{}) do
     started_at = DateTime.utc_now()
     result = Req.request(request)
     completed_at = DateTime.utc_now()
 
-    Resources.record(
-      username,
+    metadata =
       metadata
       |> HistoryMetadata.new()
-      |> HistoryMetadata.with_timing(started_at, completed_at),
-      request,
-      response_from(result)
-    )
+      |> HistoryMetadata.with_timing(started_at, completed_at)
 
-    result
+    identifier = Resources.record(username, metadata, request, response_from(result))
+
+    {result, identifier, metadata.duration_ms}
   end
 
   @doc "Adds a tag to a persisted request history entry."

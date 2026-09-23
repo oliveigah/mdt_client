@@ -10,8 +10,9 @@ The app boots to a sign in screen (`/`), which leads to the tool picker
 
 * **HTTP Client** (`/tools/http`) — searchable request history grouped by day,
   tabbed requests, params/headers/auth/body editors, a response viewer, and
-  curl import/export. `Ctrl+Enter` sends; the history and the request/response
-  split are drag resizable, and tabs can be dragged into another order.
+  curl import/export. JSON bodies are highlighted as they are typed, `Ctrl+Enter`
+  sends, the history and the request/response split are drag resizable, and tabs
+  can be dragged into another order.
 * **Git GUI** (`/tools/git`) — a repository tab per folder, over three resizable
   panels: branches and stashes on the left, a lane-drawn commit graph in the
   middle, and an inspector on the right that switches between commit metadata
@@ -20,11 +21,11 @@ The app boots to a sign in screen (`/`), which leads to the tool picker
   creation, cherry-pick, revert, merge, rebase, message edits and resets. Refs
   sit in their own column beside the graph — branches and tags, a monitor marking
   a local branch, a cloud a remote one, a tick the branch HEAD is on — collapsed
-  to the one that matters most with the rest a hover away, and uncommitted work
-  takes a dashed WIP row above the newest commit. The changes panel follows the
-  selection: the working tree when nothing is picked, otherwise the files that
-  commit touched. Either way a file opens its diff over the graph, and the
-  working tree keeps unstaged and staged in their own lists. Folders are chosen
+  to the one that matters most with the rest dropping down on hover, and
+  uncommitted work takes a dashed WIP row above the newest commit. Selecting a
+  commit lists the files it touched beside its metadata; the working tree keeps
+  its own tab, with unstaged and staged in separate lists. Either way a file
+  opens its diff over the graph. Folders are chosen
   with the native desktop picker or cloned from a remote, they come back in
   their tabs the next time you open the tool, and the active one refreshes on a
   timer so work done elsewhere shows up. `docs/git-backend.md` covers the

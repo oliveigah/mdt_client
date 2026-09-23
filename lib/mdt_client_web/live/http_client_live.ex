@@ -10,20 +10,27 @@ defmodule MDTClientWeb.HttpClientLive do
 
   alias MDTClient.HttpClient.Core
   alias MDTClient.HttpClient.Curl
+  alias MDTClient.HttpClient.Requests
   alias MDTClient.HttpClient.Resources
   alias MDTClient.HttpClient.Translation
   alias MDTClient.HttpClient.Utils
   alias MDTClient.Tools
 
+  @auto_load_response_bytes 5 * 1024 * 1024
+  @max_display_response_bytes 100 * 1024 * 1024
+
   @impl true
   def mount(_params, _session, socket) do
     tabs = [Utils.new_request()]
+    username = socket.assigns.current_scope.user.username
+
+    if connected?(socket), do: Requests.subscribe(username)
 
     {:ok,
      socket
      |> assign(:page_title, "HTTP Client")
      |> assign(:tool, Tools.fetch!(:http))
-     |> assign(:username, socket.assigns.current_scope.user.username)
+     |> assign(:username, username)
      |> assign(:tabs, tabs)
      |> assign(:active_id, hd(tabs).id)
      |> assign(:sidebar?, true)
@@ -697,8 +704,26 @@ defmodule MDTClientWeb.HttpClientLive do
             class="min-w-0 flex-1 rounded-md border border-line bg-deep px-2.5 py-1.5 font-mono text-[13px] text-ink outline-none transition-colors placeholder:text-faint focus:border-accent/60 focus:ring-2 focus:ring-accent/15"
           />
 
+          <div class="w-28 shrink-0" title="Request timeout">
+            <.input
+              field={@form[:timeout_ms]}
+              type="select"
+              id="request-timeout"
+              value={@tab.timeout_ms}
+              options={Utils.timeout_options()}
+              aria-label="Request timeout"
+              class="w-full cursor-pointer rounded-md border border-line bg-panel px-2.5 py-1.5 font-mono text-xs text-ink outline-none transition-colors hover:border-accent/40 focus:border-accent/60"
+            />
+          </div>
+
           <%= if @tab.state == :sending do %>
-            <.button type="button" phx-click="cancel" variant="secondary" class="shrink-0">
+            <.button
+              type="button"
+              id="cancel-request"
+              phx-click="cancel"
+              variant="secondary"
+              class="shrink-0"
+            >
               <.icon name="hero-stop-circle" class="size-4" /> Cancel
             </.button>
           <% else %>
@@ -994,21 +1019,134 @@ defmodule MDTClientWeb.HttpClientLive do
         </div>
       </div>
 
-      <%= if @tab.body_type == "none" do %>
-        <p class="px-2.5 text-xs text-faint">This request does not send a body.</p>
-      <% else %>
-        <textarea
-          name={@form[:body].name}
-          id="request-body"
-          rows="8"
-          spellcheck="false"
-          placeholder={body_placeholder(@tab.body_type)}
-          phx-debounce="200"
-          class="min-h-0 flex-1 resize-none border-t border-line-soft bg-deep px-2.5 py-2 font-mono text-xs leading-5 text-ink outline-none placeholder:text-faint focus:ring-1 focus:ring-inset focus:ring-accent/30"
-        >{@tab.body}</textarea>
+      <%= cond do %>
+        <% @tab.body_type == "none" -> %>
+          <p class="px-2.5 text-xs text-faint">This request does not send a body.</p>
+        <% @tab.body_type == "json" -> %>
+          <%!-- The textarea stays the thing being typed into, keeping native
+                editing, undo and spell checking; the colours are painted onto a
+                layer behind it that copies its text metrics exactly. --%>
+          <div class="relative min-h-0 flex-1 border-t border-line-soft bg-deep">
+            <pre
+              id="request-body-highlight"
+              phx-update="ignore"
+              aria-hidden="true"
+              class={["pointer-events-none absolute inset-0 overflow-hidden", body_text()]}
+            ></pre>
+            <textarea
+              name={@form[:body].name}
+              id="request-body"
+              phx-hook=".Highlight"
+              data-layer="request-body-highlight"
+              spellcheck="false"
+              placeholder={body_placeholder(@tab.body_type)}
+              phx-debounce="200"
+              class={[
+                "absolute inset-0 resize-none bg-transparent text-transparent caret-ink outline-none",
+                "placeholder:text-faint focus:ring-1 focus:ring-inset focus:ring-accent/30",
+                body_text()
+              ]}
+            >{@tab.body}</textarea>
+          </div>
+        <% true -> %>
+          <textarea
+            name={@form[:body].name}
+            id="request-body"
+            rows="8"
+            spellcheck="false"
+            placeholder={body_placeholder(@tab.body_type)}
+            phx-debounce="200"
+            class={[
+              "min-h-0 flex-1 resize-none border-t border-line-soft bg-deep text-ink outline-none",
+              "placeholder:text-faint focus:ring-1 focus:ring-inset focus:ring-accent/30",
+              body_text()
+            ]}
+          >{@tab.body}</textarea>
       <% end %>
     </div>
+    <script :type={Phoenix.LiveView.ColocatedHook} name=".Highlight">
+      const TOKEN =
+        /("(?:[^"\\]|\\.)*"\s*:)|("(?:[^"\\]|\\.)*")|(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)|(\btrue\b|\bfalse\b|\bnull\b)|([\{\}\[\]])|([,:])/g
+
+      // Beyond this a payload is something to send, not something to read, and
+      // recolouring it on every keystroke would cost more than it is worth.
+      const LIMIT = 100000
+
+      const escape = (text) =>
+        text.replace(/[&<>]/g, (char) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;"})[char])
+
+      const tone = (match, groups) => {
+        if (groups[0]) return "text-syn-key"
+        if (groups[1]) return "text-syn-string"
+        if (groups[2]) return "text-syn-number"
+        if (groups[3]) return "text-syn-const"
+        if (groups[4]) return "text-syn-brace"
+        return "text-syn-punct"
+      }
+
+      const paint = (source) => {
+        if (source.length > LIMIT) return escape(source)
+
+        let html = ""
+        let last = 0
+        let match
+
+        TOKEN.lastIndex = 0
+        while ((match = TOKEN.exec(source)) !== null) {
+          if (match.index > last) html += escape(source.slice(last, match.index))
+          html += `<span class="${tone(match[0], match.slice(1))}">${escape(match[0])}</span>`
+          last = match.index + match[0].length
+        }
+
+        return html + escape(source.slice(last))
+      }
+
+      export default {
+        mounted() {
+          this.layer = document.getElementById(this.el.dataset.layer)
+          this.frame = null
+          this.draw()
+
+          this.el.addEventListener("input", () => this.schedule())
+          this.el.addEventListener("scroll", () => this.sync())
+        },
+
+        updated() { this.draw() },
+
+        destroyed() {
+          if (this.frame !== null) cancelAnimationFrame(this.frame)
+        },
+
+        schedule() {
+          if (this.frame !== null) return
+          this.frame = requestAnimationFrame(() => {
+            this.frame = null
+            this.draw()
+          })
+        },
+
+        draw() {
+          if (!this.layer) return
+
+          // A trailing newline would otherwise collapse and shift the last line.
+          const source = this.el.value.endsWith("\n") ? `${this.el.value} ` : this.el.value
+          this.layer.innerHTML = paint(source)
+          this.sync()
+        },
+
+        sync() {
+          if (!this.layer) return
+          this.layer.scrollTop = this.el.scrollTop
+          this.layer.scrollLeft = this.el.scrollLeft
+        }
+      }
+    </script>
     """
+  end
+
+  # Both the editor and the layer behind it must lay text out identically.
+  defp body_text do
+    "whitespace-pre-wrap break-words px-2.5 py-2 font-mono text-xs leading-5"
   end
 
   ## Response
@@ -1016,6 +1154,21 @@ defmodule MDTClientWeb.HttpClientLive do
   attr :tab, :map, required: true
 
   defp response_panel(assigns) do
+    response = assigns.tab.response
+    body_loaded? = response && Map.get(response, :body_loaded?, true)
+
+    assigns =
+      assigns
+      |> assign(:body_loaded?, body_loaded?)
+      |> assign(
+        :large_response?,
+        body_loaded? && is_binary(response.body) && large_content?(response.body)
+      )
+      |> assign(
+        :displayable_response?,
+        response && Map.get(response, :size_bytes, 0) <= @max_display_response_bytes
+      )
+
     ~H"""
     <div class="flex min-h-0 flex-1 flex-col bg-deep">
       <div class="flex h-9 shrink-0 items-center gap-2 border-b border-line-soft bg-panel px-2.5">
@@ -1046,10 +1199,12 @@ defmodule MDTClientWeb.HttpClientLive do
             />
           </div>
           <button
+            :if={@tab.response_tab == "body" && @body_loaded?}
             type="button"
             id={"copy-response-#{@tab.id}"}
             phx-hook=".Copy"
-            data-copy={@tab.response.body}
+            data-copy={if(@large_response?, do: nil, else: @tab.response.body)}
+            data-copy-target={if(@large_response?, do: "response-body-#{@tab.id}")}
             title="Copy response body"
             class="flex cursor-pointer items-center gap-1 rounded px-1.5 py-1 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
           >
@@ -1060,7 +1215,8 @@ defmodule MDTClientWeb.HttpClientLive do
             export default {
               mounted() {
                 this.el.addEventListener("click", () => {
-                  navigator.clipboard?.writeText(this.el.dataset.copy || "")
+                  const target = document.getElementById(this.el.dataset.copyTarget)
+                  navigator.clipboard?.writeText(target?.textContent || this.el.dataset.copy || "")
                   const label = this.el.querySelector("[data-label]")
                   if (!label) return
                   label.textContent = "Copied"
@@ -1097,6 +1253,42 @@ defmodule MDTClientWeb.HttpClientLive do
               <span class="w-48 shrink-0 text-syn-key">{name}</span>
               <span class="min-w-0 break-all text-ink">{value}</span>
             </div>
+          </div>
+        <% !@body_loaded? -> %>
+          <div class="flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center">
+            <.icon
+              name={if @tab.response.body_loading?, do: "hero-arrow-path", else: "hero-document"}
+              class={[
+                "size-5 text-faint",
+                @tab.response.body_loading? && "text-accent motion-safe:animate-spin"
+              ]}
+            />
+            <p class="text-xs text-muted">
+              <%= cond do %>
+                <% @tab.response.body_loading? -> %>
+                  Loading response body…
+                <% !@displayable_response? -> %>
+                  This response is too large to render safely in the app.
+                <% true -> %>
+                  The response body is available on demand.
+              <% end %>
+            </p>
+            <p class="max-w-md text-[11px] text-faint">
+              <%= if @displayable_response? do %>
+                Bodies over 5 MB stay unloaded so request completion and tab switching remain responsive.
+              <% else %>
+                Responses over 100 MB remain in history without being added to the browser DOM.
+              <% end %>
+            </p>
+            <.button
+              :if={@displayable_response? && !@tab.response.body_loading?}
+              type="button"
+              id={"load-response-body-#{@tab.id}"}
+              phx-click="load_response"
+              variant="secondary"
+            >
+              Load {@tab.response.size} body
+            </.button>
           </div>
         <% @tab.response.body == "" -> %>
           <div class="flex flex-1 items-center justify-center text-xs text-faint">
@@ -1293,14 +1485,15 @@ defmodule MDTClientWeb.HttpClientLive do
       true ->
         case Integer.parse(id) do
           {identifier, ""} ->
-            case Resources.get(socket.assigns.username, identifier) do
-              {:ok, entry} ->
-                {:noreply, open_tab(socket, Translation.request_from_history(entry))}
+            username = socket.assigns.username
 
-              :error ->
-                {:noreply,
-                 socket |> assign_history() |> put_flash(:error, "History entry not found")}
-            end
+            {:noreply,
+             start_async(socket, {:open_history, identifier}, fn ->
+               case Resources.outline(username, identifier) do
+                 {:ok, entry} -> {:ok, Translation.request_outline_from_history(entry)}
+                 :error -> :error
+               end
+             end)}
 
           :error ->
             {:noreply, socket}
@@ -1315,7 +1508,8 @@ defmodule MDTClientWeb.HttpClientLive do
 
   @impl true
   def handle_event("select_tab", %{"id" => id}, socket) do
-    {:noreply, socket |> assign(:active_id, id) |> sync_tab()}
+    socket = socket |> assign(:active_id, id) |> sync_tab()
+    {:noreply, maybe_load_response_body(socket, socket.assigns.tab)}
   end
 
   @impl true
@@ -1374,6 +1568,11 @@ defmodule MDTClientWeb.HttpClientLive do
   end
 
   @impl true
+  def handle_event("load_response", _params, socket) do
+    {:noreply, load_response_body(socket, socket.assigns.tab)}
+  end
+
+  @impl true
   def handle_event("add_row", %{"kind" => kind}, socket) do
     key = rows_key(kind)
 
@@ -1420,9 +1619,10 @@ defmodule MDTClientWeb.HttpClientLive do
   def handle_event("cancel", _params, socket) do
     case socket.assigns.tab do
       %{pending: pending} when not is_nil(pending) ->
+        :ok = Requests.cancel(socket.assigns.username, pending)
+
         {:noreply,
          socket
-         |> cancel_async(pending)
          |> update_active(&%{&1 | state: :idle, pending: nil})}
 
       _tab ->
@@ -1431,48 +1631,99 @@ defmodule MDTClientWeb.HttpClientLive do
   end
 
   @impl true
-  def handle_async({:request, tab_id} = task, {:ok, {result, duration_ms}}, socket) do
-    case Enum.find(socket.assigns.tabs, &(&1.id == tab_id)) do
-      %{pending: ^task} ->
+  def handle_async({:open_history, _identifier}, {:ok, {:ok, tab}}, socket) do
+    socket = open_tab(socket, tab)
+    {:noreply, maybe_load_response_body(socket, tab)}
+  end
+
+  @impl true
+  def handle_async({:open_history, _identifier}, {:ok, :error}, socket) do
+    {:noreply, socket |> assign_history() |> put_flash(:error, "History entry not found")}
+  end
+
+  @impl true
+  def handle_async({:open_history, _identifier}, {:exit, _reason}, socket) do
+    {:noreply, put_flash(socket, :error, "Could not open the history entry")}
+  end
+
+  @impl true
+  def handle_async(
+        {:load_response, tab_id, source_id},
+        {:ok, {:ok, response}},
+        socket
+      ) do
+    socket =
+      put_tab(socket, tab_id, fn tab ->
+        if tab.source_id == source_id do
+          %{tab | response: response}
+        else
+          tab
+        end
+      end)
+
+    {:noreply, socket}
+  end
+
+  @impl true
+  def handle_async({:load_response, tab_id, source_id}, outcome, socket) do
+    socket =
+      put_tab(socket, tab_id, fn tab ->
+        if tab.source_id == source_id && tab.response do
+          %{tab | response: %{tab.response | body_loading?: false}}
+        else
+          tab
+        end
+      end)
+
+    message =
+      case outcome do
+        {:ok, :error} -> "Response is no longer in history"
+        {:exit, _reason} -> "Could not load the response body"
+      end
+
+    {:noreply, put_flash(socket, :error, message)}
+  end
+
+  @impl true
+  def handle_info(
+        {:http_request_finished, request_id, %{history_id: history_id, response: response}},
+        socket
+      ) do
+    case Enum.find(socket.assigns.tabs, &(&1.pending == request_id)) do
+      nil ->
+        {:noreply, assign_history(socket)}
+
+      tab ->
+        source_id = to_string(history_id)
+
         socket =
-          put_tab(socket, tab_id, fn tab ->
+          socket
+          |> put_tab(tab.id, fn current ->
             %{
-              tab
+              current
               | state: :idle,
                 pending: nil,
-                response: Translation.response_view(result, duration_ms),
+                source_id: source_id,
+                response: response,
                 response_tab: "body"
             }
           end)
+          |> assign_history()
 
-        {:noreply, assign_history(socket)}
-
-      _stale ->
-        {:noreply, socket}
+        completed_tab = Enum.find(socket.assigns.tabs, &(&1.id == tab.id))
+        {:noreply, maybe_load_response_body(socket, completed_tab)}
     end
   end
 
   @impl true
-  def handle_async({:request, tab_id} = task, {:exit, reason}, socket) do
-    case Enum.find(socket.assigns.tabs, &(&1.id == tab_id)) do
-      %{pending: ^task} ->
-        socket =
-          put_tab(socket, tab_id, fn tab ->
-            %{
-              tab
-              | state: :idle,
-                pending: nil,
-                response:
-                  Translation.response_view({:error, RuntimeError.exception(inspect(reason))}, 0),
-                response_tab: "body"
-            }
-          end)
+  def handle_info({:http_request_failed, request_id, reason}, socket) do
+    {:noreply, finish_failed_request(socket, request_id, reason)}
+  end
 
-        {:noreply, socket}
-
-      _stale ->
-        {:noreply, socket}
-    end
+  @impl true
+  def handle_info({:http_request_cancelled, request_id}, socket) do
+    {:noreply,
+     update_request_tab(socket, request_id, fn tab -> %{tab | state: :idle, pending: nil} end)}
   end
 
   ## Assign helpers
@@ -1489,27 +1740,100 @@ defmodule MDTClientWeb.HttpClientLive do
       String.trim(tab.url) == "" ->
         put_flash(socket, :error, "Enter a URL before sending")
 
+      match?({:error, :invalid_timeout}, Utils.parse_timeout_ms(tab.timeout_ms)) ->
+        put_flash(socket, :error, "Choose a valid request timeout")
+
       tab.state == :sending ->
         socket
 
       true ->
         request = Translation.to_req(tab)
         metadata = %{description: tab.name, tags: tab.tags}
+        request_id = Utils.new_request_id()
+
+        case Requests.start(socket.assigns.username, request_id, request, metadata) do
+          :ok ->
+            put_tab(
+              socket,
+              tab.id,
+              &%{
+                &1
+                | state: :sending,
+                  pending: request_id,
+                  response: nil
+              }
+            )
+
+          {:error, :already_running} ->
+            put_flash(socket, :error, "This request is already running")
+        end
+    end
+  end
+
+  defp maybe_load_response_body(socket, nil), do: socket
+
+  defp maybe_load_response_body(socket, tab) do
+    response = tab.response
+
+    if socket.assigns.active_id == tab.id && response && !response.body_loaded? &&
+         response.size_bytes <= @auto_load_response_bytes do
+      load_response_body(socket, tab)
+    else
+      socket
+    end
+  end
+
+  defp load_response_body(socket, nil), do: socket
+
+  defp load_response_body(socket, %{source_id: nil}), do: socket
+
+  defp load_response_body(socket, tab) do
+    response = tab.response
+
+    cond do
+      is_nil(response) or response.body_loaded? or response.body_loading? ->
+        socket
+
+      response.size_bytes > @max_display_response_bytes ->
+        socket
+
+      true ->
         username = socket.assigns.username
-        task = {:request, tab.id}
+        source_id = tab.source_id
+        {identifier, ""} = Integer.parse(source_id)
 
         socket
-        |> put_tab(tab.id, &%{&1 | state: :sending, pending: task, response: nil})
-        |> start_async(task, fn ->
-          started_at = System.monotonic_time()
-          result = Core.request(username, request, metadata)
-
-          duration_ms =
-            (System.monotonic_time() - started_at)
-            |> System.convert_time_unit(:native, :millisecond)
-
-          {result, duration_ms}
+        |> put_tab(tab.id, fn current ->
+          %{current | response: %{current.response | body_loading?: true}}
         end)
+        |> start_async({:load_response, tab.id, source_id}, fn ->
+          case Resources.get(username, identifier) do
+            {:ok, {_id, metadata, _request, stored_response}} ->
+              {:ok, Translation.response_view(stored_response, metadata.duration_ms)}
+
+            :error ->
+              :error
+          end
+        end)
+    end
+  end
+
+  defp finish_failed_request(socket, request_id, reason) do
+    update_request_tab(socket, request_id, fn tab ->
+      %{
+        tab
+        | state: :idle,
+          pending: nil,
+          response: Translation.response_view({:error, RuntimeError.exception(reason)}, 0),
+          response_tab: "body"
+      }
+    end)
+  end
+
+  defp update_request_tab(socket, request_id, update) do
+    case Enum.find(socket.assigns.tabs, &(&1.pending == request_id)) do
+      nil -> socket
+      tab -> put_tab(socket, tab.id, update)
     end
   end
 
@@ -1597,7 +1921,8 @@ defmodule MDTClientWeb.HttpClientLive do
         "auth_type" => tab.auth_type,
         "auth_token" => tab.auth_token,
         "auth_username" => tab.auth_username,
-        "auth_password" => tab.auth_password
+        "auth_password" => tab.auth_password,
+        "timeout_ms" => tab.timeout_ms
       },
       as: :request
     )
@@ -1606,13 +1931,13 @@ defmodule MDTClientWeb.HttpClientLive do
   defp assign_history(socket) do
     entries =
       socket.assigns.username
-      |> Resources.search(socket.assigns.term)
+      |> Resources.summaries(socket.assigns.term)
       |> Enum.map(&Translation.history_entry/1)
 
     assign(socket, groups: Utils.group_history(entries), count: length(entries))
   end
 
-  @scalar_fields ~w(method url body body_type auth_type auth_token auth_username auth_password)
+  @scalar_fields ~w(method url body body_type auth_type auth_token auth_username auth_password timeout_ms)
 
   defp apply_params(tab, params) do
     scalars = Map.get(params, "request", %{})

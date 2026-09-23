@@ -123,6 +123,26 @@ defmodule MDTClient.Git.CoreTest do
     assert inspected == commit
   end
 
+  test "fingerprints stay stable until repository state changes", %{
+    path: path,
+    repository: repository
+  } do
+    assert {:ok, initial} = Core.fingerprint(repository)
+    assert {:ok, ^initial} = Core.fingerprint(repository)
+
+    File.write!(Path.join(path, "outside.txt"), "outside\n")
+    assert {:ok, worktree_changed} = Core.fingerprint(repository)
+    refute worktree_changed == initial
+
+    git!(path, ["add", "outside.txt"])
+    assert {:ok, index_changed} = Core.fingerprint(repository)
+    refute index_changed == worktree_changed
+
+    git!(path, ["remote", "add", "origin", "https://example.test/project.git"])
+    assert {:ok, config_changed} = Core.fingerprint(repository)
+    refute config_changed == index_changed
+  end
+
   test "creates, checks out, renames, and deletes local branches", %{repository: repository} do
     assert {:ok, %CommandResult{action: :create_branch}} =
              Core.create_branch(repository, "topic")

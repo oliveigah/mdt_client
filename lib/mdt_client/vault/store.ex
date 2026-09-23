@@ -15,7 +15,7 @@ defmodule MDTClient.Vault.Store do
 
   @registry MDTClient.Vault.Registry
   @supervisor MDTClient.Vault.DynamicSupervisor
-  @stores [MDTClient.HttpClient.Resources]
+  @stores [MDTClient.HttpClient.Resources, MDTClient.HttpClient.Requests]
 
   @doc false
   def child_spec(_opts) do
@@ -37,7 +37,7 @@ defmodule MDTClient.Vault.Store do
   @doc "Brings an identity's stores up with the key that decrypts them."
   @spec open(String.t(), MDTClient.Vault.key()) :: :ok
   def open(username, key) do
-    Enum.each(@stores, fn store ->
+    Enum.each(Enum.reverse(@stores), fn store ->
       case DynamicSupervisor.start_child(@supervisor, {store, username: username, key: key}) do
         {:ok, _pid} -> :ok
         {:error, {:already_started, _pid}} -> :ok

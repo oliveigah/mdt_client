@@ -69,7 +69,7 @@ defmodule MDTClient.HttpClient.HistoryMetadata do
         request,
         response
       ]
-      |> Enum.map(&inspect(&1, limit: :infinity, printable_limit: :infinity))
+      |> Enum.map(&inspect(&1, limit: 500, printable_limit: 32_000))
       |> Enum.join("\n")
       |> normalize_search_text()
 

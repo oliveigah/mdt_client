@@ -382,6 +382,39 @@ defmodule MDTClientWeb.GitLiveTest do
     assert has_element?(view, "#git-branch-#{slug("refs/heads/shipped")}")
   end
 
+  test "a branch in the graph carries its own menu, checkout included", context do
+    %{view: view, path: path} = context
+    git!(path, ["branch", "feature"])
+    open(view, path)
+
+    feature = slug("refs/heads/feature")
+
+    # The list hook reads these off whatever the pointer landed on.
+    assert has_element?(
+             view,
+             "#git-ref-all-#{feature}[data-menu-kind=branch][data-menu-id='refs/heads/feature']"
+           )
+
+    render_hook(view, "open_menu", %{"kind" => "branch", "id" => "refs/heads/feature"})
+    assert has_element?(view, "#git-branch-menu-#{feature}[role=menu]")
+
+    view |> element("#git-menu-checkout-#{feature}") |> render_click()
+    render_async(view)
+
+    assert git!(path, ["rev-parse", "--abbrev-ref", "HEAD"]) == "feature"
+  end
+
+  test "a lone ref keeps its chip on show", context do
+    %{view: view, path: path} = context
+    open(view, path)
+
+    head = head_commit(path)
+
+    # Nothing to expand, so nothing hides the label on hover either.
+    assert has_element?(view, "#git-ref-#{slug("refs/heads/main")}")
+    refute has_element?(view, "#git-refs-#{head}")
+  end
+
   ## Commits
 
   test "renders the graph and selects the head commit", context do
@@ -814,6 +847,11 @@ defmodule MDTClientWeb.GitLiveTest do
     view |> element("#git-panel-changes") |> render_click()
     view |> element("#git-file-unstaged-#{slug("README.md")}") |> render_click()
 
+    # The message box only turns up once stashing is the decision.
+    refute has_element?(view, "#git-stash-message")
+    view |> element("#git-prepare-stash") |> render_click()
+    assert has_element?(view, "#git-stash-message")
+
     view
     |> form("#git-stash-form", %{"message" => "just the readme", "include_untracked" => "true"})
     |> render_submit()
@@ -824,9 +862,9 @@ defmodule MDTClientWeb.GitLiveTest do
     assert File.exists?(Path.join(path, "untouched.txt"))
     assert has_element?(view, "#git-stash-0")
     assert render(view) =~ "just the readme"
+    # And it folds away again once the stash exists.
+    refute has_element?(view, "#git-stash-message")
     assert render(view) =~ "complete stash"
-    # The spent draft does not linger in the form.
-    assert view |> element("#git-stash-message") |> render() =~ ~s(value="")
 
     view |> element("#git-stash-pop-0") |> render_click()
     render_async(view)
@@ -964,6 +1002,7 @@ defmodule MDTClientWeb.GitLiveTest do
     open(view, path)
 
     view |> element("#git-select-commit-#{initial}") |> render_click()
+    render_async(view)
 
     view |> element("#git-refresh") |> render_click()
     render_async(view)
@@ -997,6 +1036,7 @@ defmodule MDTClientWeb.GitLiveTest do
 
     view |> element("#git-panel-changes") |> render_click()
     view |> element("#git-select-all-paths") |> render_click()
+    view |> element("#git-prepare-stash") |> render_click()
 
     view
     |> form("#git-stash-form", %{"message" => "left panel stash", "include_untracked" => "true"})
@@ -1086,6 +1126,23 @@ defmodule MDTClientWeb.GitLiveTest do
     assert has_element?(view, "#git-staged-empty")
   end
 
+  test "the stash message box can be dismissed without stashing", context do
+    %{view: view, path: path} = context
+    File.write!(Path.join(path, "one.txt"), "one\n")
+    open(view, path)
+
+    view |> element("#git-panel-changes") |> render_click()
+    view |> element("#git-select-all-paths") |> render_click()
+    view |> element("#git-prepare-stash") |> render_click()
+    assert has_element?(view, "#git-stash-form")
+
+    view |> element("#git-cancel-stash") |> render_click()
+
+    refute has_element?(view, "#git-stash-form")
+    assert has_element?(view, "#git-prepare-stash")
+    assert has_element?(view, "#git-stashes-empty")
+  end
+
   ## Diffs
 
   test "opens a file diff in the middle panel and closes it again", context do
@@ -1150,16 +1207,14 @@ defmodule MDTClientWeb.GitLiveTest do
     assert has_element?(view, "#git-select-commit-#{initial}")
     refute has_element?(view, "#git-diff")
 
-    # The changes tab was open, so picking a commit keeps showing files, its own.
     view |> element("#git-select-commit-#{initial}") |> render_click()
     render_async(view)
-    assert has_element?(view, "#git-commit-changes")
 
-    view |> element("#git-panel-commit") |> render_click()
     assert has_element?(view, "#git-commit-details")
+    assert has_element?(view, "#git-commit-changes")
   end
 
-  test "the changes tab shows what a commit did, and its files open a diff", context do
+  test "the commit tab shows what a commit did, and its files open a diff", context do
     %{view: view, path: path, initial_commit: initial} = context
 
     File.write!(Path.join(path, "README.md"), "rewritten\n")
@@ -1172,28 +1227,30 @@ defmodule MDTClientWeb.GitLiveTest do
     File.write!(Path.join(path, "dirty.txt"), "dirty\n")
     open(view, path)
 
-    # With nothing picked the tab is about the working tree.
+    # The working tree tab stays about the working tree.
     view |> element("#git-panel-changes") |> render_click()
     assert has_element?(view, "#git-working-tree")
     assert has_element?(view, "#git-file-unstaged-#{slug("dirty.txt")}")
+    refute has_element?(view, "#git-commit-changes")
 
+    # Picking a commit shows its files with the rest of its metadata.
     view |> element("#git-select-commit-#{second}") |> render_click()
     render_async(view)
 
+    assert has_element?(view, "#git-commit-details")
     assert has_element?(view, "#git-commit-changes")
-    refute has_element?(view, "#git-working-tree")
     assert has_element?(view, "#git-commit-file-#{slug("README.md")}")
     assert has_element?(view, "#git-commit-file-#{slug("added.txt")}")
     refute has_element?(view, "#git-commit-file-#{slug("dirty.txt")}")
 
-    # Browsing on keeps the file list, now for the other commit.
+    # Browsing on swaps the list for the other commit's files.
     view |> element("#git-select-commit-#{initial}") |> render_click()
     render_async(view)
 
     assert has_element?(view, "#git-commit-file-#{slug("README.md")}")
     refute has_element?(view, "#git-commit-file-#{slug("added.txt")}")
 
-    view |> element("#git-show-working-tree") |> render_click()
+    view |> element("#git-panel-changes") |> render_click()
     assert has_element?(view, "#git-working-tree")
   end
 
@@ -1205,7 +1262,6 @@ defmodule MDTClientWeb.GitLiveTest do
 
     open(view, path)
     view |> element("#git-select-commit-#{head}") |> render_click()
-    view |> element("#git-panel-changes") |> render_click()
     render_async(view)
 
     view |> element("#git-commit-file-#{slug("README.md")}") |> render_click()

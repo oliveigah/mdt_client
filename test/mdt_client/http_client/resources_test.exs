@@ -28,6 +28,19 @@ defmodule MDTClient.HttpClient.ResourcesTest do
     assert [{^identifier, ^stored, _, _}] = Resources.search(username, "system")
     assert [{^identifier, ^stored, _, _}] = Resources.search(username, "healthy")
     assert Resources.search(username, "missing") == []
+
+    assert [summary] = Resources.summaries(username)
+
+    assert {^identifier, "Health check", ["system", "health"], _at, 0, :get,
+            %URI{host: "example.test", path: "/health"}, 204} = summary
+
+    assert Resources.summaries(username, "HEALTH") == [summary]
+    assert Resources.summaries(username, "missing") == []
+
+    assert {:ok, {^identifier, ^stored, ^request, {:response, 204, %{}, response_size}}} =
+             Resources.outline(username, identifier)
+
+    assert response_size == byte_size(response.body)
   end
 
   test "clears stored history", %{username: username} do
@@ -42,6 +55,20 @@ defmodule MDTClient.HttpClient.ResourcesTest do
     assert Resources.all(username) == []
   end
 
+  test "summarizes failed requests with the client error status", %{username: username} do
+    identifier =
+      Resources.record(
+        username,
+        HistoryMetadata.new(%{}),
+        Req.new(url: "https://example.test/slow"),
+        Req.TransportError.exception(reason: :timeout)
+      )
+
+    assert [
+             {^identifier, nil, [], _at, 0, :get, %URI{path: "/slow"}, 599}
+           ] = Resources.summaries(username)
+  end
+
   test "deletes one entry and keeps the rest", %{username: username} do
     kept = record(username, "https://example.test/one")
     dropped = record(username, "https://example.test/two")
@@ -49,6 +76,7 @@ defmodule MDTClient.HttpClient.ResourcesTest do
     assert :ok = Resources.delete(username, dropped)
     assert Resources.delete(username, dropped) == :error
     assert Resources.get(username, dropped) == :error
+    assert Resources.outline(username, dropped) == :error
     assert {:ok, _entry} = Resources.get(username, kept)
   end
 
@@ -67,6 +95,7 @@ defmodule MDTClient.HttpClient.ResourcesTest do
 
     assert {:ok, {^first, _, _, _}} = Resources.get(username, first)
     assert {:ok, {^last, _, _, _}} = Resources.get(username, last)
+    assert {:ok, {^last, _, _, {:response, 200, _, _}}} = Resources.outline(username, last)
     assert record(username, "https://example.test/three") > last
   end
 

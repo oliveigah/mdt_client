@@ -237,6 +237,14 @@ defmodule MDTClient.Git.FilesTest do
                Files.diff(repository, "counted.txt", lines: 5_000)
     end
 
+    test "the default line budget bounds the rendered diff", context do
+      %{path: path, repository: repository} = context
+      File.write!(Path.join(path, "counted.txt"), Enum.map_join(1..2_500, "", &"new #{&1}\n"))
+
+      assert {:ok, %FileDiff{truncated?: true} = diff} = Files.diff(repository, "counted.txt")
+      assert Enum.sum(Enum.map(diff.hunks, &length(&1.lines))) == 2_000
+    end
+
     test "refuses paths outside the repository and bad options", %{repository: repository} do
       assert {:error, %{kind: :invalid_argument}} = Files.diff(repository, "../escape.txt")
       assert {:error, %{kind: :invalid_argument}} = Files.diff(repository, "")

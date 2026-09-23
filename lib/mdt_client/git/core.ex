@@ -22,6 +22,7 @@ defmodule MDTClient.Git.Core do
   alias MDTClient.Git.CommandResult
   alias MDTClient.Git.Commit
   alias MDTClient.Git.Error
+  alias MDTClient.Git.Files
   alias MDTClient.Git.Operation
   alias MDTClient.Git.Remote
   alias MDTClient.Git.Repository
@@ -77,6 +78,7 @@ defmodule MDTClient.Git.Core do
               ) <> "%00%1e"
 
   @stash_format Enum.join(["%gd", "%H", "%gs", "%cI"], "%x00") <> "%x00%x1e"
+  @fingerprint_ref_format "%(refname)%00%(objectname)%00%(upstream:track)%00"
 
   @type result(value) :: {:ok, value} | {:error, Error.t()}
   @type mutation_result :: result(CommandResult.t())
@@ -199,13 +201,45 @@ defmodule MDTClient.Git.Core do
   @doc "Loads the dynamic state used by the branch list and graph."
   @spec snapshot(Repository.t(), keyword()) :: result(Snapshot.t())
   def snapshot(%Repository{} = repository, opts \\ []) do
-    with {:ok, limit} <- graph_limit(opts),
-         {:ok, head} <- head(repository),
-         {:ok, current_branch} <- current_branch(repository),
-         {:ok, branches} <- list_branches(repository),
-         {:ok, tags} <- list_tags(repository),
+    with {:ok, limit} <- graph_limit(opts) do
+      [head, current_branch, branches, tags, operation] =
+        [
+          fn -> head(repository) end,
+          fn -> current_branch(repository) end,
+          fn -> list_branches(repository) end,
+          fn -> list_tags(repository) end,
+          fn -> operation(repository) end
+        ]
+        |> Enum.map(&Task.async/1)
+        |> Task.await_many(:infinity)
+
+      build_snapshot(
+        repository,
+        limit,
+        head,
+        current_branch,
+        branches,
+        tags,
+        operation
+      )
+    end
+  end
+
+  defp build_snapshot(
+         repository,
+         limit,
+         head_result,
+         current_branch_result,
+         branches_result,
+         tags_result,
+         operation_result
+       ) do
+    with {:ok, head} <- head_result,
+         {:ok, current_branch} <- current_branch_result,
+         {:ok, branches} <- branches_result,
+         {:ok, tags} <- tags_result,
          {:ok, commits} <- graph_with_refs(repository, branches, tags, head, limit),
-         {:ok, operation} <- operation(repository) do
+         {:ok, operation} <- operation_result do
       {:ok,
        %Snapshot{
          repository: repository,
@@ -218,6 +252,61 @@ defmodule MDTClient.Git.Core do
          operation: operation
        }}
     end
+  end
+
+  @doc "Returns a compact token for cheap background change detection."
+  @spec fingerprint(Repository.t()) :: result(binary())
+  def fingerprint(%Repository{} = repository) do
+    [changes, sources] =
+      [
+        fn -> Files.status(repository) end,
+        fn -> fingerprint_sources(repository) end
+      ]
+      |> Enum.map(&Task.async/1)
+      |> Task.await_many(:infinity)
+
+    with {:ok, changes} <- changes,
+         {:ok, sources} <- sources do
+      {:ok, fingerprint(repository, changes, sources)}
+    end
+  end
+
+  @doc false
+  def fingerprint_sources(%Repository{} = repository) do
+    [refs, config] =
+      [
+        fn ->
+          Command.run(repository, [
+            "for-each-ref",
+            "refs/heads",
+            "refs/remotes",
+            "refs/tags",
+            "refs/stash",
+            "--format=#{@fingerprint_ref_format}"
+          ])
+        end,
+        fn -> Command.run(repository, ["config", "--local", "--null", "--list"]) end
+      ]
+      |> Enum.map(&Task.async/1)
+      |> Task.await_many(:infinity)
+
+    with {:ok, refs} <- refs,
+         {:ok, config} <- config do
+      {:ok, {refs, config, git_state_markers(repository)}}
+    end
+  end
+
+  @doc false
+  def fingerprint(%Repository{} = repository, changes, {refs, config, markers}) do
+    {
+      changes,
+      changed_file_signatures(repository, changes),
+      refs,
+      config,
+      markers
+    }
+    |> :erlang.term_to_binary()
+    |> then(&:crypto.hash(:sha256, &1))
   end
 
   @doc "Lists tags, resolved to the commits they point at."
@@ -881,6 +970,42 @@ defmodule MDTClient.Git.Core do
 
       error ->
         error
+    end
+  end
+
+  defp changed_file_signatures(repository, changes) do
+    Enum.map(changes, fn change ->
+      {change.path, file_signature(Path.join(repository.path, change.path))}
+    end)
+  end
+
+  defp git_state_markers(repository) do
+    marker_contents =
+      for name <- [
+            "HEAD",
+            "MERGE_HEAD",
+            "CHERRY_PICK_HEAD",
+            "REVERT_HEAD",
+            "BISECT_LOG",
+            "rebase-merge/msgnum",
+            "rebase-merge/end",
+            "rebase-apply/next",
+            "rebase-apply/last"
+          ] do
+        path = Path.join(repository.git_dir, name)
+        {name, File.read(path)}
+      end
+
+    marker_contents
+  end
+
+  defp file_signature(path) do
+    case File.stat(path, time: :posix) do
+      {:ok, stat} ->
+        {stat.type, stat.size, stat.mtime, stat.ctime, stat.inode, stat.mode}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 

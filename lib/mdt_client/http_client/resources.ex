@@ -14,6 +14,7 @@ defmodule MDTClient.HttpClient.Resources do
 
   alias MDTClient.Accounts
   alias MDTClient.HttpClient.HistoryMetadata
+  alias MDTClient.HttpClient.Utils
   alias MDTClient.Vault
   alias MDTClient.Vault.Store
 
@@ -26,6 +27,12 @@ defmodule MDTClient.HttpClient.Resources do
   @type metadata :: HistoryMetadata.t()
   @type response :: Req.Response.t() | Exception.t()
   @type entry :: {history_id(), metadata(), Req.Request.t(), response()}
+  @type outline ::
+          {history_id(), metadata(), Req.Request.t(),
+           {:response, non_neg_integer(), map(), non_neg_integer()} | {:error, Exception.t()}}
+  @type summary ::
+          {history_id(), String.t() | nil, [String.t()], DateTime.t(), non_neg_integer(), atom(),
+           URI.t(), non_neg_integer()}
 
   @doc "Starts the history owner for one unlocked identity."
   def start_link(opts) do
@@ -44,11 +51,12 @@ defmodule MDTClient.HttpClient.Resources do
   @doc "Stores a completed request and returns its durable unique identifier."
   @spec record(String.t(), metadata(), Req.Request.t(), response()) :: history_id()
   def record(username, %HistoryMetadata{} = metadata, %Req.Request{} = request, response) do
-    %{table: table, counter: counter} = handles(username)
+    %{table: table, outlines: outlines, counter: counter} = handles(username)
 
     identifier = :atomics.add_get(counter, 1, 1)
     metadata = HistoryMetadata.with_search_text(metadata, request, response)
     true = :ets.insert(table, {identifier, metadata, request, response})
+    true = :ets.insert(outlines, {identifier, response_outline(response)})
     :ok = touch(username)
     identifier
   end
@@ -85,12 +93,58 @@ defmodule MDTClient.HttpClient.Resources do
     end
   end
 
+  @doc "Returns compact history metadata without copying request or response bodies from ETS."
+  @spec summaries(String.t(), String.t()) :: [summary()]
+  def summaries(username, term \\ "") when is_binary(term) do
+    table = table(username)
+
+    case HistoryMetadata.normalize_search_text(term) do
+      "" ->
+        :ets.select_reverse(table, summary_match_spec())
+
+      term ->
+        table
+        |> :ets.select_reverse(searchable_summary_match_spec())
+        |> Enum.filter(fn {_id, _description, _tags, _at, _duration, _method, _url, _status,
+                           search_text} ->
+          String.contains?(search_text, term)
+        end)
+        |> Enum.map(fn {id, description, tags, at, duration, method, url, status, _search_text} ->
+          {id, description, tags, at, duration, method, url, status}
+        end)
+    end
+  end
+
   @doc "Returns one recorded request history entry, if it exists."
   @spec get(String.t(), history_id()) :: {:ok, entry()} | :error
   def get(username, identifier) do
     case :ets.lookup(table(username), identifier) do
       [entry] -> {:ok, entry}
       [] -> :error
+    end
+  end
+
+  @doc "Returns one entry without copying its response body out of ETS."
+  @spec outline(String.t(), history_id()) :: {:ok, outline()} | :error
+  def outline(username, identifier) do
+    %{table: table, outlines: outlines} = handles(username)
+
+    case :ets.lookup(outlines, identifier) do
+      [{^identifier, response_outline}] ->
+        try do
+          {:ok,
+           {
+             identifier,
+             :ets.lookup_element(table, identifier, 2),
+             :ets.lookup_element(table, identifier, 3),
+             response_outline
+           }}
+        rescue
+          ArgumentError -> :error
+        end
+
+      [] ->
+        :error
     end
   end
 
@@ -118,14 +172,19 @@ defmodule MDTClient.HttpClient.Resources do
 
     table = :ets.new(:http_history, [:public, :ordered_set, read_concurrency: true])
     restore(table, path, key)
+    outlines = :ets.new(:http_history_outlines, [:public, :set, read_concurrency: true])
+    build_outlines(table, outlines)
 
     counter = :atomics.new(1, signed: false)
     :ok = :atomics.put(counter, 1, latest_identifier(table))
 
-    :ok = Store.publish(__MODULE__, username, %{table: table, counter: counter})
+    :ok =
+      Store.publish(__MODULE__, username, %{table: table, outlines: outlines, counter: counter})
+
     schedule_sync()
 
-    {:ok, %{username: username, key: key, path: path, table: table, flush: nil}}
+    {:ok,
+     %{username: username, key: key, path: path, table: table, outlines: outlines, flush: nil}}
   end
 
   @impl true
@@ -133,6 +192,7 @@ defmodule MDTClient.HttpClient.Resources do
     case :ets.lookup(state.table, identifier) do
       [_entry] ->
         true = :ets.delete(state.table, identifier)
+        true = :ets.delete(state.outlines, identifier)
         {:reply, :ok, flushed(state)}
 
       [] ->
@@ -143,6 +203,7 @@ defmodule MDTClient.HttpClient.Resources do
   @impl true
   def handle_call(:clear, _from, state) do
     true = :ets.delete_all_objects(state.table)
+    true = :ets.delete_all_objects(state.outlines)
     :ok = :atomics.put(counter(state.username), 1, 0)
     {:reply, :ok, flushed(state)}
   end
@@ -265,5 +326,97 @@ defmodule MDTClient.HttpClient.Resources do
       if String.contains?(metadata.search_text, term), do: [entry | entries], else: entries
 
     collect_matching_entries(table, :ets.prev(table, identifier), term, entries)
+  end
+
+  defp build_outlines(table, outlines) do
+    :ets.foldl(
+      fn {identifier, _metadata, _request, response}, :ok ->
+        true = :ets.insert(outlines, {identifier, response_outline(response)})
+        :ok
+      end,
+      :ok,
+      table
+    )
+  end
+
+  defp response_outline(%Req.Response{} = response) do
+    {:response, response.status, response.headers, Utils.response_body_size(response)}
+  end
+
+  defp response_outline(error), do: {:error, error}
+
+  defp summary_match_spec do
+    summary_match_spec(fn id,
+                          description,
+                          tags,
+                          at,
+                          duration,
+                          method,
+                          url,
+                          status,
+                          _search_text ->
+      {id, description, tags, at, duration, method, url, status}
+    end)
+  end
+
+  defp searchable_summary_match_spec do
+    summary_match_spec(fn id, description, tags, at, duration, method, url, status, search_text ->
+      {id, description, tags, at, duration, method, url, status, search_text}
+    end)
+  end
+
+  defp summary_match_spec(result) do
+    response_summary =
+      result.(
+        :"$1",
+        :"$2",
+        :"$3",
+        :"$4",
+        :"$5",
+        :"$7",
+        :"$8",
+        :"$9",
+        :"$6"
+      )
+
+    error_summary =
+      result.(
+        :"$1",
+        :"$2",
+        :"$3",
+        :"$4",
+        :"$5",
+        :"$7",
+        :"$8",
+        599,
+        :"$6"
+      )
+
+    [
+      {
+        {:"$1",
+         %{
+           description: :"$2",
+           tags: :"$3",
+           completed_at: :"$4",
+           duration_ms: :"$5",
+           search_text: :"$6"
+         }, %{method: :"$7", url: :"$8"}, %{__struct__: Req.Response, status: :"$9"}},
+        [],
+        [{response_summary}]
+      },
+      {
+        {:"$1",
+         %{
+           description: :"$2",
+           tags: :"$3",
+           completed_at: :"$4",
+           duration_ms: :"$5",
+           search_text: :"$6"
+         }, %{method: :"$7", url: :"$8"}, %{__struct__: :"$10"}},
+        [{:"=/=", :"$10", Req.Response}],
+        [{error_summary}]
+      }
+    ]
   end
 end

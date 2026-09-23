@@ -14,6 +14,7 @@ defmodule MDTClient.Application do
       MDTClientWeb.Telemetry,
       {DNSCluster, query: Application.get_env(:mdt_client, :dns_cluster_query) || :ignore},
       {Phoenix.PubSub, name: MDTClient.PubSub},
+      {Task.Supervisor, name: MDTClient.HttpClient.TaskSupervisor},
       MDTClient.Preferences,
       MDTClient.Vault.Store,
       MDTClientWeb.Session,

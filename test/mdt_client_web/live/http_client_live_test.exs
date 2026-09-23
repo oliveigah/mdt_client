@@ -4,6 +4,7 @@ defmodule MDTClientWeb.HttpClientLiveTest do
   import Phoenix.LiveViewTest
 
   alias MDTClient.HttpClient.HistoryMetadata
+  alias MDTClient.HttpClient.Requests
   alias MDTClient.HttpClient.Resources
   alias MDTClient.VaultHelpers
 
@@ -47,6 +48,8 @@ defmodule MDTClientWeb.HttpClientLiveTest do
   test "boots with a blank request and persisted history", %{view: view} do
     assert has_element?(view, "#request-form")
     assert has_element?(view, "#request-url")
+    assert has_element?(view, "#request-timeout")
+    assert first_attribute(view, "#request-timeout option[selected]", "value") == "infinity"
     assert count(view, "[phx-click=select_tab]") == 1
     assert count(view, "[phx-click=open_history]") == 2
   end
@@ -107,6 +110,30 @@ defmodule MDTClientWeb.HttpClientLiveTest do
     assert render(view) =~ "x-ratelimit-remaining"
   end
 
+  test "large response bodies stay out of LiveView until requested", %{
+    view: view,
+    username: username
+  } do
+    marker = "large-response-marker"
+    body = marker <> String.duplicate("x", 5 * 1024 * 1024)
+
+    identifier =
+      Resources.record(
+        username,
+        HistoryMetadata.new(%{description: "Large response"}),
+        Req.new(method: :get, url: "https://api.example.test/export"),
+        %Req.Response{status: 200, headers: %{}, body: body}
+      )
+
+    view |> element("#history-search") |> render_change(%{"term" => ""})
+    view |> element("#history-#{identifier}") |> render_click()
+    render_async(view)
+
+    assert has_element?(view, "#load-response-body-#{List.last(tab_ids(view))}")
+    assert render(view) =~ "Bodies over 5 MB stay unloaded"
+    refute render(view) =~ marker
+  end
+
   test "tabs can be dragged into another order", %{view: view} do
     view |> element("[phx-click=new_tab]") |> render_click()
 
@@ -160,6 +187,27 @@ defmodule MDTClientWeb.HttpClientLiveTest do
     assert html =~ "Enter a URL before sending"
   end
 
+  test "the request timeout uses fixed choices and defaults to infinity", %{view: view} do
+    assert attributes(view, "#request-timeout option", "value") ==
+             ["30000", "60000", "120000", "infinity"]
+
+    view
+    |> element("#request-form")
+    |> render_change(%{"request" => %{"timeout_ms" => "60000"}})
+
+    assert first_attribute(view, "#request-timeout option[selected]", "value") == "60000"
+
+    view
+    |> element("#request-form")
+    |> render_change(%{
+      "request" => %{"url" => "https://api.example.test/slow", "timeout_ms" => "invalid"}
+    })
+
+    html = view |> element("#request-form") |> render_submit(%{})
+
+    assert html =~ "Choose a valid request timeout"
+  end
+
   test "params rows can be added and removed", %{view: view} do
     before = count(view, "[phx-click=remove_row]")
 
@@ -206,6 +254,24 @@ defmodule MDTClientWeb.HttpClientLiveTest do
     view |> element("#request-form") |> render_change(%{"request" => %{"body_type" => "json"}})
     assert has_element?(view, "#request-body")
     assert has_element?(view, "[phx-click=format_body]")
+  end
+
+  test "a JSON body is highlighted, other body types are plain", %{view: view} do
+    view |> element("[phx-click=set_editor_tab][phx-value-tab=body]") |> render_click()
+
+    view
+    |> element("#request-form")
+    |> render_change(%{"request" => %{"body_type" => "json", "body" => "{\"a\": 1}"}})
+
+    # The editor keeps the typing; a layer behind it carries the colours.
+    assert has_element?(view, "#request-body-highlight[phx-update=ignore]")
+    assert has_element?(view, "#request-body[data-layer=request-body-highlight]")
+    assert view |> element("#request-body") |> render() =~ "&quot;a&quot;"
+
+    view |> element("#request-form") |> render_change(%{"request" => %{"body_type" => "text"}})
+
+    assert has_element?(view, "#request-body")
+    refute has_element?(view, "#request-body-highlight")
   end
 
   test "invalid JSON bodies are not formatted", %{view: view} do
@@ -371,6 +437,48 @@ defmodule MDTClientWeb.HttpClientLiveTest do
     assert Resources.all(username) == []
   end
 
+  test "an infinite request exposes a cancel button and can be cancelled", %{
+    view: view,
+    username: username
+  } do
+    test_process = self()
+
+    Req.Test.stub(__MODULE__, fn conn ->
+      send(test_process, {:infinite_request_started, self()})
+
+      receive do
+        :unexpected_finish -> Plug.Conn.send_resp(conn, 200, "too late")
+      end
+    end)
+
+    Req.Test.set_req_test_to_shared()
+    Req.default_options(plug: {Req.Test, __MODULE__})
+
+    on_exit(fn ->
+      Req.default_options([])
+      Req.Test.set_req_test_to_private()
+    end)
+
+    view
+    |> element("#request-form")
+    |> render_change(%{
+      "request" => %{
+        "url" => "https://api.example.test/stream",
+        "timeout_ms" => "infinity"
+      }
+    })
+
+    view |> element("#request-form") |> render_submit(%{})
+    assert_receive {:infinite_request_started, _request_process}
+    assert has_element?(view, "#cancel-request")
+
+    view |> element("#cancel-request") |> render_click()
+
+    refute has_element?(view, "#cancel-request")
+    assert has_element?(view, "#send-request")
+    assert length(Resources.all(username)) == 2
+  end
+
   test "sending records the description and tags of the tab", %{view: view, username: username} do
     Req.Test.stub(__MODULE__, fn conn -> Plug.Conn.send_resp(conn, 200, "ok") end)
     Req.Test.set_req_test_to_shared()
@@ -392,7 +500,7 @@ defmodule MDTClientWeb.HttpClientLiveTest do
     |> render_change(%{"request" => %{"url" => "https://api.example.test/ping"}})
 
     view |> element("#request-form") |> render_submit(%{})
-    render_async(view)
+    await_requests(view, username)
 
     assert [{_id, metadata, _request, _response} | _older] = Resources.all(username)
     assert metadata.description == "Nightly smoke"
@@ -410,6 +518,23 @@ defmodule MDTClientWeb.HttpClientLiveTest do
       Resources.get(username, String.to_integer(to_string(id)))
 
     metadata
+  end
+
+  # A send runs in a supervised task that reports to the per-identity request
+  # server, which broadcasts the result to the LiveView. None of that is a
+  # LiveView async operation, so `render_async/1` has nothing to wait on and
+  # returns immediately. Following the hand-offs instead settles both the
+  # recorded history and what is on screen.
+  defp await_requests(view, username) do
+    for pid <- Task.Supervisor.children(MDTClient.HttpClient.TaskSupervisor) do
+      reference = Process.monitor(pid)
+      assert_receive {:DOWN, ^reference, :process, ^pid, _reason}, 2_000
+    end
+
+    assert Requests.running(username) == []
+    _ = :sys.get_state(view.pid)
+
+    view
   end
 
   defp count(view, selector) do
