@@ -12,7 +12,7 @@ defmodule MDTClient.Tools do
       tagline: "Compose, send and inspect requests",
       description:
         "Build requests with params, headers, auth and bodies. Keep several requests open in tabs and search everything you have ever sent.",
-      icon: "hero-bolt",
+      icon: "hero-globe-alt",
       path: "/tools/http",
       shortcut: "1",
       status: :ready
@@ -23,7 +23,7 @@ defmodule MDTClient.Tools do
       tagline: "Browse history, branches and changes",
       description:
         "Open any repository in a tab, walk its commit graph, manage branches and stage, stash or commit exactly the files you pick.",
-      icon: "hero-code-bracket-square",
+      icon: "git-branch",
       path: "/tools/git",
       shortcut: "2",
       status: :ready
