@@ -657,7 +657,7 @@ defmodule MDTClientWeb.GitLive.Components do
     ~H"""
     <aside
       id="git-branches"
-      phx-hook=".RowMenu"
+      phx-hook="MDTClientWeb.PanelComponents.RowMenu"
       aria-label="Branches"
       class="flex w-[var(--git-branches-width,15rem)] min-w-0 shrink-0 flex-col bg-panel"
     >
@@ -730,55 +730,6 @@ defmodule MDTClientWeb.GitLive.Components do
 
       <.stash_list tab={@tab} />
     </aside>
-    <script :type={Phoenix.LiveView.ColocatedHook} name=".RowMenu">
-      export default {
-        mounted() {
-          this.el.addEventListener("contextmenu", (event) => {
-            const row = event.target.closest("[data-menu-kind]")
-            if (!row) return
-
-            event.preventDefault()
-            this.openMenu(row, event.clientX, event.clientY)
-          })
-
-          // Arrow keys walk the list and the menu key opens the row actions, so
-          // the panel is usable without a pointer.
-          this.el.addEventListener("keydown", (event) => {
-            const row = event.target.closest("[data-menu-kind]")
-            if (!row) return
-
-            if (event.key === "ContextMenu" || (event.key === "F10" && event.shiftKey)) {
-              event.preventDefault()
-              return this.openMenu(row)
-            }
-
-            // A list that picks several rows at once picks all of them on Ctrl+A.
-            if (this.el.dataset.selectAll && (event.ctrlKey || event.metaKey) && event.key === "a") {
-              event.preventDefault()
-              return this.pushEvent(this.el.dataset.selectAll, {})
-            }
-
-            const moves = {ArrowDown: 1, ArrowUp: -1}
-            if (!(event.key in moves)) return
-
-            const options = Array.from(this.el.querySelectorAll("[role=option]"))
-            const current = options.indexOf(event.target.closest("[role=option]"))
-            if (current < 0) return
-
-            event.preventDefault()
-            options[Math.min(options.length - 1, Math.max(0, current + moves[event.key]))]?.focus()
-          })
-        },
-
-        // The anchor says which control the menu came from, so a branch label in
-        // the graph can stay unfolded while its menu is open. A file also says
-        // which list it was in.
-        openMenu(row, x, y) {
-          const {menuKind: kind, menuId: id, menuSide: side} = row.dataset
-          this.pushEvent("open_menu", {kind, id, side, anchor: row.id, x, y})
-        }
-      }
-    </script>
     """
   end
 
@@ -1143,7 +1094,7 @@ defmodule MDTClientWeb.GitLive.Components do
       <div
         :if={is_nil(@diff)}
         id="git-commits"
-        phx-hook=".RowMenu"
+        phx-hook="MDTClientWeb.PanelComponents.RowMenu"
         role="listbox"
         aria-label="Commits"
         class="min-h-0 flex-1 overflow-y-auto"
@@ -2145,167 +2096,6 @@ defmodule MDTClientWeb.GitLive.Components do
 
   defp menu_target(_tab), do: nil
 
-  attr :id, :string, required: true
-  attr :anchor, :string, required: true
-  attr :label, :string, required: true
-  attr :at, :any, default: nil, doc: "the pointer position the menu was opened from"
-  slot :inner_block, required: true
-
-  defp context_menu(assigns) do
-    ~H"""
-    <div
-      id={@id}
-      phx-hook=".Menu"
-      data-anchor={@anchor}
-      data-x={@at && @at.x}
-      data-y={@at && @at.y}
-      role="menu"
-      aria-label={@label}
-      class="invisible fixed left-0 top-0 z-40 flex max-h-[calc(100vh-1rem)] w-60 flex-col overflow-y-auto rounded-lg border border-line bg-panel p-1 shadow-xl shadow-black/20 dark:shadow-black/50"
-    >
-      {render_slot(@inner_block)}
-    </div>
-    <script :type={Phoenix.LiveView.ColocatedHook} name=".Menu">
-      export default {
-        mounted() {
-          this.reposition()
-          this.focusFirst()
-
-          // No backdrop element: one would sit over the rows and swallow the next
-          // right click, which the webview would then answer with its own menu.
-          this.onDismiss = (event) => {
-            if (this.el.contains(event.target)) return
-            // A right click on another row belongs to the list hook, which moves
-            // this menu there instead of closing it.
-            if (event.type === "contextmenu" && event.target.closest("[data-menu-kind]")) return
-            // Menu triggers toggle themselves; closing here first would reopen it.
-            if (event.target.closest("[aria-haspopup=menu]")) return
-
-            this.pushEvent("close_menu", {})
-          }
-
-          // A menu anchored to a row would drift away from it as the list scrolls.
-          this.onScroll = () => this.pushEvent("close_menu", {})
-
-          document.addEventListener("pointerdown", this.onDismiss, true)
-          document.addEventListener("contextmenu", this.onDismiss, true)
-          window.addEventListener("scroll", this.onScroll, {capture: true, passive: true})
-          window.addEventListener("resize", this.onScroll)
-        },
-
-        updated() { this.reposition() },
-
-        destroyed() {
-          document.removeEventListener("pointerdown", this.onDismiss, true)
-          document.removeEventListener("contextmenu", this.onDismiss, true)
-          window.removeEventListener("scroll", this.onScroll, {capture: true})
-          window.removeEventListener("resize", this.onScroll)
-        },
-
-        reposition() {
-          // Parking the menu at 0,0 first reveals where its containing block starts
-          // and the scale the interface is rendered at, so pointer coordinates keep
-          // mapping to the right spot even when the window is zoomed.
-          this.el.style.left = "0px"
-          this.el.style.top = "0px"
-
-          const origin = this.el.getBoundingClientRect()
-          const scale = (this.el.offsetWidth && origin.width / this.el.offsetWidth) || 1
-          const spot = this.spot(origin.width, origin.height)
-
-          this.el.style.left = `${(spot.x - origin.left) / scale}px`
-          this.el.style.top = `${(spot.y - origin.top) / scale}px`
-          this.el.style.visibility = "visible"
-        },
-
-        // Where the top left corner should end up, in client coordinates.
-        spot(width, height) {
-          const margin = 8
-          const lastX = Math.max(margin, window.innerWidth - width - margin)
-          const lastY = Math.max(margin, window.innerHeight - height - margin)
-          const x = parseFloat(this.el.dataset.x)
-          const y = parseFloat(this.el.dataset.y)
-
-          if (Number.isFinite(x) && Number.isFinite(y)) {
-            // Hang off the cursor. A menu too tall for the room below slides up
-            // just enough to fit rather than jumping above the click.
-            return {x: x + width + margin > window.innerWidth ? Math.max(margin, x - width) : x,
-                    y: Math.min(y, lastY)}
-          }
-
-          const anchor = document.getElementById(this.el.dataset.anchor)
-          if (!anchor) return {x: lastX, y: margin}
-
-          const rect = anchor.getBoundingClientRect()
-          return {x: Math.min(Math.max(margin, rect.right - width), lastX),
-                  y: Math.min(rect.bottom + 4, lastY)}
-        },
-
-        focusFirst() {
-          this.items()[0]?.focus()
-          this.el.addEventListener("keydown", (event) => {
-            const items = this.items()
-            const current = items.indexOf(document.activeElement)
-            const moves = {ArrowDown: 1, ArrowUp: -1}
-
-            if (event.key in moves) {
-              event.preventDefault()
-              const next = (current + moves[event.key] + items.length) % items.length
-              items[Math.max(next, 0)]?.focus()
-            } else if (event.key === "Home") {
-              event.preventDefault()
-              items[0]?.focus()
-            } else if (event.key === "End") {
-              event.preventDefault()
-              items[items.length - 1]?.focus()
-            }
-          })
-        },
-
-        items() {
-          return Array.from(this.el.querySelectorAll("[role=menuitem]:not([disabled])"))
-        }
-      }
-    </script>
-    """
-  end
-
-  attr :id, :string, default: nil
-  attr :icon, :string, required: true
-  attr :danger, :boolean, default: false
-  attr :disabled, :boolean, default: false
-  attr :rest, :global
-  slot :inner_block, required: true
-
-  defp menu_item(assigns) do
-    ~H"""
-    <button
-      type="button"
-      id={@id}
-      role="menuitem"
-      disabled={@disabled}
-      class={[
-        "flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-left text-xs transition-colors",
-        "focus:outline-none focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-40",
-        if(@danger,
-          do: "text-bad hover:bg-bad-soft/50 focus:bg-bad-soft/50",
-          else: "text-ink hover:bg-hover focus:bg-hover"
-        )
-      ]}
-      {@rest}
-    >
-      <.icon name={@icon} class="size-3.5 shrink-0 opacity-70" />
-      <span class="min-w-0 truncate">{render_slot(@inner_block)}</span>
-    </button>
-    """
-  end
-
-  defp menu_separator(assigns) do
-    ~H"""
-    <div class="my-1 h-px bg-line-soft" role="separator"></div>
-    """
-  end
-
   ## Inspector
 
   attr :tab, :map, required: true
@@ -2804,7 +2594,7 @@ defmodule MDTClientWeb.GitLive.Components do
           can be done to everything picked. --%>
     <div
       id="git-working-tree"
-      phx-hook=".RowMenu"
+      phx-hook="MDTClientWeb.PanelComponents.RowMenu"
       data-select-all="select_all_paths"
       class="flex flex-col gap-3 p-2.5"
     >

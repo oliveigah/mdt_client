@@ -36,6 +36,8 @@ defmodule MDTClientWeb.HttpClientLive do
      |> assign(:sidebar?, true)
      |> assign(:collapsed, MapSet.new())
      |> assign(:selected, MapSet.new())
+     |> assign(:selection_anchor, nil)
+     |> assign(:menu, nil)
      |> assign(:dialog, nil)
      |> assign(:dialog_targets, [])
      |> assign(:dialog_value, "")
@@ -123,6 +125,8 @@ defmodule MDTClientWeb.HttpClientLive do
         value={@dialog_value}
         error={@dialog_error}
       />
+
+      <.history_menu :if={@menu} menu={@menu} count={MapSet.size(@selected)} />
     </Layouts.app>
     """
   end
@@ -349,9 +353,19 @@ defmodule MDTClientWeb.HttpClientLive do
         </form>
       </div>
 
-      <.selection_bar :if={MapSet.size(@selected) > 0} count={MapSet.size(@selected)} />
+      <.selection_bar :if={MapSet.size(@selected) > 1} count={MapSet.size(@selected)} />
 
-      <div class="min-h-0 flex-1 overflow-y-auto px-1.5 py-2">
+      <%!-- A click opens a request and picks it; Shift and Ctrl pick more without
+            opening, and a right click opens what can be done to the pick. --%>
+      <div
+        id="history-list"
+        phx-hook="MDTClientWeb.PanelComponents.RowMenu"
+        data-select-all="select_all"
+        role="listbox"
+        aria-multiselectable="true"
+        aria-label="Request history"
+        class="min-h-0 flex-1 overflow-y-auto px-1.5 py-2"
+      >
         <p :if={@groups == []} class="px-2 py-6 text-center text-xs text-faint">
           <%= if @term == "" do %>
             Nothing here yet — send a request.
@@ -374,7 +388,8 @@ defmodule MDTClientWeb.HttpClientLive do
     """
   end
 
-  # The bulk actions, shown while at least one history entry is selected.
+  # Shown once more than one request is picked; what to do with them is a right
+  # click away.
   attr :count, :integer, required: true
 
   defp selection_bar(assigns) do
@@ -383,10 +398,9 @@ defmodule MDTClientWeb.HttpClientLive do
       id="history-selection"
       class="flex shrink-0 items-center gap-1 border-b border-line-soft bg-accent-soft/50 px-2 py-1.5"
     >
-      <span class="min-w-0 truncate text-[11px] text-muted">
-        <span class="font-mono text-accent">{@count}</span> selected
+      <span class="min-w-0 flex-1 truncate text-[11px] text-muted">
+        <span class="font-semibold text-ink">{@count} selected</span> · right click for actions
       </span>
-      <div class="flex-1"></div>
       <button
         type="button"
         phx-click="select_all"
@@ -394,33 +408,6 @@ defmodule MDTClientWeb.HttpClientLive do
         class={selection_action_class()}
       >
         <.icon name="hero-check-circle" class="size-3.5" />
-      </button>
-      <button
-        type="button"
-        phx-click="open_metadata"
-        phx-value-dialog="add_tag"
-        title="Tag the selected requests"
-        class={selection_action_class()}
-      >
-        <.icon name="hero-tag" class="size-3.5" />
-      </button>
-      <button
-        type="button"
-        phx-click="open_metadata"
-        phx-value-dialog="set_description"
-        title="Describe the selected requests"
-        class={selection_action_class()}
-      >
-        <.icon name="hero-pencil-square" class="size-3.5" />
-      </button>
-      <button
-        type="button"
-        phx-click="delete_entries"
-        data-confirm="Delete the selected requests?"
-        title="Delete the selected requests"
-        class={[selection_action_class(), "hover:text-bad"]}
-      >
-        <.icon name="hero-trash" class="size-3.5" />
       </button>
       <button
         type="button"
@@ -460,7 +447,7 @@ defmodule MDTClientWeb.HttpClientLive do
         <span class="font-mono normal-case">{length(@entries)}</span>
       </button>
 
-      <div :if={!@collapsed}>
+      <div :if={!@collapsed} role="group" aria-label={@label}>
         <.history_entry
           :for={entry <- @entries}
           entry={entry}
@@ -478,36 +465,28 @@ defmodule MDTClientWeb.HttpClientLive do
 
   defp history_entry(assigns) do
     ~H"""
-    <div class={[
-      "group relative flex items-start gap-1.5 rounded-md pl-1.5 pr-2 transition-colors",
-      if(@active, do: "bg-active", else: "hover:bg-hover")
-    ]}>
-      <button
-        type="button"
-        id={"select-history-#{@entry.id}"}
-        phx-click="toggle_select"
-        phx-value-id={@entry.id}
-        role="checkbox"
-        aria-checked={to_string(@selected)}
-        title="Select this request"
-        class={[
-          "mt-2 flex size-3.5 shrink-0 cursor-pointer items-center justify-center rounded-sm border transition-all",
-          if(@selected,
-            do: "border-accent bg-accent text-deep",
-            else:
-              "border-line text-transparent opacity-0 hover:border-accent focus:opacity-100 group-hover:opacity-100"
-          )
-        ]}
-      >
-        <.icon name="hero-check" class="size-2.5" />
-      </button>
-
+    <div
+      id={"history-row-#{@entry.id}"}
+      data-menu-kind="history"
+      data-menu-id={@entry.id}
+      class={[
+        "group relative flex select-none items-start rounded-md px-2 transition-colors",
+        cond do
+          @selected -> "bg-accent-soft"
+          @active -> "bg-active"
+          true -> "hover:bg-hover"
+        end,
+        @active && "shadow-[inset_2px_0_0_0_var(--color-accent)]"
+      ]}
+    >
       <button
         type="button"
         id={"history-#{@entry.id}"}
         phx-click="open_history"
         phx-value-id={@entry.id}
-        class="flex min-w-0 flex-1 cursor-pointer flex-col gap-0.5 py-1.5 text-left"
+        role="option"
+        aria-selected={to_string(@selected)}
+        class="flex min-w-0 flex-1 cursor-pointer flex-col gap-0.5 py-1.5 text-left focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
       >
         <span class="flex w-full items-center gap-2">
           <span class={[
@@ -544,7 +523,11 @@ defmodule MDTClientWeb.HttpClientLive do
 
       <div class={[
         "absolute right-1 top-1 hidden items-center gap-0.5 rounded group-hover:flex",
-        if(@active, do: "bg-active", else: "bg-hover")
+        cond do
+          @selected -> "bg-accent-soft"
+          @active -> "bg-active"
+          true -> "bg-hover"
+        end
       ]}>
         <button
           type="button"
@@ -578,6 +561,62 @@ defmodule MDTClientWeb.HttpClientLive do
         </button>
       </div>
     </div>
+    """
+  end
+
+  attr :menu, :map, required: true
+  attr :count, :integer, required: true, doc: "how many requests are picked"
+
+  # What can be done to every picked request, each entry counting them, after
+  # opening the one under the pointer.
+  defp history_menu(assigns) do
+    ~H"""
+    <.context_menu
+      id="history-menu"
+      anchor={@menu.anchor || "history-row-#{@menu.id}"}
+      at={@menu.at}
+      label={"Actions for #{requests(@count)}"}
+    >
+      <.menu_item
+        id="history-menu-open"
+        icon="hero-arrow-top-right-on-square"
+        phx-click="open_entry"
+        phx-value-id={@menu.id}
+      >
+        Open request
+      </.menu_item>
+
+      <.menu_separator />
+
+      <.menu_item
+        id="history-menu-tag"
+        icon="hero-tag"
+        phx-click="open_metadata"
+        phx-value-dialog="add_tag"
+      >
+        Tag {requests(@count)}…
+      </.menu_item>
+      <.menu_item
+        id="history-menu-describe"
+        icon="hero-pencil-square"
+        phx-click="open_metadata"
+        phx-value-dialog="set_description"
+      >
+        Describe {requests(@count)}…
+      </.menu_item>
+
+      <.menu_separator />
+
+      <.menu_item
+        id="history-menu-delete"
+        icon="hero-trash"
+        danger
+        phx-click="delete_entries"
+        data-confirm={"Delete #{requests(@count)}?"}
+      >
+        Delete {requests(@count)}…
+      </.menu_item>
+    </.context_menu>
     """
   end
 
@@ -1392,15 +1431,18 @@ defmodule MDTClientWeb.HttpClientLive do
   end
 
   @impl true
-  def handle_event("toggle_select", %{"id" => id}, socket) do
-    selected = socket.assigns.selected
+  def handle_event("open_menu", %{"kind" => "history", "id" => id} = params, socket) do
+    # A right click on a picked request acts on the pick; on any other request
+    # it picks that one alone, the way a file manager does.
+    socket = if MapSet.member?(socket.assigns.selected, id), do: socket, else: pick(socket, id)
+    menu = %{id: id, at: point(params), anchor: params["anchor"]}
 
-    selected =
-      if MapSet.member?(selected, id),
-        do: MapSet.delete(selected, id),
-        else: MapSet.put(selected, id)
+    {:noreply, assign(socket, :menu, menu)}
+  end
 
-    {:noreply, assign(socket, :selected, selected)}
+  @impl true
+  def handle_event("close_menu", _params, socket) do
+    {:noreply, assign(socket, :menu, nil)}
   end
 
   @impl true
@@ -1412,7 +1454,7 @@ defmodule MDTClientWeb.HttpClientLive do
 
   @impl true
   def handle_event("clear_selection", _params, socket) do
-    {:noreply, assign(socket, :selected, MapSet.new())}
+    {:noreply, assign(socket, selected: MapSet.new(), selection_anchor: nil)}
   end
 
   # Without an id these work on the whole selection.
@@ -1425,6 +1467,7 @@ defmodule MDTClientWeb.HttpClientLive do
       targets ->
         {:noreply,
          socket
+         |> assign(:menu, nil)
          |> close_dialog()
          |> assign(:dialog, dialog)
          |> assign(:dialog_targets, targets)
@@ -1441,6 +1484,7 @@ defmodule MDTClientWeb.HttpClientLive do
       targets ->
         {:noreply,
          socket
+         |> assign(:menu, nil)
          |> apply_to_entries(targets, &Core.delete(socket.assigns.username, &1), "Deleted")
          |> update(:selected, &MapSet.difference(&1, MapSet.new(targets)))}
     end
@@ -1474,31 +1518,23 @@ defmodule MDTClientWeb.HttpClientLive do
     end
   end
 
+  # A plain click picks the request and opens it. Ctrl or Cmd adds or drops one,
+  # and Shift takes the run from the request clicked last, in the order the
+  # list shows them; neither opens anything.
   @impl true
-  def handle_event("open_history", %{"id" => id}, socket) do
-    existing = Enum.find(socket.assigns.tabs, &(&1.source_id == id))
+  def handle_event("open_history", %{"id" => id} = params, socket) do
+    toggle? = params["ctrlKey"] == true or params["metaKey"] == true
 
     cond do
-      existing ->
-        {:noreply, socket |> assign(:active_id, existing.id) |> sync_tab()}
-
-      true ->
-        case Integer.parse(id) do
-          {identifier, ""} ->
-            username = socket.assigns.username
-
-            {:noreply,
-             start_async(socket, {:open_history, identifier}, fn ->
-               case Resources.outline(username, identifier) do
-                 {:ok, entry} -> {:ok, Translation.request_outline_from_history(entry)}
-                 :error -> :error
-               end
-             end)}
-
-          :error ->
-            {:noreply, socket}
-        end
+      params["shiftKey"] == true -> {:noreply, pick_range(socket, id, toggle?)}
+      toggle? -> {:noreply, toggle_pick(socket, id)}
+      true -> {:noreply, socket |> pick(id) |> open_entry(id)}
     end
+  end
+
+  @impl true
+  def handle_event("open_entry", %{"id" => id}, socket) do
+    {:noreply, socket |> assign(:menu, nil) |> open_entry(id)}
   end
 
   @impl true
@@ -1857,6 +1893,73 @@ defmodule MDTClientWeb.HttpClientLive do
   end
 
   defp metadata_value(_socket, _dialog, _targets), do: ""
+
+  defp open_entry(socket, id) do
+    existing = Enum.find(socket.assigns.tabs, &(&1.source_id == id))
+
+    cond do
+      existing ->
+        socket |> assign(:active_id, existing.id) |> sync_tab()
+
+      true ->
+        case Integer.parse(id) do
+          {identifier, ""} ->
+            username = socket.assigns.username
+
+            start_async(socket, {:open_history, identifier}, fn ->
+              case Resources.outline(username, identifier) do
+                {:ok, entry} -> {:ok, Translation.request_outline_from_history(entry)}
+                :error -> :error
+              end
+            end)
+
+          :error ->
+            socket
+        end
+    end
+  end
+
+  defp pick(socket, id), do: assign(socket, selected: MapSet.new([id]), selection_anchor: id)
+
+  defp toggle_pick(socket, id) do
+    selected = socket.assigns.selected
+
+    selected =
+      if MapSet.member?(selected, id),
+        do: MapSet.delete(selected, id),
+        else: MapSet.put(selected, id)
+
+    assign(socket, selected: selected, selection_anchor: id)
+  end
+
+  # The anchor stays put, so the next Shift click reaches from the same request.
+  # Without one, or with it out of sight, the click just picks this request.
+  defp pick_range(socket, id, toggle?) do
+    ids = visible_entry_ids(socket)
+
+    with anchor when not is_nil(anchor) <- socket.assigns.selection_anchor,
+         from when is_integer(from) <- Enum.find_index(ids, &(&1 == anchor)),
+         to when is_integer(to) <- Enum.find_index(ids, &(&1 == id)) do
+      range = MapSet.new(Enum.slice(ids, min(from, to)..max(from, to)//1))
+      base = if toggle?, do: socket.assigns.selected, else: MapSet.new()
+      assign(socket, :selected, MapSet.union(base, range))
+    else
+      _no_anchor -> pick(socket, id)
+    end
+  end
+
+  # The entries on screen, in order: a collapsed group hides its entries from a
+  # Shift range the same way it hides them from view.
+  defp visible_entry_ids(socket) do
+    for {_label, key, entries} <- socket.assigns.groups,
+        not MapSet.member?(socket.assigns.collapsed, key),
+        entry <- entries,
+        do: entry.id
+  end
+
+  # A right click places the menu at the pointer; the keyboard anchors it to the row.
+  defp point(%{"x" => x, "y" => y}) when is_number(x) and is_number(y), do: %{x: x, y: y}
+  defp point(_params), do: nil
 
   # The entry under the cursor, or the whole selection when there is no id.
   defp targets(_socket, %{"id" => id}), do: [id]

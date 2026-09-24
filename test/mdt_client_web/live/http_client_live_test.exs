@@ -364,13 +364,104 @@ defmodule MDTClientWeb.HttpClientLiveTest do
     assert metadata(username, health_id).description == nil
   end
 
+  defp picked(view),
+    do: attributes(view, "#history-list [role=option][aria-selected=true]", "phx-value-id")
+
+  defp click_entry(view, id, modifiers \\ %{}) do
+    view |> element("#history-#{id}") |> render_click(modifiers)
+    view
+  end
+
+  # What the list's row hook sends on a right click.
+  defp history_menu(view, id) do
+    render_hook(view, "open_menu", %{
+      "kind" => "history",
+      "id" => to_string(id),
+      "anchor" => "history-row-#{id}",
+      "x" => 10,
+      "y" => 10
+    })
+
+    view
+  end
+
+  test "a click opens one request, Ctrl and Shift pick more without opening", %{
+    view: view,
+    username: username
+  } do
+    Resources.record(
+      username,
+      HistoryMetadata.new(%{description: "List orders"}),
+      Req.new(method: :get, url: "https://api.example.test/orders"),
+      %Req.Response{status: 200, headers: %{}, body: "[]"}
+    )
+
+    view |> element("#history-search") |> render_change(%{"term" => ""})
+    # Newest first, as the list shows them.
+    [newest, middle, oldest] = attributes(view, "[phx-click=open_history]", "phx-value-id")
+
+    click_entry(view, middle)
+    assert picked(view) == [middle]
+    assert first_attribute(view, "#request-description-input", "value") == "Create order"
+    tabs = count(view, "[phx-click=select_tab]")
+
+    click_entry(view, oldest, %{"ctrlKey" => true})
+    assert picked(view) == [middle, oldest]
+    assert has_element?(view, "#history-selection")
+
+    click_entry(view, middle, %{"metaKey" => true})
+    assert picked(view) == [oldest]
+
+    # Shift reaches from the request clicked last, middle, and replaces the rest.
+    click_entry(view, newest, %{"shiftKey" => true})
+    assert picked(view) == [newest, middle]
+
+    click_entry(view, oldest, %{"shiftKey" => true})
+    assert picked(view) == [middle, oldest]
+    assert count(view, "[phx-click=select_tab]") == tabs
+
+    view |> element("[phx-click=clear_selection]") |> render_click()
+    assert picked(view) == []
+    refute has_element?(view, "#history-selection")
+  end
+
+  test "the history menu counts the requests it would act on", %{
+    view: view,
+    health_id: health_id
+  } do
+    [newest, oldest] = attributes(view, "[phx-click=open_history]", "phx-value-id")
+
+    click_entry(view, newest)
+    click_entry(view, oldest, %{"shiftKey" => true})
+    history_menu(view, oldest)
+
+    assert has_element?(view, "#history-menu[role=menu]")
+    assert view |> element("#history-menu-tag") |> render() =~ "Tag 2 requests"
+    assert view |> element("#history-menu-describe") |> render() =~ "Describe 2 requests"
+    assert has_element?(view, "#history-menu-delete[data-confirm='Delete 2 requests?']")
+
+    # A right click outside the pick takes that request alone.
+    render_hook(view, "close_menu", %{})
+    click_entry(view, newest)
+    history_menu(view, health_id)
+
+    assert picked(view) == [to_string(health_id)]
+    assert view |> element("#history-menu-tag") |> render() =~ "Tag 1 request"
+
+    view |> element("#history-menu-open") |> render_click()
+    refute has_element?(view, "#history-menu")
+    assert first_attribute(view, "#request-description-input", "value") == "Health check"
+  end
+
   test "tags apply to every selected history entry", %{view: view, username: username} do
     ids = attributes(view, "[phx-click=open_history]", "phx-value-id")
 
-    for id <- ids, do: view |> element("#select-history-#{id}") |> render_click()
+    for id <- ids, do: click_entry(view, id, %{"ctrlKey" => true})
     assert has_element?(view, "#history-selection")
 
-    view |> element("#history-selection [phx-value-dialog=add_tag]") |> render_click()
+    history_menu(view, hd(ids))
+    view |> element("#history-menu-tag") |> render_click()
+    refute has_element?(view, "#history-menu")
     html = view |> element("#metadata-form") |> render_submit(%{"value" => "regression"})
 
     assert html =~ "Tagged 2 requests"
@@ -380,9 +471,12 @@ defmodule MDTClientWeb.HttpClientLiveTest do
   test "the selection bar selects everything and clears", %{view: view, health_id: health_id} do
     refute has_element?(view, "#history-selection")
 
-    view |> element("#select-history-#{health_id}") |> render_click()
-    view |> element("[phx-click=select_all]") |> render_click()
-    assert count(view, "[phx-click=toggle_select][aria-checked=true]") == 2
+    # One request picked by opening it needs no bar.
+    click_entry(view, health_id)
+    refute has_element?(view, "#history-selection")
+
+    render_hook(view, "select_all", %{})
+    assert count(view, "#history-list [role=option][aria-selected=true]") == 2
 
     view |> element("[phx-click=clear_selection]") |> render_click()
     refute has_element?(view, "#history-selection")
@@ -427,9 +521,10 @@ defmodule MDTClientWeb.HttpClientLiveTest do
 
   test "deleting works on the whole selection", %{view: view, username: username} do
     ids = attributes(view, "[phx-click=open_history]", "phx-value-id")
-    for id <- ids, do: view |> element("#select-history-#{id}") |> render_click()
+    for id <- ids, do: click_entry(view, id, %{"ctrlKey" => true})
 
-    html = view |> element("#history-selection [phx-click=delete_entries]") |> render_click()
+    history_menu(view, hd(ids))
+    html = view |> element("#history-menu-delete") |> render_click()
 
     assert html =~ "Deleted 2 requests"
     assert html =~ "Nothing here yet"
