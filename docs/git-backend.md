@@ -65,9 +65,11 @@ The core currently supports:
 - detached commit checkout;
 - commit, merge, rebase, cherry-pick, revert, and soft or hard reset;
 - staging and unstaging an exact selection of repository files;
+- discarding every change to an exact selection of repository files;
 - path-limited stash creation plus stash listing, application, popping, and
   deletion;
 - editing HEAD or an older commit message on the checked-out branch;
+- squashing consecutive commits on the checked-out branch into one;
 - fetch, pull, push, remote URL changes, and remote branch deletion; and
 - continue, skip, and abort for operations that stop on conflicts.
 
@@ -81,6 +83,13 @@ Editing an older commit creates a replacement commit and rebases its descendants
 with merge topology preserved. This requires a clean worktree, the target must
 be an ancestor of HEAD, and HEAD must be attached to a branch. Like any history
 rewrite, it changes descendant object IDs and can stop for conflict resolution.
+The rebase names the branch rather than HEAD's id, so the branch moves with the
+rewrite instead of being left behind on a detached HEAD.
+
+Squashing works the same way. The commits must follow one another on the
+branch's first-parent line with no merge among them; the replacement takes the
+newest one's tree, the oldest one's parent and author, and a new message, and
+everything after the newest is replayed on top of it.
 
 ## File boundary
 
@@ -120,7 +129,7 @@ flagged rather than rendered, and `:lines` caps how much is parsed so opening a
 generated file cannot flood the caller. Diffs are read on request, never as part
 of a snapshot, so branch and graph refreshes stay cheap.
 
-File editing and discard are deliberately still absent. Stage, unstage, and
+File editing is deliberately still absent. Stage, unstage, discard, and
 path-limited stash remain in `Git.Core`: they accept only repository paths and
 perform Git index or object database mutations. Keeping
 file content outside the core lets graph and branch state refresh independently
@@ -136,17 +145,30 @@ into the continue, skip, and abort panel. Lane assignment lives in
 `MDTClientWeb.GitLive.Graph.Layout`, a pure function from the commit list to
 rows, lanes, and edges.
 
-Refs pointing at the same commit collapse to the one that matters most — the
+A local branch and the remote branches of the same name on one commit share a
+single label: the bare name, with quiet marks on its right for where it lives (a
+monitor for this machine, a cloud for a remote) and a tick on its left when HEAD
+is on it. Picking that label, or opening its menu, means the local branch; the
+remote one stays reachable from the branch panel. Refs pointing at the same
+commit then collapse to the one that matters most — the
 branch HEAD is on, then master, main or dev, then the rest, then tags — with the
 others dropping down on hover, and a right click on any of them opening that
-branch's menu. The graph is the primary surface: a right click, a row menu, or the inspector's
+branch's menu. A name too long for the column is cut short, and hovering it
+drops down the same list with the name in full. The graph is the primary surface: a right click, a row menu, or the inspector's
 Actions button opens the same commit menu, and every entry maps to one `Core`
 call. A dirty worktree takes a row of its own above the newest commit, drawn by
 `Layout.pending_row/1`, and opening a file diff replaces the graph until it is
 closed. The open folders are remembered by `MDTClientWeb.GitLive.Session`, and a timer
 refreshes the active tab so work done outside MDT appears on its own. Selecting
 a commit lists the files it touched under its metadata, and picking one of them
-opens the same diff view; the working tree keeps a tab of its own. Folder selection goes through the Tauri dialog plugin; because the window loads
+opens the same diff view; the working tree keeps a tab of its own. Its files are
+picked the way a file manager picks them: a click takes one, Ctrl or Cmd adds or
+drops one, Shift takes the run from the file clicked last, across both lists,
+and Ctrl+A takes them all. A right click opens what can be done to the pick,
+each entry counting the files it would touch. Commits in the graph are picked
+the same way, and a right click on a pick of several offers to cherry-pick them
+all, oldest first, or to squash them under a message that starts as theirs
+combined. A squash the backend would refuse is shown disabled, with the reason. Folder selection goes through the Tauri dialog plugin; because the window loads
 the local Phoenix server over loopback, that call is only permitted by the
 `local-server` capability described in `README.md`. The same chooser offers
 `Core.clone/3` for a repository that is not on this machine yet, and falls back

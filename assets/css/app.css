@@ -51,6 +51,13 @@
   --color-orange: #fe8f40;
   --color-teal: #95e5cb;
 
+  /* text on a status's own soft fill, such as branch labels: the status pulled
+     toward ink, so it darkens in daylight and brightens in the dark */
+  --color-ok-strong: color-mix(in oklab, var(--color-ok) 65%, var(--color-ink));
+  --color-accent-strong: color-mix(in oklab, var(--color-accent) 65%, var(--color-ink));
+  --color-warn-strong: color-mix(in oklab, var(--color-warn) 65%, var(--color-ink));
+  --color-violet-strong: color-mix(in oklab, var(--color-violet) 65%, var(--color-ink));
+
   /* syntax, used by the code viewer */
   --color-syn-key: #5ac1fe;
   --color-syn-string: #a9d94b;

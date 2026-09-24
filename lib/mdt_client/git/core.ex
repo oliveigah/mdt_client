@@ -22,6 +22,7 @@ defmodule MDTClient.Git.Core do
   alias MDTClient.Git.CommandResult
   alias MDTClient.Git.Commit
   alias MDTClient.Git.Error
+  alias MDTClient.Git.FileChange
   alias MDTClient.Git.Files
   alias MDTClient.Git.Operation
   alias MDTClient.Git.Remote
@@ -530,6 +531,34 @@ defmodule MDTClient.Git.Core do
     end
   end
 
+  @doc """
+  Discards every change to the selected files, returning them to HEAD.
+
+  Staged and unstaged edits are both dropped, and a new file, staged or
+  untracked, is deleted. Paths Git reports no change for are left alone, so a
+  stale selection cannot touch an unchanged or ignored file. Undoing a staged
+  rename restores the path it came from as well; if an untracked file has since
+  taken that path and is not selected too, only the index is restored so the
+  file survives. Unstaged and untracked content is kept nowhere else, so a
+  discard cannot be undone.
+  """
+  @spec discard(Repository.t(), [Path.t()]) :: mutation_result()
+  def discard(%Repository{} = repository, paths) do
+    with {:ok, relatives} <- selected_paths(repository, paths),
+         {:ok, changes} <- Files.status(repository),
+         {:ok, head} <- head(repository) do
+      plan = discard_plan(changes, relatives)
+
+      [
+        restore_args(head, plan.restore),
+        restore_index_args(plan.restore_index),
+        clean_args(plan.remove)
+      ]
+      |> Enum.reject(&is_nil/1)
+      |> run_mutations(repository, :discard)
+    end
+  end
+
   @doc "Stashes changes belonging to the selected repository files."
   @spec stash(Repository.t(), [Path.t()], keyword()) :: mutation_result()
   def stash(%Repository{} = repository, paths, opts \\ []) do
@@ -668,6 +697,37 @@ defmodule MDTClient.Git.Core do
       else
         rewrite_commit_message(repository, target, current_head, message)
       end
+    end
+  end
+
+  @doc """
+  Squashes consecutive commits on the checked-out branch into one.
+
+  The commits must follow one another on the branch's first-parent line, and
+  none may be a merge. The squashed commit carries the newest one's tree, the
+  oldest one's parent and author, and `message`; whatever came after the newest
+  is replayed on top of it. Like any history rewrite this needs a clean
+  worktree and gives every rewritten commit a new id.
+  """
+  @spec squash(Repository.t(), [String.t()], String.t()) :: mutation_result()
+  def squash(%Repository{} = repository, revisions, message) do
+    with {:ok, revisions} <- revision_list(revisions),
+         {:ok, message} <- commit_message(message),
+         {:ok, commits} <- resolve_commits(repository, revisions),
+         {:ok, [newest | _] = chain} <- squash_chain(repository, Enum.uniq(commits)),
+         {:ok, branch} <- require_attached_branch(repository),
+         {:ok, current_head} <- require_head(repository),
+         :ok <- ensure_first_parent(repository, newest, current_head),
+         :ok <- ensure_clean(repository),
+         {:ok, newest_metadata} <- replacement_metadata(repository, newest),
+         {:ok, oldest_metadata} <- replacement_metadata(repository, List.last(chain)),
+         {:ok, replacement} <-
+           create_replacement_commit(
+             repository,
+             %{oldest_metadata | tree: newest_metadata.tree},
+             message
+           ) do
+      rewrite_onto(repository, :squash, replacement, newest, branch)
     end
   end
 
@@ -1378,24 +1438,30 @@ defmodule MDTClient.Git.Core do
     end
   end
 
-  defp selected_pathspecs(repository, paths) when is_list(paths) and paths != [] do
-    Enum.reduce_while(paths, {:ok, []}, fn path, {:ok, pathspecs} ->
-      case selected_pathspec(repository, path) do
-        {:ok, pathspec} -> {:cont, {:ok, [pathspec | pathspecs]}}
+  defp selected_pathspecs(repository, paths) do
+    with {:ok, relatives} <- selected_paths(repository, paths) do
+      {:ok, Enum.map(relatives, &pathspec/1)}
+    end
+  end
+
+  defp selected_paths(repository, paths) when is_list(paths) and paths != [] do
+    Enum.reduce_while(paths, {:ok, []}, fn path, {:ok, relatives} ->
+      case selected_path(repository, path) do
+        {:ok, relative} -> {:cont, {:ok, [relative | relatives]}}
         {:error, error} -> {:halt, {:error, error}}
       end
     end)
     |> case do
-      {:ok, pathspecs} -> {:ok, Enum.reverse(pathspecs)}
+      {:ok, relatives} -> {:ok, Enum.reverse(relatives)}
       error -> error
     end
   end
 
-  defp selected_pathspecs(_repository, _paths) do
+  defp selected_paths(_repository, _paths) do
     {:error, Error.new(:invalid_argument, "At least one file path is required")}
   end
 
-  defp selected_pathspec(repository, path) do
+  defp selected_path(repository, path) do
     with {:ok, path} <- text_argument(path, "File path") do
       expanded = Path.expand(path, repository.path)
       relative = Path.relative_to(expanded, repository.path)
@@ -1408,45 +1474,148 @@ defmodule MDTClient.Git.Core do
           {:error, Error.new(:invalid_argument, "File path is outside the repository")}
 
         true ->
-          {:ok, ":(top,literal)#{relative}"}
+          {:ok, relative}
       end
     end
   end
+
+  defp pathspec(relative), do: ":(top,literal)" <> relative
+
+  # `git restore` does not know untracked files, so those are cleaned instead.
+  # A staged rename is a deletion of the old path plus an addition of the new
+  # one, and undoing only the addition would leave the old path deleted.
+  defp discard_plan(changes, relatives) do
+    selected = MapSet.new(relatives)
+    chosen = Enum.filter(changes, &MapSet.member?(selected, &1.path))
+    {new, tracked} = Enum.split_with(chosen, & &1.untracked?)
+    untracked = MapSet.new(for change <- changes, change.untracked?, do: change.path)
+    origins = for %FileChange{original_path: origin} <- tracked, is_binary(origin), do: origin
+
+    # The old path of a rename may since hold an untracked file of its own.
+    {occupied, origins} =
+      Enum.split_with(origins, fn origin ->
+        MapSet.member?(untracked, origin) and not MapSet.member?(selected, origin)
+      end)
+
+    %{
+      restore: Enum.uniq(Enum.map(tracked, & &1.path) ++ origins),
+      restore_index: Enum.uniq(occupied),
+      remove: for(change <- new, change.path not in origins, do: change.path)
+    }
+  end
+
+  defp restore_args(_head, []), do: nil
+
+  # Without a commit there is nothing to restore from: every tracked file is a
+  # staged addition, and discarding it removes it from the index and the disk.
+  defp restore_args(nil, paths),
+    do: ["rm", "--force", "--quiet", "--ignore-unmatch", "--" | Enum.map(paths, &pathspec/1)]
+
+  defp restore_args(_head, paths),
+    do: [
+      "restore",
+      "--source=HEAD",
+      "--staged",
+      "--worktree",
+      "--" | Enum.map(paths, &pathspec/1)
+    ]
+
+  defp restore_index_args([]), do: nil
+
+  defp restore_index_args(paths),
+    do: ["restore", "--source=HEAD", "--staged", "--" | Enum.map(paths, &pathspec/1)]
+
+  defp clean_args([]), do: nil
+  defp clean_args(paths), do: ["clean", "--force", "--" | Enum.map(paths, &pathspec/1)]
 
   defp outside_repository?(path) do
     path == ".." or Path.type(path) == :absolute or String.starts_with?(path, "../")
   end
 
   defp rewrite_commit_message(repository, target, current_head, message) do
-    with {:ok, _branch} <- require_attached_branch(repository),
+    with {:ok, branch} <- require_attached_branch(repository),
          :ok <- ensure_ancestor(repository, target, current_head),
          :ok <- ensure_clean(repository),
          {:ok, metadata} <- replacement_metadata(repository, target),
          {:ok, replacement} <- create_replacement_commit(repository, metadata, message) do
-      case run_mutation(repository, :edit_commit_message, [
-             "rebase",
-             "--rebase-merges",
-             "--onto",
-             replacement,
-             target,
-             current_head
-           ]) do
-        {:ok, result} ->
-          {:ok, %{result | output: "Created replacement #{replacement}\n" <> result.output}}
+      rewrite_onto(repository, :edit_commit_message, replacement, target, branch)
+    end
+  end
 
-        error ->
-          error
-      end
+  # Replays what the branch has after `target` onto `replacement`. The branch is
+  # named rather than HEAD's id: given an id, Git rebases a detached HEAD and
+  # leaves the branch where it was.
+  defp rewrite_onto(repository, action, replacement, target, branch) do
+    args = ["rebase", "--rebase-merges", "--onto", replacement, target, branch]
+
+    case run_mutation(repository, action, args) do
+      {:ok, result} ->
+        {:ok, %{result | output: "Created replacement #{replacement}\n" <> result.output}}
+
+      error ->
+        error
     end
   end
 
   defp require_attached_branch(repository) do
     case current_branch(repository) do
       {:ok, nil} ->
-        {:error, Error.new(:unsupported, "Editing an older commit requires a checked-out branch")}
+        {:error, Error.new(:unsupported, "Rewriting history requires a checked-out branch")}
 
       result ->
         result
+    end
+  end
+
+  # Orders the commits newest first, and insists each one's only parent is the
+  # next: anything else would need reordering, or would flatten a merge.
+  defp squash_chain(_repository, [_single]),
+    do: {:error, Error.new(:invalid_argument, "Squashing needs at least two commits")}
+
+  defp squash_chain(repository, commits) do
+    with {:ok, output} <-
+           Command.run(repository, ["show", "--no-patch", "--format=%H %P" | commits]) do
+      parents =
+        for line <- lines(output), into: %{} do
+          [id | ids] = words(line)
+          {id, ids}
+        end
+
+      if Enum.any?(parents, fn {_id, ids} -> length(ids) > 1 end) do
+        {:error, Error.new(:invalid_argument, "A merge commit cannot be squashed")}
+      else
+        # The newest is the one no other selected commit names as its parent.
+        firsts = MapSet.new(parents, fn {_id, ids} -> List.first(ids) end)
+        newest = Enum.reject(commits, &MapSet.member?(firsts, &1))
+        chain = walk_chain(newest, parents, MapSet.new(commits))
+
+        if length(chain) == length(commits),
+          do: {:ok, chain},
+          else: {:error, Error.new(:invalid_argument, "Only consecutive commits can be squashed")}
+      end
+    end
+  end
+
+  defp walk_chain([newest], parents, selected) do
+    Stream.unfold(newest, fn id ->
+      if id && MapSet.member?(selected, id), do: {id, List.first(parents[id])}
+    end)
+    |> Enum.to_list()
+  end
+
+  defp walk_chain(_heads, _parents, _selected), do: []
+
+  # `commit` sits on the branch's own line when walking first parents down from
+  # HEAD reaches it, which is when HEAD~n, n being that walk's length, is it.
+  defp ensure_first_parent(repository, commit, head) do
+    with {:ok, count} <-
+           Command.run(repository, ["rev-list", "--count", "--first-parent", "#{commit}..#{head}"]),
+         {:ok, found} <- resolve_commit(repository, "#{head}~#{String.trim(count)}") do
+      if found == commit,
+        do: :ok,
+        else:
+          {:error,
+           Error.new(:invalid_argument, "Only commits on the checked-out branch can be squashed")}
     end
   end
 
@@ -1584,6 +1753,23 @@ defmodule MDTClient.Git.Core do
       {:error, error} ->
         {:error, with_operation(repository, error)}
     end
+  end
+
+  # Runs the commands of one action in order, stopping at the first failure, and
+  # reports them as a single result.
+  defp run_mutations(commands, repository, action) do
+    empty = {:ok, %CommandResult{action: action, output: ""}}
+
+    Enum.reduce_while(commands, empty, fn args, {:ok, acc} ->
+      case run_mutation(repository, action, args) do
+        {:ok, result} ->
+          output = [acc.output, result.output] |> Enum.reject(&(&1 == "")) |> Enum.join("\n")
+          {:cont, {:ok, %{acc | output: output}}}
+
+        error ->
+          {:halt, error}
+      end
+    end)
   end
 
   defp with_operation(repository, error) do

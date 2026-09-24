@@ -32,8 +32,10 @@ const liveSocket = new LiveSocket("/live", Socket, {
   longPollFallbackMs: 2500,
   params: {_csrf_token: csrfToken},
   hooks: {...colocatedHooks, NoticeTimer},
-  // Modifier keys are not sent by default, but shortcuts like Ctrl+Enter need them.
+  // Modifier keys are not sent by default, but shortcuts like Ctrl+Enter need
+  // them, and so do lists where Shift and Ctrl/Cmd clicks extend a selection.
   metadata: {
+    click: (e, _el) => ({shiftKey: e.shiftKey, ctrlKey: e.ctrlKey, metaKey: e.metaKey}),
     keydown: (e, _el) => ({
       key: e.key,
       ctrlKey: e.ctrlKey,

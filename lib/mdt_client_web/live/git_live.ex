@@ -105,6 +105,7 @@ defmodule MDTClientWeb.GitLive do
               limit={@graph_limit}
               panel={@graph_panel}
               selected_commit={@graph_selected_commit}
+              selected_commits={@graph_selected_commits}
               selected_branch={@graph_selected_branch}
               menu={@graph_menu}
               diff={@graph_diff}
@@ -260,14 +261,19 @@ defmodule MDTClientWeb.GitLive do
 
   ## Selection
 
+  # Commits are picked like files: a click takes one, Ctrl or Cmd adds or drops
+  # one, and Shift takes the run from the commit clicked last. The inspector
+  # follows the commit clicked.
   @impl true
-  def handle_event("select_commit", %{"id" => id}, socket) do
+  def handle_event("select_commit", %{"id" => id} = params, socket) do
+    range? = params["shiftKey"] == true
+    toggle? = params["ctrlKey"] == true or params["metaKey"] == true
+
     socket =
       update_tab(socket, fn tab ->
         %{
-          tab
-          | selected_commit: id,
-            panel: "commit",
+          pick_commit(tab, id, range?, toggle?)
+          | panel: "commit",
             commit_changes: nil,
             menu: nil,
             diff: nil
@@ -275,6 +281,14 @@ defmodule MDTClientWeb.GitLive do
       end)
 
     {:noreply, refresh_reads(socket)}
+  end
+
+  @impl true
+  def handle_event("clear_commits", _params, socket) do
+    {:noreply,
+     update_tab(socket, fn tab ->
+       %{tab | selected_commits: MapSet.new(List.wrap(tab.selected_commit))}
+     end)}
   end
 
   @impl true
@@ -317,20 +331,32 @@ defmodule MDTClientWeb.GitLive do
       nil ->
         {:noreply, socket}
 
+      :file ->
+        side = file_side(params["side"])
+        menu = %{kind: :file, id: id, side: side, at: point(params), anchor: params["anchor"]}
+        {:noreply, update_tab(socket, &(&1 |> select_for_menu({side, id}) |> toggle_menu(menu)))}
+
+      :commit ->
+        menu = %{kind: :commit, id: id, at: point(params), anchor: params["anchor"]}
+        {:noreply, update_tab(socket, &(&1 |> commit_for_menu(id) |> toggle_menu(menu)))}
+
       kind ->
         menu = %{kind: kind, id: id, at: point(params), anchor: params["anchor"]}
         {:noreply, update_tab(socket, &toggle_menu(&1, menu))}
     end
   end
 
+  # Reading starts a command, and a command closes menus, so a commit picked by
+  # a right click has its files read once its menu is out of the way.
   @impl true
   def handle_event("close_menu", _params, socket) do
-    {:noreply, update_tab(socket, &%{&1 | menu: nil})}
+    {:noreply, refresh_reads(update_tab(socket, &%{&1 | menu: nil}))}
   end
 
   @impl true
   def handle_event("close_overlays", _params, socket) do
-    {:noreply, update_tab(socket, &%{&1 | menu: nil, confirm: nil, ssh_open?: false})}
+    socket = update_tab(socket, &%{&1 | menu: nil, confirm: nil, ssh_open?: false})
+    {:noreply, refresh_reads(socket)}
   end
 
   @impl true
@@ -468,7 +494,7 @@ defmodule MDTClientWeb.GitLive do
           pinned?: true
         }
 
-        socket = put_tab(socket, tab.id, &%{&1 | diff: open})
+        socket = put_tab(socket, tab.id, &%{&1 | diff: open, menu: nil})
 
         {:noreply, refresh_reads(socket)}
 
@@ -482,19 +508,16 @@ defmodule MDTClientWeb.GitLive do
     {:noreply, update_tab(socket, &%{&1 | diff: nil})}
   end
 
+  # A plain click picks one file, Ctrl or Cmd adds or drops one, and Shift takes
+  # every row from the file picked last to this one, in the order they are
+  # shown, the unstaged list first.
   @impl true
-  def handle_event("toggle_path", %{"path" => path}, socket) do
-    {:noreply,
-     update_tab(socket, fn tab ->
-       selected =
-         if MapSet.member?(tab.selected_paths, path) do
-           MapSet.delete(tab.selected_paths, path)
-         else
-           MapSet.put(tab.selected_paths, path)
-         end
+  def handle_event("select_path", %{"path" => path} = params, socket) do
+    row = {file_side(params["side"]), path}
+    range? = params["shiftKey"] == true
+    toggle? = params["ctrlKey"] == true or params["metaKey"] == true
 
-       %{tab | selected_paths: selected}
-     end)}
+    {:noreply, update_tab(socket, &select_path(&1, row, range?, toggle?))}
   end
 
   @impl true
@@ -505,12 +528,12 @@ defmodule MDTClientWeb.GitLive do
 
   @impl true
   def handle_event("clear_paths", _params, socket) do
-    {:noreply, update_tab(socket, &%{&1 | selected_paths: MapSet.new()})}
+    {:noreply, update_tab(socket, &%{&1 | selected_paths: MapSet.new(), selection_anchor: nil})}
   end
 
   @impl true
   def handle_event("prepare_stash", _params, socket) do
-    {:noreply, update_tab(socket, &%{&1 | stashing?: true})}
+    {:noreply, update_tab(socket, &%{&1 | stashing?: true, menu: nil})}
   end
 
   @impl true
@@ -875,8 +898,11 @@ defmodule MDTClientWeb.GitLive do
       filter: "",
       panel: "commit",
       selected_commit: state.snapshot.head,
+      selected_commits: MapSet.new(List.wrap(state.snapshot.head)),
+      commit_anchor: state.snapshot.head,
       selected_branch: current_branch_name(state.snapshot),
       selected_paths: MapSet.new(),
+      selection_anchor: nil,
       menu: nil,
       action: nil,
       confirm: nil,
@@ -1143,9 +1169,13 @@ defmodule MDTClientWeb.GitLive do
   defp perform(repository, {:edit_message, revision, message}),
     do: Core.edit_commit_message(repository, revision, message)
 
+  defp perform(repository, {:squash, revisions, message}),
+    do: Core.squash(repository, revisions, message)
+
   defp perform(repository, {:commit, message}), do: Core.commit(repository, message)
   defp perform(repository, {:stage, paths}), do: Core.stage(repository, paths)
   defp perform(repository, {:unstage, paths}), do: Core.unstage(repository, paths)
+  defp perform(repository, {:discard, paths}), do: Core.discard(repository, paths)
 
   defp perform(repository, {:stash, paths, message, untracked?}),
     do: Core.stash(repository, paths, message: message, include_untracked: untracked?)
@@ -1206,6 +1236,7 @@ defmodule MDTClientWeb.GitLive do
         stashes: state.stashes,
         remotes: state.remotes,
         selected_commit: keep_commit(tab, snapshot, state.commit_ids),
+        selected_commits: keep_commits(tab, snapshot, state.commit_ids),
         selected_branch: keep_branch(tab, snapshot, state.branch_names),
         selected_paths: MapSet.intersection(tab.selected_paths, state.paths),
         diff: keep_diff(tab, state.diff),
@@ -1245,6 +1276,17 @@ defmodule MDTClientWeb.GitLive do
       tab.selected_commit && MapSet.member?(commits, tab.selected_commit) -> tab.selected_commit
       snapshot.head && MapSet.member?(commits, snapshot.head) -> snapshot.head
       true -> nil
+    end
+  end
+
+  defp keep_commits(tab, snapshot, commits) do
+    kept = MapSet.intersection(tab.selected_commits, commits)
+    focus = keep_commit(tab, snapshot, commits)
+
+    cond do
+      is_nil(focus) -> MapSet.new()
+      MapSet.member?(kept, focus) -> kept
+      true -> MapSet.new([focus])
     end
   end
 
@@ -1328,8 +1370,10 @@ defmodule MDTClientWeb.GitLive do
   defp requested("continue", _params, _tab), do: :continue
   defp requested("skip", _params, _tab), do: :skip
   defp requested("abort", _params, _tab), do: :abort
-  defp requested("stage", _params, tab), do: {:stage, selected_paths(tab)}
-  defp requested("unstage", _params, tab), do: {:unstage, selected_paths(tab)}
+  defp requested("stage", _params, tab), do: on_selection(:stage, tab, &FileChange.unstaged?/1)
+  defp requested("unstage", _params, tab), do: on_selection(:unstage, tab, &FileChange.staged?/1)
+  defp requested("discard", _params, tab), do: on_selection(:discard, tab, fn _change -> true end)
+
   defp requested("stage_path", %{"path" => path}, _tab), do: {:stage, [path]}
   defp requested("unstage_path", %{"path" => path}, _tab), do: {:unstage, [path]}
   defp requested("stage_all", _params, tab), do: {:stage, side_paths(tab, :unstaged)}
@@ -1338,6 +1382,14 @@ defmodule MDTClientWeb.GitLive do
   defp requested("merge", %{"revision" => revision}, _tab), do: {:merge, revision}
   defp requested("rebase", %{"revision" => revision}, _tab), do: {:rebase, revision}
   defp requested("cherry_pick", %{"revision" => revision}, _tab), do: {:cherry_pick, revision}
+
+  defp requested("cherry_pick_selection", _params, tab) do
+    case picked_commits(tab) do
+      [] -> nil
+      ids -> {:cherry_pick, Enum.reverse(ids)}
+    end
+  end
+
   defp requested("revert", %{"revision" => revision}, _tab), do: {:revert, revision}
 
   defp requested("checkout_commit", %{"revision" => revision}, _tab),
@@ -1424,6 +1476,22 @@ defmodule MDTClientWeb.GitLive do
     }
   end
 
+  defp prepare(tab, %{"action" => "squash"}) do
+    case picked_commits(tab) do
+      [_, _ | _] = ids ->
+        %{
+          kind: :squash,
+          value: ids |> Enum.reverse() |> Enum.map_join("\n\n", &full_message(tab, &1)),
+          target: ids,
+          start: nil,
+          checkout?: false
+        }
+
+      _fewer ->
+        nil
+    end
+  end
+
   defp prepare(_tab, _params), do: nil
 
   defp submitted(%{kind: :create_branch, start: start}, params) do
@@ -1442,6 +1510,10 @@ defmodule MDTClientWeb.GitLive do
     {:edit_message, target, String.trim(params["value"] || "")}
   end
 
+  defp submitted(%{kind: :squash, target: ids}, params) do
+    {:squash, ids, String.trim(params["value"] || "")}
+  end
+
   # A remote branch named "origin/feature" becomes the local "feature".
   defp local_name(remote_branch) do
     case String.split(remote_branch, "/", parts: 2) do
@@ -1458,6 +1530,132 @@ defmodule MDTClientWeb.GitLive do
   end
 
   defp selected_paths(tab), do: tab.selected_paths |> MapSet.to_list() |> Enum.sort()
+
+  # The picked commits, newest first, the way the graph lists them.
+  defp picked_commits(tab) do
+    for commit <- tab.snapshot.commits,
+        MapSet.member?(tab.selected_commits, commit.id),
+        do: commit.id
+  end
+
+  defp pick_commit(tab, id, true = _range?, toggle?) do
+    case commit_range(tab, tab.commit_anchor, id) do
+      nil ->
+        pick_commit(tab, id, false, toggle?)
+
+      ids ->
+        base = if toggle?, do: tab.selected_commits, else: MapSet.new()
+        %{tab | selected_commits: MapSet.union(base, MapSet.new(ids)), selected_commit: id}
+    end
+  end
+
+  defp pick_commit(tab, id, false, true = _toggle?) do
+    if MapSet.member?(tab.selected_commits, id) do
+      selected = MapSet.delete(tab.selected_commits, id)
+      # Dropping the commit on show hands the inspector to the newest one left.
+      focus =
+        if tab.selected_commit == id,
+          do: List.first(picked_commits(%{tab | selected_commits: selected})),
+          else: tab.selected_commit
+
+      %{tab | selected_commits: selected, selected_commit: focus, commit_anchor: id}
+    else
+      selected = MapSet.put(tab.selected_commits, id)
+      %{tab | selected_commits: selected, selected_commit: id, commit_anchor: id}
+    end
+  end
+
+  defp pick_commit(tab, id, false, false) do
+    %{tab | selected_commits: MapSet.new([id]), selected_commit: id, commit_anchor: id}
+  end
+
+  # A right click on a picked commit acts on everything picked; on any other
+  # commit it picks that one alone.
+  defp commit_for_menu(tab, id) do
+    if MapSet.member?(tab.selected_commits, id),
+      do: tab,
+      else: %{pick_commit(tab, id, false, false) | commit_changes: nil}
+  end
+
+  defp commit_range(_tab, nil, _id), do: nil
+
+  defp commit_range(tab, anchor, id) do
+    ids = Enum.map(tab.snapshot.commits, & &1.id)
+
+    with from when is_integer(from) <- Enum.find_index(ids, &(&1 == anchor)),
+         to when is_integer(to) <- Enum.find_index(ids, &(&1 == id)) do
+      Enum.slice(ids, min(from, to)..max(from, to)//1)
+    end
+  end
+
+  # An action on the selection covers the files it can change, and a selection
+  # it cannot change at all asks for nothing.
+  defp on_selection(action, tab, applies?) do
+    selected = Enum.filter(tab.changes, &MapSet.member?(tab.selected_paths, &1.path))
+
+    case for(change <- selected, applies?.(change), do: change.path) do
+      [] -> nil
+      paths -> {action, paths}
+    end
+  end
+
+  defp select_path(tab, row, true = _range?, toggle?) do
+    case file_range(tab, tab.selection_anchor, row) do
+      nil ->
+        select_path(tab, row, false, toggle?)
+
+      paths ->
+        # The anchor stays put, so the next Shift click reaches from the same row.
+        base = if toggle?, do: tab.selected_paths, else: MapSet.new()
+        %{tab | selected_paths: MapSet.union(base, MapSet.new(paths))}
+    end
+  end
+
+  defp select_path(tab, {_side, path} = row, false, true = _toggle?) do
+    selected =
+      if MapSet.member?(tab.selected_paths, path),
+        do: MapSet.delete(tab.selected_paths, path),
+        else: MapSet.put(tab.selected_paths, path)
+
+    %{tab | selected_paths: selected, selection_anchor: row}
+  end
+
+  defp select_path(tab, {_side, path} = row, false, false) do
+    %{tab | selected_paths: MapSet.new([path]), selection_anchor: row}
+  end
+
+  # A right click on a picked file acts on everything picked; on any other file
+  # it picks that file alone, the way a file manager does.
+  defp select_for_menu(tab, {_side, path} = row) do
+    if MapSet.member?(tab.selected_paths, path),
+      do: tab,
+      else: select_path(tab, row, false, false)
+  end
+
+  defp file_range(_tab, nil, _row), do: nil
+
+  defp file_range(tab, anchor, row) do
+    rows = file_rows(tab)
+
+    with from when is_integer(from) <- row_index(rows, anchor),
+         to when is_integer(to) <- row_index(rows, row) do
+      rows |> Enum.slice(min(from, to)..max(from, to)//1) |> Enum.map(&elem(&1, 1))
+    end
+  end
+
+  # Staging or unstaging the anchor moves it to the other list, where the same
+  # path is the next best place to start from.
+  defp row_index(rows, {_side, path} = row) do
+    Enum.find_index(rows, &(&1 == row)) || Enum.find_index(rows, &(elem(&1, 1) == path))
+  end
+
+  defp file_rows(tab) do
+    for(change <- tab.changes, FileChange.unstaged?(change), do: {:unstaged, change.path}) ++
+      for change <- tab.changes, FileChange.staged?(change), do: {:staged, change.path}
+  end
+
+  defp file_side("staged"), do: :staged
+  defp file_side(_side), do: :unstaged
 
   defp side_paths(tab, :staged),
     do: tab.changes |> Enum.filter(&FileChange.staged?/1) |> Enum.map(& &1.path)
@@ -1501,6 +1699,22 @@ defmodule MDTClientWeb.GitLive do
     }
   end
 
+  defp confirmation({:discard, paths}) do
+    subject =
+      case paths do
+        [path] -> path
+        paths -> "#{length(paths)} files"
+      end
+
+    %{
+      title: "Discard changes to #{subject}?",
+      message:
+        "Staged and unstaged edits are thrown away and the files return to their last " <>
+          "committed state; new files are deleted. This cannot be undone.",
+      label: "Discard"
+    }
+  end
+
   defp confirmation({:drop_stash, reference}) do
     %{
       title: "Drop #{reference}?",
@@ -1541,9 +1755,11 @@ defmodule MDTClientWeb.GitLive do
   defp label({:revert, _revision}), do: "Reverting"
   defp label({:reset, _revision, mode}), do: "#{String.capitalize(to_string(mode))} resetting"
   defp label({:edit_message, _revision, _message}), do: "Rewriting message"
+  defp label({:squash, _revisions, _message}), do: "Squashing"
   defp label({:commit, _message}), do: "Committing"
   defp label({:stage, _paths}), do: "Staging"
   defp label({:unstage, _paths}), do: "Unstaging"
+  defp label({:discard, _paths}), do: "Discarding"
   defp label({:stash, _paths, _message, _untracked?}), do: "Stashing"
   defp label({:apply_stash, _reference}), do: "Applying stash"
   defp label({:pop_stash, _reference}), do: "Popping stash"
@@ -1556,6 +1772,7 @@ defmodule MDTClientWeb.GitLive do
 
   defp menu_kind("branch"), do: :branch
   defp menu_kind("commit"), do: :commit
+  defp menu_kind("file"), do: :file
   defp menu_kind(_kind), do: nil
 
   # Clicking the same trigger twice closes the menu; a right click always opens
@@ -1608,6 +1825,7 @@ defmodule MDTClientWeb.GitLive do
       graph_limit: @default_limit,
       graph_panel: "commit",
       graph_selected_commit: nil,
+      graph_selected_commits: MapSet.new(),
       graph_selected_branch: nil,
       graph_menu: nil,
       graph_diff: nil
@@ -1624,6 +1842,7 @@ defmodule MDTClientWeb.GitLive do
       graph_limit: tab.limit,
       graph_panel: tab.panel,
       graph_selected_commit: tab.selected_commit,
+      graph_selected_commits: tab.selected_commits,
       graph_selected_branch: tab.selected_branch,
       graph_menu: tab.menu,
       graph_diff: tab.diff

@@ -4,11 +4,11 @@ defmodule MDTClient.Git.Files do
 
   `status/1` lists the repository paths Git considers changed as
   `MDTClient.Git.FileChange` structs, which is what the action panel needs to
-  build a selection for `MDTClient.Git.Core.stage/2`, `unstage/2`, and
-  `stash/3`. `diff/3` reads the unified diff of a single path on request, so
-  branch and graph refreshes never pay for diff payloads.
+  build a selection for `MDTClient.Git.Core.stage/2`, `unstage/2`, `discard/2`,
+  and `stash/3`. `diff/3` reads the unified diff of a single path on request,
+  so branch and graph refreshes never pay for diff payloads.
 
-  Editing and discarding files are deliberately still absent.
+  Editing files is deliberately still absent.
 
   The module shares `MDTClient.Git.Repository` handles and the command runner
   with `MDTClient.Git.Core`, so the SSH credentials and safety guarantees of a tab

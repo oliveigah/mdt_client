@@ -74,9 +74,9 @@ defmodule MDTClient.Git.Command do
   # A Git argument can be a URL with credentials, a file path or a commit
   # message. Only emit recognized command verbs; never write raw arguments.
   defp safe_command([verb | _])
-       when verb in ~w(add branch check-ref-format checkout cherry-pick clone commit
+       when verb in ~w(add branch check-ref-format checkout cherry-pick clean clone commit
                        commit-tree config diff diff-tree fetch for-each-ref log merge
-                       merge-base pull push rebase remote reset restore rev-parse revert
+                       merge-base pull push rebase remote reset restore rev-list rev-parse revert
                        rm show stash status switch symbolic-ref tag),
        do: verb
 

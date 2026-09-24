@@ -261,6 +261,84 @@ defmodule MDTClient.Git.CoreTest do
     assert git!(path, ["show", "-s", "--format=%s", "HEAD"]) == "third subject"
     assert git!(path, ["show", "-s", "--format=%s", "HEAD^"]) == "renamed second"
     assert git!(path, ["rev-parse", "HEAD^^"]) == initial_commit
+    # The branch moves with the rewrite instead of staying on the old commits.
+    assert git!(path, ["symbolic-ref", "--short", "HEAD"]) == "main"
+    assert git!(path, ["rev-parse", "main"]) == new_head
+  end
+
+  describe "squash/3" do
+    test "folds consecutive commits into one and replays what follows", context do
+      %{path: path, repository: repository, initial_commit: initial} = context
+      second = commit_file(path, "second.txt", "second\n", "second subject")
+      third = commit_file(path, "third.txt", "third\n", "third subject")
+      commit_file(path, "fourth.txt", "fourth\n", "fourth subject")
+
+      assert {:ok, %CommandResult{action: :squash}} =
+               Core.squash(repository, [third, second], "second and third")
+
+      assert git!(path, ["symbolic-ref", "--short", "HEAD"]) == "main"
+
+      assert git!(path, ["log", "--format=%s", "main"]) ==
+               "fourth subject\nsecond and third\ninitial commit"
+
+      assert git!(path, ["rev-parse", "HEAD~2"]) == initial
+      assert git!(path, ["show", "--format=", "--name-only", "HEAD~1"]) == "second.txt\nthird.txt"
+      assert git!(path, ["status", "--porcelain"]) == ""
+    end
+
+    test "can take HEAD in, keeping the oldest commit's author", context do
+      %{path: path, repository: repository, initial_commit: initial} = context
+      git!(path, ["-c", "user.name=First Author", "commit", "--allow-empty", "-m", "first"])
+      commit_file(path, "second.txt", "second\n", "second")
+
+      assert {:ok, _result} = Core.squash(repository, ["HEAD", "HEAD~1"], "both")
+
+      assert git!(path, ["log", "--format=%s", "main"]) == "both\ninitial commit"
+      assert git!(path, ["show", "-s", "--format=%an", "HEAD"]) == "First Author"
+      assert git!(path, ["rev-parse", "HEAD~1"]) == initial
+    end
+
+    test "refuses what it cannot fold safely", context do
+      %{path: path, repository: repository, initial_commit: initial} = context
+      second = commit_file(path, "second.txt", "second\n", "second")
+      third = commit_file(path, "third.txt", "third\n", "third")
+      fourth = commit_file(path, "fourth.txt", "fourth\n", "fourth")
+
+      assert {:error, %Error{kind: :invalid_argument, message: "Only consecutive" <> _}} =
+               Core.squash(repository, [second, fourth], "gap")
+
+      assert {:error, %Error{kind: :invalid_argument}} = Core.squash(repository, [third], "one")
+
+      assert {:error, %Error{kind: :invalid_argument}} =
+               Core.squash(repository, [third, fourth], "")
+
+      git!(path, ["checkout", "-q", "-b", "side", second])
+      side = commit_file(path, "side.txt", "side\n", "side")
+      git!(path, ["checkout", "-q", "main"])
+      git!(path, ["merge", "--no-ff", "-m", "merge side", "side"])
+      merge = git!(path, ["rev-parse", "HEAD"])
+
+      assert {:error, %Error{message: "A merge commit" <> _}} =
+               Core.squash(repository, [merge, fourth], "merge")
+
+      # Consecutive, but on a line merged in rather than the branch's own.
+      assert {:error, %Error{message: "Only commits on the checked-out branch" <> _}} =
+               Core.squash(repository, [side, second], "side")
+
+      File.write!(Path.join(path, "README.md"), "dirty\n")
+
+      assert {:error, %Error{message: "Working tree must be clean"}} =
+               Core.squash(repository, [third, fourth], "dirty")
+
+      git!(path, ["checkout", "--", "README.md"])
+      git!(path, ["checkout", "-q", "--detach", "HEAD"])
+
+      assert {:error, %Error{kind: :unsupported}} =
+               Core.squash(repository, [third, fourth], "detached")
+
+      assert git!(path, ["rev-parse", "main~3"]) == second
+      assert git!(path, ["rev-parse", "main~4"]) == initial
+    end
   end
 
   test "stages and unstages exactly the selected files", %{path: path, repository: repository} do
@@ -285,6 +363,122 @@ defmodule MDTClient.Git.CoreTest do
 
     assert {:error, %Error{kind: :invalid_argument}} =
              Core.stage(repository, [Path.join(path, "../outside.txt")])
+  end
+
+  describe "discard/2" do
+    test "returns exactly the selected files to HEAD", %{path: path, repository: repository} do
+      commit_file(path, "tracked.txt", "committed\n", "add tracked")
+      commit_file(path, "removed.txt", "removed\n", "add removed")
+      commit_file(path, "kept.txt", "kept\n", "add kept")
+
+      # Both sides of one file, a staged addition, a deletion, and untracked files.
+      File.write!(Path.join(path, "tracked.txt"), "staged\n")
+      git!(path, ["add", "tracked.txt"])
+      File.write!(Path.join(path, "tracked.txt"), "staged and then edited\n")
+      File.write!(Path.join(path, "added[1].txt"), "added\n")
+      git!(path, ["add", "added[1].txt"])
+      File.rm!(Path.join(path, "removed.txt"))
+      File.write!(Path.join(path, "scratch.txt"), "scratch\n")
+      File.write!(Path.join(path, "kept.txt"), "kept edit\n")
+      File.write!(Path.join(path, "untouched.txt"), "untouched\n")
+
+      selection = [
+        Path.join(path, "tracked.txt"),
+        "added[1].txt",
+        "removed.txt",
+        "scratch.txt",
+        "README.md"
+      ]
+
+      assert {:ok, %CommandResult{action: :discard, output: output}} =
+               Core.discard(repository, selection)
+
+      assert output =~ "scratch.txt"
+      assert File.read!(Path.join(path, "tracked.txt")) == "committed\n"
+      refute File.exists?(Path.join(path, "added[1].txt"))
+      assert File.read!(Path.join(path, "removed.txt")) == "removed\n"
+      refute File.exists?(Path.join(path, "scratch.txt"))
+
+      assert git!(path, ["status", "--porcelain", "--untracked-files=all"]) ==
+               " M kept.txt\n?? untouched.txt"
+    end
+
+    test "restores the old path of a staged rename", %{path: path, repository: repository} do
+      git!(path, ["mv", "README.md", "RENAMED.md"])
+
+      assert {:ok, _result} = Core.discard(repository, ["RENAMED.md"])
+
+      assert File.read!(Path.join(path, "README.md")) == "initial\n"
+      refute File.exists?(Path.join(path, "RENAMED.md"))
+      assert git!(path, ["status", "--porcelain", "--untracked-files=all"]) == ""
+    end
+
+    test "keeps an unselected untracked file that took a renamed path", context do
+      %{path: path, repository: repository} = context
+      git!(path, ["mv", "README.md", "RENAMED.md"])
+      File.write!(Path.join(path, "README.md"), "someone else\n")
+
+      assert {:ok, _result} = Core.discard(repository, ["RENAMED.md"])
+
+      assert File.read!(Path.join(path, "README.md")) == "someone else\n"
+      refute File.exists?(Path.join(path, "RENAMED.md"))
+      assert git!(path, ["status", "--porcelain", "--untracked-files=all"]) == " M README.md"
+
+      git!(path, ["mv", "README.md", "RENAMED.md"])
+      File.write!(Path.join(path, "README.md"), "someone else\n")
+
+      assert {:ok, _result} = Core.discard(repository, ["RENAMED.md", "README.md"])
+
+      assert File.read!(Path.join(path, "README.md")) == "initial\n"
+      assert git!(path, ["status", "--porcelain", "--untracked-files=all"]) == ""
+    end
+
+    test "leaves ignored and unchanged files alone", %{path: path, repository: repository} do
+      commit_file(path, ".gitignore", "*.log\n", "ignore logs")
+      File.write!(Path.join(path, "debug.log"), "ignored\n")
+
+      assert {:ok, %CommandResult{output: ""}} =
+               Core.discard(repository, ["debug.log", "README.md"])
+
+      assert File.read!(Path.join(path, "debug.log")) == "ignored\n"
+    end
+
+    test "resolves a conflicted file to HEAD", %{path: path, repository: repository} do
+      git!(path, ["checkout", "-b", "other"])
+      commit_file(path, "README.md", "theirs\n", "theirs")
+      git!(path, ["checkout", "main"])
+      commit_file(path, "README.md", "ours\n", "ours")
+      assert {:error, %Error{kind: :conflict}} = Core.merge(repository, "other")
+
+      assert {:ok, _result} = Core.discard(repository, ["README.md"])
+
+      assert File.read!(Path.join(path, "README.md")) == "ours\n"
+      assert git!(path, ["diff", "--name-only", "--diff-filter=U"]) == ""
+    end
+
+    test "deletes staged files in a repository without commits", %{base: base} do
+      path = Path.join(base, "unborn")
+      File.mkdir_p!(path)
+      git!(path, ["init", "--initial-branch=main"])
+      File.write!(Path.join(path, "staged.txt"), "staged\n")
+      git!(path, ["add", "staged.txt"])
+      File.write!(Path.join(path, "staged.txt"), "staged and edited\n")
+      File.write!(Path.join(path, "untracked.txt"), "untracked\n")
+      {:ok, repository} = Core.open(path)
+
+      assert {:ok, _result} = Core.discard(repository, ["staged.txt"])
+
+      refute File.exists?(Path.join(path, "staged.txt"))
+      assert git!(path, ["status", "--porcelain", "--untracked-files=all"]) == "?? untracked.txt"
+    end
+
+    test "validates the selection", %{path: path, repository: repository} do
+      assert {:error, %Error{kind: :invalid_argument}} = Core.discard(repository, [])
+      assert {:error, %Error{kind: :invalid_argument}} = Core.discard(repository, [path])
+
+      assert {:error, %Error{kind: :invalid_argument}} =
+               Core.discard(repository, [Path.join(path, "../outside.txt")])
+    end
   end
 
   test "stashes selected tracked and untracked files and manages the stash", context do

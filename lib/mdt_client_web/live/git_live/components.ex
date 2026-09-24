@@ -752,6 +752,12 @@ defmodule MDTClientWeb.GitLive.Components do
               return this.openMenu(row)
             }
 
+            // A list that picks several rows at once picks all of them on Ctrl+A.
+            if (this.el.dataset.selectAll && (event.ctrlKey || event.metaKey) && event.key === "a") {
+              event.preventDefault()
+              return this.pushEvent(this.el.dataset.selectAll, {})
+            }
+
             const moves = {ArrowDown: 1, ArrowUp: -1}
             if (!(event.key in moves)) return
 
@@ -765,9 +771,11 @@ defmodule MDTClientWeb.GitLive.Components do
         },
 
         // The anchor says which control the menu came from, so a branch label in
-        // the graph can stay unfolded while its menu is open.
+        // the graph can stay unfolded while its menu is open. A file also says
+        // which list it was in.
         openMenu(row, x, y) {
-          this.pushEvent("open_menu", {kind: row.dataset.menuKind, id: row.dataset.menuId, anchor: row.id, x, y})
+          const {menuKind: kind, menuId: id, menuSide: side} = row.dataset
+          this.pushEvent("open_menu", {kind, id, side, anchor: row.id, x, y})
         }
       }
     </script>
@@ -826,7 +834,7 @@ defmodule MDTClientWeb.GitLive.Components do
           />
           <.icon
             :if={not @branch.current?}
-            name={chip_icon(@branch)}
+            name={branch_icon(@branch)}
             class="size-3 shrink-0 text-faint"
           />
           <span class={[
@@ -998,6 +1006,7 @@ defmodule MDTClientWeb.GitLive.Components do
   attr :limit, :integer, required: true
   attr :panel, :string, required: true
   attr :selected_commit, :string, default: nil
+  attr :selected_commits, :any, default: MapSet.new()
   attr :selected_branch, :string, default: nil
   attr :menu, :map, default: nil
   attr :diff, :map, default: nil
@@ -1159,7 +1168,7 @@ defmodule MDTClientWeb.GitLive.Components do
           row={row}
           lanes={@lanes}
           head={@snapshot.head}
-          selected_commit={@selected_commit}
+          selected={MapSet.member?(@selected_commits, row.commit.id)}
           selected_branch={@selected_branch}
           menu={@menu}
         />
@@ -1364,12 +1373,15 @@ defmodule MDTClientWeb.GitLive.Components do
   attr :row, :map, required: true
   attr :lanes, :integer, required: true
   attr :head, :string, default: nil
-  attr :selected_commit, :string, default: nil
+  attr :selected, :boolean, default: false
   attr :selected_branch, :string, default: nil
   attr :menu, :map, default: nil
 
   defp commit_row(assigns) do
-    assigns = assign(assigns, :id, assigns.row.commit.id)
+    assigns =
+      assigns
+      |> assign(:id, assigns.row.commit.id)
+      |> assign(:refs, ref_labels(assigns.row.commit.labels))
 
     ~H"""
     <%!-- Skipping off-screen rows keeps a long graph cheap, but it also clips
@@ -1380,9 +1392,9 @@ defmodule MDTClientWeb.GitLive.Components do
       data-menu-kind="commit"
       data-menu-id={@id}
       class={[
-        "group relative flex items-center border-b border-line-soft/40 pl-2 transition-colors",
+        "group relative flex select-none items-center border-b border-line-soft/40 pl-2 transition-colors",
         "[content-visibility:auto] has-[[data-ref-list][data-open]]:[content-visibility:visible]",
-        if(@selected_commit == @id,
+        if(@selected,
           do: "bg-accent-soft/50 shadow-[inset_2px_0_0_0_var(--color-accent)]",
           else: "hover:bg-hover/70"
         )
@@ -1393,13 +1405,14 @@ defmodule MDTClientWeb.GitLive.Components do
             without that click also meaning "select this commit". It keeps its
             width either way, so every node in the graph lines up. --%>
       <.ref_column
-        :if={@row.commit.labels != []}
+        :if={@refs != []}
         commit={@row.commit}
+        refs={@refs}
         selected_branch={@selected_branch}
         menu={@menu}
       />
       <div
-        :if={@row.commit.labels == []}
+        :if={@refs == []}
         phx-click="select_commit"
         phx-value-id={@id}
         aria-hidden="true"
@@ -1412,7 +1425,7 @@ defmodule MDTClientWeb.GitLive.Components do
         type="button"
         id={"git-select-commit-#{@id}"}
         role="option"
-        aria-selected={to_string(@selected_commit == @id)}
+        aria-selected={to_string(@selected)}
         phx-click="select_commit"
         phx-value-id={@id}
         class="flex h-full min-w-0 flex-1 cursor-pointer items-center gap-2 pr-1 text-left focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
@@ -1421,15 +1434,15 @@ defmodule MDTClientWeb.GitLive.Components do
 
         <span class="flex min-w-0 flex-1 items-center gap-1.5">
           <span
-            :if={@row.commit.labels != []}
-            class="flex shrink-0 items-center gap-1 @[44rem]:hidden"
+            :if={@refs != []}
+            class="flex min-w-0 max-w-40 shrink-0 items-center gap-1 @[44rem]:hidden"
           >
-            <.label_chip label={hd(ordered_refs(@row.commit.labels))} compact />
+            <.label_chip label={hd(@refs)} />
             <span
-              :if={length(@row.commit.labels) > 1}
+              :if={length(@refs) > 1}
               class="shrink-0 rounded border border-line bg-deep px-1 py-px font-mono text-[10px] leading-4 text-faint"
             >
-              +{length(@row.commit.labels) - 1}
+              +{length(@refs) - 1}
             </span>
           </span>
           <span class="min-w-0 truncate text-[13px] text-ink">{@row.commit.summary}</span>
@@ -1466,7 +1479,7 @@ defmodule MDTClientWeb.GitLive.Components do
           "mr-1 flex size-5 shrink-0 cursor-pointer items-center justify-center rounded transition-all",
           "hover:bg-panel hover:text-ink focus:opacity-100 focus-visible:outline-2 focus-visible:outline-accent",
           "group-hover:opacity-100",
-          if(@selected_commit == @id,
+          if(@selected,
             do: "text-ink opacity-100",
             else: "text-faint opacity-0"
           )
@@ -1540,18 +1553,16 @@ defmodule MDTClientWeb.GitLive.Components do
   end
 
   attr :commit, :map, required: true
+  attr :refs, :list, required: true, doc: "the commit's labels, from `ref_labels/1`"
   attr :selected_branch, :string, default: nil
   attr :menu, :map, default: nil
 
   defp ref_column(assigns) do
-    refs = ordered_refs(assigns.commit.labels)
-
     assigns =
       assigns
-      |> assign(:refs, refs)
-      |> assign(:primary, hd(refs))
-      |> assign(:rest, tl(refs))
-      |> assign(:pinned?, ref_menu_open?(assigns.menu, refs))
+      |> assign(:primary, hd(assigns.refs))
+      |> assign(:rest, tl(assigns.refs))
+      |> assign(:pinned?, ref_menu_open?(assigns.menu, assigns.refs))
 
     ~H"""
     <div
@@ -1560,11 +1571,12 @@ defmodule MDTClientWeb.GitLive.Components do
       class="relative hidden h-full shrink-0 items-center justify-end gap-1 @[44rem]:flex"
       style={ref_column_style()}
     >
-      <%!-- Collapsed: the ref that matters most, plus how many sit behind it.
-            Hovering unfolds every ref into a column over the rows below,
-            starting where the stack sits, so each one can be picked or
-            right clicked for its own menu. --%>
-      <div class="flex min-w-0 items-center gap-1">
+      <%!-- Collapsed: the ref that matters most, cut short if its name does
+            not fit, plus how many sit behind it. Hovering unfolds every ref
+            into a column over the rows below, starting where the stack sits,
+            so each one can be read in full, picked, or right clicked for its
+            own menu. --%>
+      <div data-ref-stack class="flex min-w-0 items-center gap-1">
         <.ref_button
           ref={@primary}
           selected_branch={@selected_branch}
@@ -1580,7 +1592,6 @@ defmodule MDTClientWeb.GitLive.Components do
       </div>
 
       <div
-        :if={@rest != []}
         id={"git-refs-#{@commit.id}"}
         data-ref-list
         data-pinned={@pinned?}
@@ -1646,7 +1657,8 @@ defmodule MDTClientWeb.GitLive.Components do
         // pointer has to leave it to reach that menu.
         sync() {
           clearTimeout(this.timer)
-          if (this.hovered || this.focused || this.list()?.hasAttribute("data-pinned")) {
+          const wanted = this.hovered || this.focused || this.list()?.hasAttribute("data-pinned")
+          if (wanted && this.hidesSomething()) {
             if (!this.open) this.show()
           } else {
             this.timer = setTimeout(() => this.hide(), 120)
@@ -1654,6 +1666,17 @@ defmodule MDTClientWeb.GitLive.Components do
         },
 
         list() { return this.el.querySelector("[data-ref-list]") },
+
+        // A lone label that fits has nothing more to show; one whose name was
+        // cut short unfolds to show all of it.
+        hidesSomething() {
+          const list = this.list()
+          if (!list) return false
+          if (list.children.length > 1) return true
+
+          const name = this.el.querySelector("[data-ref-stack] [data-ref-name]")
+          return !!name && name.scrollWidth > name.clientWidth
+        },
 
         show() {
           const list = this.list()
@@ -1705,11 +1728,13 @@ defmodule MDTClientWeb.GitLive.Components do
 
   defp ref_button(%{ref: %Tag{}} = assigns) do
     ~H"""
-    <span class="shrink-0"><.label_chip label={@ref} /></span>
+    <span class="flex min-w-0 max-w-full"><.label_chip label={@ref} /></span>
     """
   end
 
   defp ref_button(assigns) do
+    assigns = assign(assigns, :selected?, label_selected?(assigns.ref, assigns.selected_branch))
+
     ~H"""
     <button
       type="button"
@@ -1718,11 +1743,12 @@ defmodule MDTClientWeb.GitLive.Components do
       data-menu-id={@ref.full_name}
       phx-click="select_branch"
       phx-value-name={@ref.full_name}
-      aria-pressed={to_string(@selected_branch == @ref.full_name)}
+      aria-pressed={to_string(@selected?)}
       title={chip_title(@ref)}
       class={[
-        "shrink-0 cursor-pointer rounded transition-shadow focus-visible:outline-2 focus-visible:outline-accent",
-        @selected_branch == @ref.full_name && "ring-1 ring-accent/60"
+        "flex min-w-0 max-w-full cursor-pointer rounded transition-shadow",
+        "focus-visible:outline-2 focus-visible:outline-accent",
+        @selected? && "ring-1 ring-accent/60"
       ]}
     >
       <.label_chip label={@ref} />
@@ -1740,19 +1766,50 @@ defmodule MDTClientWeb.GitLive.Components do
   defp ref_menu_open?(_menu, _refs), do: false
 
   @doc """
-  Refs in the order a reader looks for them.
+  The labels of one commit, in the order a reader looks for them.
 
-  The branch HEAD is on comes first, then the trunk names a project is most
-  likely to care about, then the remaining branches, and finally tags.
+  A local branch and the remote branches of the same name on one commit are one
+  label: the name, and where it lives. Picking the label, or opening its menu,
+  means the local branch when there is one. The branch HEAD is on comes first,
+  then the trunk names a project is most likely to care about, then the
+  remaining branches, and finally tags.
   """
-  def ordered_refs(labels), do: Enum.sort_by(labels, &ref_rank/1)
+  def ref_labels(labels) do
+    {tags, branches} = Enum.split_with(labels, &match?(%Tag{}, &1))
+
+    branches
+    |> Enum.group_by(&remote_branch_name/1)
+    |> Enum.map(fn {name, branches} -> branch_label(name, branches) end)
+    |> Kernel.++(tags)
+    |> Enum.sort_by(&ref_rank/1)
+  end
+
+  defp branch_label(name, branches) do
+    {locals, remotes} = Enum.split_with(branches, &(&1.kind == :local))
+    local = List.first(locals)
+    remotes = Enum.sort_by(remotes, & &1.name)
+
+    %{
+      name: name,
+      full_name: (local || hd(remotes)).full_name,
+      local: local,
+      remotes: remotes,
+      current?: match?(%{current?: true}, local)
+    }
+  end
+
+  # Selecting any branch a label stands for, here or in the branch panel,
+  # marks the label.
+  defp label_selected?(%{local: local, remotes: remotes}, selected_branch) do
+    Enum.any?([local | remotes], &(&1 && &1.full_name == selected_branch))
+  end
 
   defp ref_rank(%Tag{name: name}), do: {3, 0, String.downcase(name)}
   defp ref_rank(%{current?: true, name: name}), do: {0, 0, String.downcase(name)}
 
-  defp ref_rank(%{kind: kind, name: name} = branch) do
-    group = if kind == :local, do: 1, else: 2
-    {group, trunk_rank(remote_branch_name(branch)), String.downcase(name)}
+  defp ref_rank(%{local: local, name: name}) do
+    group = if local, do: 1, else: 2
+    {group, trunk_rank(name), String.downcase(name)}
   end
 
   @trunks ~w(master main dev)
@@ -1764,81 +1821,158 @@ defmodule MDTClientWeb.GitLive.Components do
     end
   end
 
-  attr :labels, :list, required: true
-  attr :limit, :integer, default: nil, doc: "how many chips to draw before collapsing the rest"
-  attr :compact, :boolean, default: false
+  attr :label, :map, required: true, doc: "a tag, or a branch label from `ref_labels/1`"
 
-  defp label_chips(assigns) do
-    # Most important first, so a collapsed chip never hides the branch HEAD is on.
-    labels = ordered_refs(assigns.labels)
-    {shown, rest} = Enum.split(labels, assigns.limit || length(labels))
-    assigns = assigns |> assign(:shown, shown) |> assign(:rest, rest)
-
-    ~H"""
-    <.label_chip :for={label <- @shown} label={label} compact={@compact} />
-    <span
-      :if={@rest != []}
-      title={Enum.map_join(@rest, ", ", & &1.name)}
-      class="shrink-0 rounded border border-line bg-deep px-1 py-px font-mono text-[10px] leading-4 text-faint"
-    >
-      +{length(@rest)}
-    </span>
-    """
-  end
-
-  attr :label, :map, required: true
-  attr :compact, :boolean, default: false, doc: "drops the remote prefix when space is tight"
-
-  defp label_chip(assigns) do
+  defp label_chip(%{label: %Tag{}} = assigns) do
     ~H"""
     <span
       title={chip_title(@label)}
-      class={[
-        "flex min-w-0 shrink items-center gap-1 rounded border px-1 py-px font-mono text-[10px] leading-4",
-        chip_tone(@label)
-      ]}
+      class={[chip_base(), "border-warn/50 bg-warn-soft/40 text-warn-strong"]}
     >
-      <.icon name={chip_icon(@label)} class="size-2.5 shrink-0" />
-      <span :if={remote_prefix?(@label, @compact)} class="shrink-0 opacity-70">
-        {@label.remote}/
-      </span>
-      <span class="truncate">{chip_name(@label, @compact)}</span>
+      <.icon name="hero-tag-micro" class="size-2.5 shrink-0" />
+      <span data-ref-name class="truncate">{@label.name}</span>
     </span>
     """
   end
 
-  # A label for a tag, a monitor for a branch that exists on this machine, a
-  # cloud for one that only exists on a remote, and a tick for the branch HEAD
-  # is on.
-  defp chip_icon(%Tag{}), do: "hero-tag-micro"
-  defp chip_icon(%{current?: true}), do: "hero-check-circle-micro"
-  defp chip_icon(%{kind: :remote}), do: "hero-cloud-micro"
-  defp chip_icon(_label), do: "hero-computer-desktop-micro"
+  # The name carries the label; a tick in front says HEAD is on it, and quieter
+  # marks behind it say where it lives: a monitor for this machine, a cloud for
+  # a remote.
+  defp label_chip(assigns) do
+    ~H"""
+    <span title={chip_title(@label)} class={[chip_base(), chip_tone(@label)]}>
+      <.icon :if={@label.current?} name="hero-check-micro" class="size-2.5 shrink-0" />
+      <span data-ref-name class="truncate">{@label.name}</span>
+      <span class="flex shrink-0 items-center gap-px opacity-70" aria-hidden="true">
+        <.icon :if={@label.local} name="hero-computer-desktop-micro" class="size-2.5" />
+        <.icon :if={@label.remotes != []} name="hero-cloud-micro" class="size-2.5" />
+      </span>
+    </span>
+    """
+  end
 
-  defp chip_tone(%Tag{}), do: "border-warn/50 bg-warn-soft/40 text-warn"
-  defp chip_tone(%{current?: true}), do: "border-ok/60 bg-ok-soft/60 text-ok"
-  defp chip_tone(%{kind: :remote}), do: "border-violet/50 bg-violet/10 text-violet"
-  defp chip_tone(_label), do: "border-accent/50 bg-accent-soft/70 text-accent"
+  defp chip_base,
+    do:
+      "flex min-w-0 shrink items-center gap-1 rounded border px-1 py-px font-mono text-[10px] leading-4"
 
-  defp remote_prefix?(%Tag{}, _compact), do: false
-
-  defp remote_prefix?(label, compact),
-    do: label.kind == :remote and not is_nil(label.remote) and not compact
-
-  defp chip_name(%Tag{name: name}, _compact), do: name
-  defp chip_name(%{kind: :remote} = label, _compact), do: remote_branch_name(label)
-  defp chip_name(label, _compact), do: label.name
+  defp chip_tone(%{current?: true}), do: "border-ok/60 bg-ok-soft/60 text-ok-strong"
+  defp chip_tone(%{local: nil}), do: "border-violet/50 bg-violet/10 text-violet-strong"
+  defp chip_tone(_label), do: "border-accent/50 bg-accent-soft/70 text-accent-strong"
 
   defp chip_title(%Tag{annotated?: true, name: name}), do: "Annotated tag #{name}"
   defp chip_title(%Tag{name: name}), do: "Tag #{name}"
-  defp chip_title(%{kind: :remote} = label), do: "Remote branch #{label.name}"
-  defp chip_title(%{current?: true} = label), do: "Current branch #{label.name}"
-  defp chip_title(label), do: "Local branch #{label.name}"
+
+  defp chip_title(%{local: nil, remotes: [remote]}), do: "Remote branch #{remote.name}"
+
+  defp chip_title(%{local: nil, remotes: remotes}),
+    do: "Remote branches #{Enum.map_join(remotes, ", ", & &1.name)}"
+
+  defp chip_title(%{local: local, remotes: remotes}) do
+    kind = if local.current?, do: "Current branch", else: "Local branch"
+
+    case remotes do
+      [] ->
+        "#{kind} #{local.name}"
+
+      remotes ->
+        "#{kind} #{local.name}, same commit as #{Enum.map_join(remotes, ", ", & &1.name)}"
+    end
+  end
+
+  # The branch panel sorts branches under Local and Remote, and keeps the mark
+  # in front of the name.
+  defp branch_icon(%{kind: :remote}), do: "hero-cloud-micro"
+  defp branch_icon(_branch), do: "hero-computer-desktop-micro"
 
   attr :commit, :map, required: true
   attr :tab, :map, required: true
 
   defp commit_menu(assigns) do
+    picked = for c <- assigns.tab.snapshot.commits, c.id in assigns.tab.selected_commits, do: c
+
+    if length(picked) > 1 and assigns.commit.id in assigns.tab.selected_commits do
+      commits_menu(assign(assigns, :picked, picked))
+    else
+      single_commit_menu(assigns)
+    end
+  end
+
+  # What can be done to every picked commit at once, each entry counting them.
+  defp commits_menu(assigns) do
+    assigns = assign(assigns, :squash_blocker, squash_blocker(assigns.tab, assigns.picked))
+
+    ~H"""
+    <.context_menu
+      id="git-commits-menu"
+      anchor={@tab.menu[:anchor] || "git-commit-menu-button-#{@commit.id}"}
+      at={@tab.menu[:at]}
+      label={"Actions for #{commits_label(length(@picked))}"}
+    >
+      <.menu_item
+        id="git-menu-cherry-pick-commits"
+        icon="hero-sparkles"
+        phx-click="request"
+        phx-value-action="cherry_pick_selection"
+      >
+        Cherry-pick {commits_label(length(@picked))}
+      </.menu_item>
+      <.menu_item
+        id="git-menu-squash-commits"
+        icon="hero-rectangle-stack"
+        disabled={not is_nil(@squash_blocker)}
+        title={@squash_blocker}
+        phx-click="prepare"
+        phx-value-action="squash"
+      >
+        Squash {commits_label(length(@picked))}…
+      </.menu_item>
+      <p
+        :if={@squash_blocker}
+        id="git-squash-blocker"
+        class="px-2 pb-1.5 pl-7.5 text-[10px] leading-snug text-faint"
+      >
+        {@squash_blocker}
+      </p>
+    </.context_menu>
+    """
+  end
+
+  # The server checks all of this again; the menu only avoids offering a squash
+  # that is bound to be refused.
+  defp squash_blocker(tab, picked) do
+    line =
+      tab
+      |> first_parent_line()
+      |> Stream.drop_while(&(&1 not in picked))
+      |> Enum.take(length(picked))
+
+    cond do
+      tab.snapshot.detached? ->
+        "Check out a branch to squash commits on it."
+
+      MapSet.new(line) != MapSet.new(picked) or Enum.any?(picked, &match?([_, _ | _], &1.parents)) ->
+        "Only consecutive commits on #{current_label(tab)}, without merges, can be squashed."
+
+      tab.changes != [] ->
+        "Commit or stash the working tree changes first."
+
+      true ->
+        nil
+    end
+  end
+
+  # HEAD, its first parent, that one's first parent, and so on down the graph.
+  defp first_parent_line(tab) do
+    Stream.unfold(tab.snapshot.head, fn
+      nil -> nil
+      id -> with %{} = commit <- tab.commits_by_id[id], do: {commit, List.first(commit.parents)}
+    end)
+  end
+
+  defp commits_label(1), do: "1 commit"
+  defp commits_label(count), do: "#{count} commits"
+
+  defp single_commit_menu(assigns) do
     ~H"""
     <.context_menu
       id={"git-commit-menu-#{@commit.id}"}
@@ -1981,6 +2115,8 @@ defmodule MDTClientWeb.GitLive.Components do
         <.branch_menu branch={branch} tab={@tab} />
       <% {:commit, commit} -> %>
         <.commit_menu commit={commit} tab={@tab} />
+      <% {:file, file} -> %>
+        <.file_menu file={file} side={@tab.menu.side} tab={@tab} />
       <% nil -> %>
     <% end %>
     """
@@ -1997,6 +2133,13 @@ defmodule MDTClientWeb.GitLive.Components do
     case Enum.find(tab.snapshot.commits, &(&1.id == id)) do
       nil -> nil
       commit -> {:commit, commit}
+    end
+  end
+
+  defp menu_target(%{menu: %{kind: :file, id: path}} = tab) do
+    case Enum.find(tab.changes, &(&1.path == path)) do
+      nil -> nil
+      file -> {:file, file}
     end
   end
 
@@ -2262,6 +2405,27 @@ defmodule MDTClientWeb.GitLive.Components do
   defp commit_details(assigns) do
     ~H"""
     <div id="git-commit-details" class="flex flex-col gap-3 p-2.5">
+      <div
+        :if={MapSet.size(@tab.selected_commits) > 1}
+        id="git-commit-selection"
+        class="flex items-center gap-1 rounded-md border border-accent/30 bg-accent-soft/30 px-2 py-1"
+      >
+        <span class="min-w-0 flex-1 truncate text-[11px] text-muted">
+          <span class="font-semibold text-ink">
+            {commits_label(MapSet.size(@tab.selected_commits))} selected
+          </span>
+          · right click one for actions
+        </span>
+        <button
+          type="button"
+          id="git-clear-commits"
+          phx-click="clear_commits"
+          class="shrink-0 cursor-pointer rounded px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink focus-visible:outline-2 focus-visible:outline-accent"
+        >
+          Clear
+        </button>
+      </div>
+
       <div>
         <div class="flex items-start gap-2">
           <p class="min-w-0 flex-1 text-[13px] font-semibold leading-snug text-ink">
@@ -2288,7 +2452,7 @@ defmodule MDTClientWeb.GitLive.Components do
       </div>
 
       <div :if={@commit.labels != []} class="flex flex-wrap gap-1">
-        <.label_chips labels={@commit.labels} />
+        <.label_chip :for={label <- ref_labels(@commit.labels)} label={label} />
       </div>
 
       <pre
@@ -2471,7 +2635,7 @@ defmodule MDTClientWeb.GitLive.Components do
       </p>
       <p class="text-[11px] leading-relaxed text-muted">{action_hint(@action)}</p>
 
-      <label :if={@action.kind != :edit_message} class="flex flex-col gap-1">
+      <label :if={@action.kind not in [:edit_message, :squash]} class="flex flex-col gap-1">
         <span class="text-[10px] uppercase tracking-wide text-faint">{action_field(@action)}</span>
         <input
           type="text"
@@ -2484,7 +2648,7 @@ defmodule MDTClientWeb.GitLive.Components do
         />
       </label>
 
-      <label :if={@action.kind == :edit_message} class="flex flex-col gap-1">
+      <label :if={@action.kind in [:edit_message, :squash]} class="flex flex-col gap-1">
         <span class="text-[10px] uppercase tracking-wide text-faint">Commit message</span>
         <textarea
           name="value"
@@ -2636,7 +2800,14 @@ defmodule MDTClientWeb.GitLive.Components do
       |> assign(:selection, MapSet.size(assigns.tab.selected_paths))
 
     ~H"""
-    <div id="git-working-tree" class="flex flex-col gap-3 p-2.5">
+    <%!-- Rows are picked by clicking them, and a right click on one opens what
+          can be done to everything picked. --%>
+    <div
+      id="git-working-tree"
+      phx-hook=".RowMenu"
+      data-select-all="select_all_paths"
+      class="flex flex-col gap-3 p-2.5"
+    >
       <%!-- Both sides stay on screen whatever the counts are, so the shape of
             the panel never changes underneath the pointer. --%>
       <.file_section
@@ -2660,114 +2831,89 @@ defmodule MDTClientWeb.GitLive.Components do
         action_label="Unstage all"
       />
 
-      <div :if={@tab.changes != []} class="flex flex-col gap-2 rounded-md border border-line-soft p-2">
-        <div class="flex items-center gap-1.5">
-          <span class="text-[10px] uppercase tracking-wide text-faint">
-            {@selection} selected
-          </span>
-          <div class="flex-1"></div>
-          <button
-            type="button"
-            id="git-select-all-paths"
-            phx-click="select_all_paths"
-            class="cursor-pointer rounded px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink focus-visible:outline-2 focus-visible:outline-accent"
-          >
-            Select all
-          </button>
-          <button
-            type="button"
-            id="git-clear-paths"
-            phx-click="clear_paths"
-            disabled={@selection == 0}
-            class="cursor-pointer rounded px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline-2 focus-visible:outline-accent"
-          >
-            Clear
-          </button>
-        </div>
-
-        <div class="flex items-center gap-1.5">
-          <.button
-            id="git-stage-selected"
-            phx-click="request"
-            phx-value-action="stage"
-            disabled={@selection == 0 or not is_nil(@tab.pending)}
-            variant="secondary"
-            class="flex-1 px-2 py-1 text-[11px]"
-          >
-            <.icon name="hero-plus-circle" class="size-3.5" /> Stage
-          </.button>
-          <.button
-            id="git-unstage-selected"
-            phx-click="request"
-            phx-value-action="unstage"
-            disabled={@selection == 0 or not is_nil(@tab.pending)}
-            variant="secondary"
-            class="flex-1 px-2 py-1 text-[11px]"
-          >
-            <.icon name="hero-minus-circle" class="size-3.5" /> Unstage
-          </.button>
-        </div>
-
-        <%!-- The message only matters once stashing is the decision, so it stays
-              out of the way until then. --%>
-        <.button
-          :if={not @tab.stashing?}
-          id="git-prepare-stash"
-          phx-click="prepare_stash"
-          disabled={@selection == 0 or not is_nil(@tab.pending)}
-          variant="secondary"
-          class="px-2 py-1 text-[11px]"
+      <div
+        :if={@tab.changes != [] and not @tab.stashing?}
+        id="git-selection"
+        class="flex items-center gap-1 px-0.5"
+      >
+        <span class="min-w-0 flex-1 truncate text-[10px] text-faint">
+          <%= if @selection == 0 do %>
+            Click to select, Shift or Ctrl to add more
+          <% else %>
+            <span class="font-semibold text-muted">{@selection} selected</span>
+            · right click for actions
+          <% end %>
+        </span>
+        <button
+          type="button"
+          id="git-select-all-paths"
+          phx-click="select_all_paths"
+          class="shrink-0 cursor-pointer rounded px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink focus-visible:outline-2 focus-visible:outline-accent"
         >
-          <.icon name="hero-archive-box-arrow-down" class="size-3.5" /> Stash selected paths
-        </.button>
-
-        <form
-          :if={@tab.stashing?}
-          id="git-stash-form"
-          phx-submit="stash_selected"
-          class="flex flex-col gap-1.5"
+          Select all
+        </button>
+        <button
+          type="button"
+          id="git-clear-paths"
+          phx-click="clear_paths"
+          disabled={@selection == 0}
+          class="shrink-0 cursor-pointer rounded px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline-2 focus-visible:outline-accent"
         >
-          <input
-            type="text"
-            name="message"
-            id="git-stash-message"
-            value={@tab.stash_message}
-            placeholder="Stash message (optional)"
-            aria-label="Stash message"
-            phx-mounted={JS.focus()}
-            class="w-full rounded border border-line bg-deep px-2 py-1 text-[11px] text-ink outline-none transition-colors placeholder:text-faint focus:border-accent/60"
-          />
-          <label class="flex cursor-pointer items-center gap-2 text-[11px] text-muted">
-            <input
-              type="checkbox"
-              name="include_untracked"
-              value="true"
-              checked={@tab.include_untracked?}
-              class="size-3.5 cursor-pointer accent-accent"
-            /> Include selected untracked files
-          </label>
-          <div class="flex items-center justify-end gap-1.5">
-            <.button
-              type="button"
-              id="git-cancel-stash"
-              phx-click="cancel_stash"
-              variant="ghost"
-              class="px-2 py-1 text-[11px]"
-            >
-              Cancel
-            </.button>
-            <.button
-              type="submit"
-              id="git-stash-selected"
-              disabled={@selection == 0 or not is_nil(@tab.pending)}
-              variant="primary"
-              class="px-2 py-1 text-[11px]"
-            >
-              Stash {@selection} path(s)
-            </.button>
-          </div>
-        </form>
+          Clear
+        </button>
       </div>
+
+      <%!-- Stashing is picked from the file menu; the message only matters once
+            it is the decision, so it stays out of the way until then. --%>
+      <form
+        :if={@tab.stashing?}
+        id="git-stash-form"
+        phx-submit="stash_selected"
+        class="flex flex-col gap-1.5 rounded-md border border-line-soft p-2"
+      >
+        <span class="text-[10px] uppercase tracking-wide text-faint">
+          Stash {files_label(@selection)}
+        </span>
+        <input
+          type="text"
+          name="message"
+          id="git-stash-message"
+          value={@tab.stash_message}
+          placeholder="Stash message (optional)"
+          aria-label="Stash message"
+          phx-mounted={JS.focus()}
+          class="w-full rounded border border-line bg-deep px-2 py-1 text-[11px] text-ink outline-none transition-colors placeholder:text-faint focus:border-accent/60"
+        />
+        <label class="flex cursor-pointer items-center gap-2 text-[11px] text-muted">
+          <input
+            type="checkbox"
+            name="include_untracked"
+            value="true"
+            checked={@tab.include_untracked?}
+            class="size-3.5 cursor-pointer accent-accent"
+          /> Include selected untracked files
+        </label>
+        <div class="flex items-center justify-end gap-1.5">
+          <.button
+            type="button"
+            id="git-cancel-stash"
+            phx-click="cancel_stash"
+            variant="ghost"
+            class="px-2 py-1 text-[11px]"
+          >
+            Cancel
+          </.button>
+          <.button
+            type="submit"
+            id="git-stash-selected"
+            disabled={@selection == 0 or not is_nil(@tab.pending)}
+            variant="primary"
+            class="px-2 py-1 text-[11px]"
+          >
+            Stash {files_label(@selection)}
+          </.button>
+        </div>
+      </form>
 
       <form
         :if={@staged != []}
@@ -2851,13 +2997,18 @@ defmodule MDTClientWeb.GitLive.Components do
 
     ~H"""
     <div
+      id={"git-file-row-#{@side}-#{slug(@file.path)}"}
+      data-menu-kind="file"
+      data-menu-id={@file.path}
+      data-menu-side={@side}
       class={[
-        "group flex items-center gap-1 rounded pr-1 transition-colors",
+        "group flex select-none items-center gap-1 rounded pr-1 transition-colors",
         cond do
+          @selected -> "bg-accent-soft text-ink"
           @open? -> "bg-active"
-          @selected -> "bg-accent-soft/60"
           true -> "hover:bg-hover"
-        end
+        end,
+        @open? && "shadow-[inset_2px_0_0_0_var(--color-accent)]"
       ]}
       style="content-visibility: auto; contain-intrinsic-size: 0 28px;"
     >
@@ -2866,19 +3017,11 @@ defmodule MDTClientWeb.GitLive.Components do
         id={"git-file-#{@side}-#{slug(@file.path)}"}
         role="option"
         aria-selected={to_string(@selected)}
-        phx-click="toggle_path"
+        phx-click="select_path"
         phx-value-path={@file.path}
+        phx-value-side={@side}
         class="flex min-w-0 flex-1 cursor-pointer items-center gap-2 px-1.5 py-1 text-left focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
       >
-        <span class={[
-          "flex size-3.5 shrink-0 items-center justify-center rounded-sm border transition-all",
-          if(@selected,
-            do: "border-accent bg-accent text-deep",
-            else: "border-line text-transparent"
-          )
-        ]}>
-          <.icon name="hero-check-micro" class="size-2.5" />
-        </span>
         <span class={[
           "w-4 shrink-0 text-center font-mono text-[10px] font-bold",
           state_color(@state)
@@ -2937,6 +3080,91 @@ defmodule MDTClientWeb.GitLive.Components do
 
   defp open_diff?(%{path: path, side: side}, path, side), do: true
   defp open_diff?(_diff, _path, _side), do: false
+
+  attr :file, :map, required: true, doc: "the file the menu was opened on"
+  attr :side, :atom, required: true
+  attr :tab, :map, required: true
+
+  # What to do with everything picked comes first, each entry counting the files
+  # it would touch; what to do with the one file under the pointer follows.
+  defp file_menu(assigns) do
+    selected =
+      Enum.filter(assigns.tab.changes, &MapSet.member?(assigns.tab.selected_paths, &1.path))
+
+    assigns =
+      assigns
+      |> assign(:count, length(selected))
+      |> assign(:stageable, Enum.count(selected, &FileChange.unstaged?/1))
+      |> assign(:unstageable, Enum.count(selected, &FileChange.staged?/1))
+
+    ~H"""
+    <.context_menu
+      id="git-file-menu"
+      anchor={@tab.menu[:anchor] || "git-file-row-#{@side}-#{slug(@file.path)}"}
+      at={@tab.menu[:at]}
+      label={"Actions for #{files_label(@count)}"}
+    >
+      <.menu_item
+        :if={@stageable > 0}
+        id="git-menu-stage-files"
+        icon="hero-plus-circle"
+        phx-click="request"
+        phx-value-action="stage"
+      >
+        Stage {files_label(@stageable)}
+      </.menu_item>
+      <.menu_item
+        :if={@unstageable > 0}
+        id="git-menu-unstage-files"
+        icon="hero-minus-circle"
+        phx-click="request"
+        phx-value-action="unstage"
+      >
+        Unstage {files_label(@unstageable)}
+      </.menu_item>
+      <.menu_item
+        id="git-menu-stash-files"
+        icon="hero-archive-box-arrow-down"
+        phx-click="prepare_stash"
+      >
+        Stash {files_label(@count)}…
+      </.menu_item>
+      <.menu_item
+        id="git-menu-discard-files"
+        icon="hero-arrow-uturn-left"
+        danger
+        phx-click="request"
+        phx-value-action="discard"
+      >
+        Discard {files_label(@count)}…
+      </.menu_item>
+
+      <.menu_separator />
+
+      <.menu_item
+        id="git-menu-view-file"
+        icon="hero-document-magnifying-glass"
+        phx-click="view_diff"
+        phx-value-path={@file.path}
+        phx-value-side={@side}
+      >
+        View changes to {Path.basename(@file.path)}
+      </.menu_item>
+      <.menu_item
+        id="git-menu-copy-path"
+        icon="hero-clipboard-document"
+        phx-hook=".Copy"
+        data-copy={@file.path}
+        phx-click="close_menu"
+      >
+        Copy path
+      </.menu_item>
+    </.context_menu>
+    """
+  end
+
+  defp files_label(1), do: "1 file"
+  defp files_label(count), do: "#{count} files"
 
   attr :tab, :map, required: true
 
@@ -3138,7 +3366,7 @@ defmodule MDTClientWeb.GitLive.Components do
             <.icon name="hero-exclamation-triangle" class="size-4 text-bad" />
           </span>
           <div class="min-w-0">
-            <p id="git-confirm-title" class="text-[13px] font-semibold text-ink">
+            <p id="git-confirm-title" class="break-words text-[13px] font-semibold text-ink">
               {@confirm.title}
             </p>
             <p class="mt-1 text-[11px] leading-relaxed text-muted">{@confirm.message}</p>
@@ -3358,6 +3586,7 @@ defmodule MDTClientWeb.GitLive.Components do
   defp action_title(%{kind: :rename_branch}), do: "Rename branch"
   defp action_title(%{kind: :checkout_remote}), do: "Check out remote branch"
   defp action_title(%{kind: :edit_message}), do: "Edit commit message"
+  defp action_title(%{kind: :squash, target: ids}), do: "Squash #{commits_label(length(ids))}"
 
   defp action_field(%{kind: :rename_branch}), do: "New name"
   defp action_field(%{kind: :checkout_remote}), do: "Local branch name"
@@ -3367,6 +3596,7 @@ defmodule MDTClientWeb.GitLive.Components do
   defp action_submit(%{kind: :rename_branch}), do: "Rename"
   defp action_submit(%{kind: :checkout_remote}), do: "Check out"
   defp action_submit(%{kind: :edit_message}), do: "Save message"
+  defp action_submit(%{kind: :squash, target: ids}), do: "Squash #{commits_label(length(ids))}"
 
   defp action_hint(%{kind: :create_branch}),
     do: "The new branch starts at the commit shown below."
@@ -3376,6 +3606,11 @@ defmodule MDTClientWeb.GitLive.Components do
 
   defp action_hint(%{kind: :checkout_remote}),
     do: "A local branch is created tracking the remote one, then checked out."
+
+  defp action_hint(%{kind: :squash}),
+    do:
+      "The commits become one, keeping the oldest one's author, with the message " <>
+        "below. Every commit after them is rewritten, so their object ids change."
 
   defp action_hint(%{kind: :edit_message}),
     do:

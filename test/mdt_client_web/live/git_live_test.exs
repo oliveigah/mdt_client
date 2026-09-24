@@ -442,9 +442,24 @@ defmodule MDTClientWeb.GitLiveTest do
 
     head = head_commit(path)
 
-    # Nothing to expand, so nothing hides the label on hover either.
+    # Nothing sits behind it; the list holds the label alone, for the browser
+    # to unfold only if the name was cut short.
     assert has_element?(view, "#git-ref-#{slug("refs/heads/main")}")
-    refute has_element?(view, "#git-refs-#{head}")
+    assert count(view, "#git-refs-#{head} > *") == 1
+  end
+
+  test "a long branch name is cut short in its column and whole on hover", context do
+    %{view: view, path: path, initial_commit: initial} = context
+    long = "feature/a-branch-name-far-too-long-for-the-column-it-sits-in"
+    commit_file(path, "second.txt", "second\n", "second commit")
+    git!(path, ["branch", long, initial])
+    open(view, path)
+
+    chip = "#git-ref-#{slug("refs/heads/#{long}")}"
+    assert has_element?(view, "#{chip}[title='Local branch #{long}'] [data-ref-name]")
+
+    unfolded = "#git-refs-#{initial} #git-ref-all-#{slug("refs/heads/#{long}")} [data-ref-name]"
+    assert view |> element(unfolded) |> render() =~ long
   end
 
   ## Commits
@@ -560,6 +575,151 @@ defmodule MDTClientWeb.GitLiveTest do
     assert render(view) =~ "a better message"
   end
 
+  ## Picking several commits
+
+  defp picked_commit_ids(view) do
+    view
+    |> render()
+    |> LazyHTML.from_fragment()
+    |> LazyHTML.query("#git-commits [role=option][aria-selected=true]")
+    |> LazyHTML.attribute("id")
+    |> Enum.map(&String.replace_prefix(&1, "git-select-commit-", ""))
+  end
+
+  defp click_commit(view, id, modifiers \\ %{}) do
+    view |> element("#git-select-commit-#{id}") |> render_click(modifiers)
+    render_async(view)
+    view
+  end
+
+  defp commit_menu(view, id) do
+    render_hook(view, "open_menu", %{"kind" => "commit", "id" => id, "x" => 10, "y" => 10})
+    render_async(view)
+    view
+  end
+
+  test "commits are picked with a click, Ctrl and Shift", context do
+    %{view: view, path: path, initial_commit: initial} = context
+    [c2, c3, c4] = for n <- 2..4, do: commit_file(path, "#{n}.txt", "#{n}\n", "commit #{n}")
+    open(view, path)
+
+    assert picked_commit_ids(view) == [c4]
+
+    click_commit(view, c2)
+    assert picked_commit_ids(view) == [c2]
+
+    click_commit(view, c4, %{"ctrlKey" => true})
+    assert picked_commit_ids(view) == [c4, c2]
+    assert view |> element("#git-commit-details") |> render() =~ "commit 4"
+
+    # Shift runs from the commit clicked last, c4, down to the one clicked.
+    click_commit(view, initial, %{"shiftKey" => true})
+    assert picked_commit_ids(view) == [c4, c3, c2, initial]
+    assert view |> element("#git-commit-selection") |> render() =~ "4 commits selected"
+
+    # Dropping the commit on show hands the inspector to the newest one left.
+    click_commit(view, initial, %{"metaKey" => true})
+    assert picked_commit_ids(view) == [c4, c3, c2]
+    assert view |> element("#git-commit-details") |> render() =~ "commit 4"
+
+    view |> element("#git-clear-commits") |> render_click()
+    assert picked_commit_ids(view) == [c4]
+    refute has_element?(view, "#git-commit-selection")
+  end
+
+  test "the menu of a pick counts the commits it would act on", context do
+    %{view: view, path: path} = context
+    [c2, c3, c4] = for n <- 2..4, do: commit_file(path, "#{n}.txt", "#{n}\n", "commit #{n}")
+    open(view, path)
+
+    click_commit(view, c3, %{"shiftKey" => true})
+    commit_menu(view, c3)
+
+    assert has_element?(view, "#git-commits-menu[role=menu]")
+    assert view |> element("#git-menu-cherry-pick-commits") |> render() =~ "Cherry-pick 2 commits"
+    assert view |> element("#git-menu-squash-commits") |> render() =~ "Squash 2 commits"
+    refute has_element?(view, "#git-menu-squash-commits[disabled]")
+
+    # A right click outside the pick takes that commit alone, with its own menu.
+    render_hook(view, "close_menu", %{})
+    commit_menu(view, c2)
+
+    assert picked_commit_ids(view) == [c2]
+    assert has_element?(view, "#git-commit-menu-#{c2}[role=menu]")
+    refute has_element?(view, "#git-commits-menu")
+    assert git!(path, ["rev-parse", "HEAD"]) == c4
+  end
+
+  test "cherry-picks the picked commits in the order they were made", context do
+    %{view: view, path: path, initial_commit: initial} = context
+    git!(path, ["checkout", "-q", "-b", "feature"])
+    f1 = commit_file(path, "f1.txt", "f1\n", "feature one")
+    f2 = commit_file(path, "f2.txt", "f2\n", "feature two")
+    git!(path, ["checkout", "-q", "main"])
+    commit_file(path, "main.txt", "main\n", "main work")
+    open(view, path)
+
+    click_commit(view, f2)
+    click_commit(view, f1, %{"ctrlKey" => true})
+    commit_menu(view, f2)
+    view |> element("#git-menu-cherry-pick-commits") |> render_click()
+    render_async(view)
+
+    assert git!(path, ["log", "--format=%s", "main"]) ==
+             "feature two\nfeature one\nmain work\ninitial commit"
+
+    assert git!(path, ["rev-parse", "main~3"]) == initial
+  end
+
+  test "squashes the picked commits under a message offered for editing", context do
+    %{view: view, path: path, initial_commit: initial} = context
+    [c2, c3, _c4] = for n <- 2..4, do: commit_file(path, "#{n}.txt", "#{n}\n", "commit #{n}")
+    open(view, path)
+
+    click_commit(view, c2)
+    click_commit(view, c3, %{"shiftKey" => true})
+    commit_menu(view, c3)
+    view |> element("#git-menu-squash-commits") |> render_click()
+
+    # The messages of both, oldest first, are there to start from.
+    assert view |> element("#git-action-value") |> render() =~ "commit 2\n\ncommit 3"
+    assert view |> element("#git-action-submit") |> render() =~ "Squash 2 commits"
+
+    view |> form("#git-action-form", %{"value" => "two and three"}) |> render_submit()
+    render_async(view)
+
+    assert git!(path, ["log", "--format=%s", "main"]) == "commit 4\ntwo and three\ninitial commit"
+    assert git!(path, ["symbolic-ref", "--short", "HEAD"]) == "main"
+    assert git!(path, ["rev-parse", "HEAD~2"]) == initial
+    assert render(view) =~ "two and three"
+  end
+
+  test "a squash that would be refused is not offered", context do
+    %{view: view, path: path} = context
+    [c2, _c3, c4] = for n <- 2..4, do: commit_file(path, "#{n}.txt", "#{n}\n", "commit #{n}")
+    open(view, path)
+
+    click_commit(view, c2)
+    click_commit(view, c4, %{"ctrlKey" => true})
+    commit_menu(view, c4)
+
+    assert has_element?(view, "#git-menu-squash-commits[disabled]")
+    assert view |> element("#git-squash-blocker") |> render() =~ "Only consecutive commits"
+    # Cherry-picking does not care whether they are next to each other.
+    refute has_element?(view, "#git-menu-cherry-pick-commits[disabled]")
+
+    render_hook(view, "close_menu", %{})
+    File.write!(Path.join(path, "README.md"), "dirty\n")
+    view |> element("#git-refresh") |> render_click()
+    render_async(view)
+
+    click_commit(view, c4)
+    click_commit(view, c2, %{"shiftKey" => true})
+    commit_menu(view, c4)
+
+    assert view |> element("#git-squash-blocker") |> render() =~ "Commit or stash"
+  end
+
   test "the graph draws one lane per concurrent branch", context do
     %{view: view, path: path} = context
 
@@ -659,24 +819,88 @@ defmodule MDTClientWeb.GitLiveTest do
     refute has_element?(view, "#git-commit-menu-#{head}")
   end
 
-  test "the graph labels local and remote branches differently", context do
-    %{view: view, path: path, base: base} = context
-
+  defp add_origin(base, path) do
     remote = Path.join(base, "remote.git")
     File.mkdir_p!(remote)
     git!(remote, ["init", "--bare"])
     git!(path, ["remote", "add", "origin", remote])
+  end
+
+  test "a branch level with its remote is one label marked with both places", context do
+    %{view: view, path: path, base: base} = context
+    add_origin(base, path)
     git!(path, ["push", "-u", "origin", "main"])
 
     open(view, path)
 
-    row = view |> element("#git-commit-#{head_commit(path)}") |> render()
+    head = head_commit(path)
+    chip = "#git-ref-#{slug("refs/heads/main")}"
 
-    assert row =~ "Current branch main"
-    assert row =~ "Remote branch origin/main"
-    assert row =~ "hero-check-circle-micro"
-    assert row =~ "hero-cloud-micro"
+    # Nothing behind it to unfold: main and origin/main are the same label.
+    assert count(view, "#git-refs-#{head} > *") == 1
+    refute has_element?(view, "#git-ref-#{slug("refs/remotes/origin/main")}")
+
+    assert has_element?(view, "#{chip}[title='Current branch main, same commit as origin/main']")
+    assert has_element?(view, "#{chip} .hero-check-micro")
+    assert has_element?(view, "#{chip} .hero-computer-desktop-micro")
+    assert has_element?(view, "#{chip} .hero-cloud-micro")
+    # The remote prefix lives in the tooltip; the chip reads as the name alone.
+    assert view |> element(chip) |> render() |> LazyHTML.from_fragment() |> LazyHTML.text() ==
+             "main"
+
     assert has_element?(view, "#git-commit-columns")
+  end
+
+  test "a branch apart from its remote gets a label on each commit", context do
+    %{view: view, path: path, base: base} = context
+    add_origin(base, path)
+    git!(path, ["push", "-u", "origin", "main"])
+    pushed = head_commit(path)
+    commit_file(path, "second.txt", "second\n", "not pushed yet")
+    git!(path, ["branch", "feature"])
+    git!(path, ["push", "origin", "feature"])
+    git!(path, ["branch", "-D", "feature"])
+
+    open(view, path)
+
+    local = "#git-ref-#{slug("refs/heads/main")}"
+    assert has_element?(view, "#{local} .hero-computer-desktop-micro")
+    refute has_element?(view, "#{local} .hero-cloud-micro")
+
+    # Only on the remote: no tick, no monitor, and it picks the remote branch.
+    remote = "#git-ref-#{slug("refs/remotes/origin/main")}"
+
+    assert has_element?(
+             view,
+             "#git-commit-#{pushed} #{remote}[title='Remote branch origin/main']"
+           )
+
+    assert has_element?(view, "#{remote} .hero-cloud-micro")
+    refute has_element?(view, "#{remote} .hero-computer-desktop-micro")
+    refute has_element?(view, "#{remote} .hero-check-micro")
+
+    feature = "#git-ref-all-#{slug("refs/remotes/origin/feature")}"
+    assert view |> element(feature) |> render() =~ ">feature<"
+
+    view |> element(remote) |> render_click()
+
+    assert has_element?(
+             view,
+             "#git-select-branch-#{slug("refs/remotes/origin/main")}[aria-selected=true]"
+           )
+  end
+
+  test "a label is marked when any branch it stands for is selected", context do
+    %{view: view, path: path, base: base} = context
+    add_origin(base, path)
+    git!(path, ["push", "-u", "origin", "main"])
+    open(view, path)
+
+    view
+    |> element("#git-select-branch-#{slug("refs/remotes/origin/main")}")
+    |> render_click()
+
+    assert has_element?(view, "#git-ref-#{slug("refs/heads/main")}[aria-pressed=true]")
   end
 
   test "refs on one commit collapse behind the one that matters most", context do
@@ -886,7 +1110,121 @@ defmodule MDTClientWeb.GitLiveTest do
     assert has_element?(view, "#git-file-unstaged-#{slug("README.md")}")
   end
 
-  test "stages and unstages only the selected paths", context do
+  # What the file list's hook sends on a right click.
+  defp file_menu(view, path, side \\ "unstaged") do
+    render_hook(view, "open_menu", %{
+      "kind" => "file",
+      "id" => path,
+      "side" => side,
+      "anchor" => "git-file-row-#{side}-#{slug(path)}",
+      "x" => 10,
+      "y" => 10
+    })
+
+    view
+  end
+
+  defp click_file(view, path, modifiers \\ %{}, side \\ "unstaged") do
+    view |> element("#git-file-#{side}-#{slug(path)}") |> render_click(modifiers)
+    view
+  end
+
+  defp selected_files(view) do
+    view
+    |> render()
+    |> LazyHTML.from_fragment()
+    |> LazyHTML.query("#git-working-tree [role=option][aria-selected=true]")
+    |> LazyHTML.attribute("id")
+  end
+
+  defp file_ids(side, paths), do: Enum.map(paths, &"git-file-#{side}-#{slug(&1)}")
+
+  test "a click picks one file, Ctrl adds or drops one, Shift takes a range", context do
+    %{view: view, path: path} = context
+    for name <- ~w(a b c d e), do: File.write!(Path.join(path, "#{name}.txt"), name)
+    open(view, path)
+    view |> element("#git-panel-changes") |> render_click()
+
+    assert selected_files(view) == []
+
+    click_file(view, "b.txt")
+    assert selected_files(view) == file_ids("unstaged", ~w(b.txt))
+
+    # A plain click starts over.
+    click_file(view, "d.txt")
+    assert selected_files(view) == file_ids("unstaged", ~w(d.txt))
+
+    click_file(view, "a.txt", %{"ctrlKey" => true})
+    click_file(view, "e.txt", %{"metaKey" => true})
+    assert selected_files(view) == file_ids("unstaged", ~w(a.txt d.txt e.txt))
+
+    click_file(view, "d.txt", %{"ctrlKey" => true})
+    assert selected_files(view) == file_ids("unstaged", ~w(a.txt e.txt))
+
+    # Shift reaches from the file clicked last, d, and replaces the rest.
+    click_file(view, "b.txt", %{"shiftKey" => true})
+    assert selected_files(view) == file_ids("unstaged", ~w(b.txt c.txt d.txt))
+
+    # With Ctrl held too, the range adds to what is already picked.
+    click_file(view, "a.txt", %{"ctrlKey" => true})
+    click_file(view, "c.txt", %{"shiftKey" => true, "ctrlKey" => true})
+    assert selected_files(view) == file_ids("unstaged", ~w(a.txt b.txt c.txt d.txt))
+
+    view |> element("#git-clear-paths") |> render_click()
+    assert selected_files(view) == []
+
+    view |> element("#git-select-all-paths") |> render_click()
+    assert length(selected_files(view)) == 5
+  end
+
+  test "a Shift range runs on from the unstaged list into the staged one", context do
+    %{view: view, path: path} = context
+    for name <- ~w(a b c), do: File.write!(Path.join(path, "#{name}.txt"), name)
+    git!(path, ["add", "a.txt"])
+    open(view, path)
+    view |> element("#git-panel-changes") |> render_click()
+
+    click_file(view, "c.txt")
+    click_file(view, "a.txt", %{"shiftKey" => true}, "staged")
+
+    assert selected_files(view) ==
+             file_ids("unstaged", ~w(c.txt)) ++ file_ids("staged", ~w(a.txt))
+
+    # A Shift click with nothing picked yet just picks the one file.
+    view |> element("#git-clear-paths") |> render_click()
+    click_file(view, "b.txt", %{"shiftKey" => true})
+    assert selected_files(view) == file_ids("unstaged", ~w(b.txt))
+  end
+
+  test "the file menu counts what each action would touch", context do
+    %{view: view, path: path} = context
+    for name <- ~w(one two three), do: File.write!(Path.join(path, "#{name}.txt"), name)
+    git!(path, ["add", "one.txt"])
+    open(view, path)
+    view |> element("#git-panel-changes") |> render_click()
+
+    view |> element("#git-select-all-paths") |> render_click()
+    file_menu(view, "two.txt")
+
+    assert has_element?(view, "#git-file-menu[role=menu]")
+    assert view |> element("#git-menu-stage-files") |> render() =~ "Stage 2 files"
+    assert view |> element("#git-menu-unstage-files") |> render() =~ "Unstage 1 file"
+    assert view |> element("#git-menu-stash-files") |> render() =~ "Stash 3 files"
+    assert view |> element("#git-menu-discard-files") |> render() =~ "Discard 3 files"
+    assert view |> element("#git-menu-view-file") |> render() =~ "two.txt"
+
+    # A right click outside the selection picks that file alone, and with
+    # nothing staged among the pick there is nothing to unstage.
+    render_hook(view, "close_menu", %{})
+    click_file(view, "one.txt", %{}, "staged")
+    file_menu(view, "three.txt")
+
+    assert selected_files(view) == file_ids("unstaged", ~w(three.txt))
+    assert view |> element("#git-menu-stage-files") |> render() =~ "Stage 1 file"
+    refute has_element?(view, "#git-menu-unstage-files")
+  end
+
+  test "stages and unstages the selected paths from the file menu", context do
     %{view: view, path: path} = context
 
     File.write!(Path.join(path, "one.txt"), "one\n")
@@ -894,38 +1232,38 @@ defmodule MDTClientWeb.GitLiveTest do
     open(view, path)
 
     view |> element("#git-panel-changes") |> render_click()
-    view |> element("#git-file-unstaged-#{slug("one.txt")}") |> render_click()
-
-    assert has_element?(view, "#git-file-unstaged-#{slug("one.txt")}[aria-selected=true]")
-
-    view |> element("#git-stage-selected") |> render_click()
+    click_file(view, "one.txt")
+    file_menu(view, "one.txt")
+    view |> element("#git-menu-stage-files") |> render_click()
     render_async(view)
 
     assert git!(path, ["diff", "--cached", "--name-only"]) == "one.txt"
     assert has_element?(view, "#git-file-staged-#{slug("one.txt")}")
     refute has_element?(view, "#git-file-staged-#{slug("two.txt")}")
+    refute has_element?(view, "#git-file-menu")
 
     # The refresh keeps the path selected, so it can be sent straight back.
     assert has_element?(view, "#git-file-staged-#{slug("one.txt")}[aria-selected=true]")
-    view |> element("#git-unstage-selected") |> render_click()
+    file_menu(view, "one.txt", "staged")
+    view |> element("#git-menu-unstage-files") |> render_click()
     render_async(view)
 
     assert git!(path, ["diff", "--cached", "--name-only"]) == ""
   end
 
-  test "stage is disabled until something is selected", context do
+  test "the file menu opens a diff of the file under the pointer", context do
     %{view: view, path: path} = context
-    File.write!(Path.join(path, "one.txt"), "one\n")
+    File.write!(Path.join(path, "README.md"), "changed\n")
     open(view, path)
 
     view |> element("#git-panel-changes") |> render_click()
-    assert has_element?(view, "#git-stage-selected[disabled]")
+    file_menu(view, "README.md")
+    view |> element("#git-menu-view-file") |> render_click()
+    render_async(view)
 
-    view |> element("#git-select-all-paths") |> render_click()
-    refute has_element?(view, "#git-stage-selected[disabled]")
-
-    view |> element("#git-clear-paths") |> render_click()
-    assert has_element?(view, "#git-stage-selected[disabled]")
+    refute has_element?(view, "#git-file-menu")
+    assert render(view) =~ "changed"
+    assert has_element?(view, "#git-diff-unstaged-#{slug("README.md")}")
   end
 
   test "stashes only the selected paths and lists the stash", context do
@@ -936,12 +1274,14 @@ defmodule MDTClientWeb.GitLiveTest do
     open(view, path)
 
     view |> element("#git-panel-changes") |> render_click()
-    view |> element("#git-file-unstaged-#{slug("README.md")}") |> render_click()
+    click_file(view, "README.md")
 
     # The message box only turns up once stashing is the decision.
     refute has_element?(view, "#git-stash-message")
-    view |> element("#git-prepare-stash") |> render_click()
+    file_menu(view, "README.md")
+    view |> element("#git-menu-stash-files") |> render_click()
     assert has_element?(view, "#git-stash-message")
+    refute has_element?(view, "#git-file-menu")
 
     view
     |> form("#git-stash-form", %{"message" => "just the readme", "include_untracked" => "true"})
@@ -964,6 +1304,52 @@ defmodule MDTClientWeb.GitLiveTest do
     assert has_element?(view, "#git-stashes-empty")
   end
 
+  test "discards only the selected paths once confirmed", context do
+    %{view: view, path: path} = context
+
+    File.write!(Path.join(path, "README.md"), "changed\n")
+    File.write!(Path.join(path, "scratch.txt"), "scratch\n")
+    File.write!(Path.join(path, "keep.txt"), "keep\n")
+    open(view, path)
+
+    view |> element("#git-panel-changes") |> render_click()
+    click_file(view, "README.md")
+    click_file(view, "scratch.txt", %{"ctrlKey" => true})
+    file_menu(view, "scratch.txt")
+    view |> element("#git-menu-discard-files") |> render_click()
+
+    # Nothing is lost until the question is answered.
+    assert has_element?(view, "#git-confirm")
+    assert render(view) =~ "Discard changes to 2 files?"
+    assert File.read!(Path.join(path, "README.md")) == "changed\n"
+    assert File.exists?(Path.join(path, "scratch.txt"))
+
+    view |> element("#git-confirm-accept") |> render_click()
+    render_async(view)
+
+    assert File.read!(Path.join(path, "README.md")) == "initial\n"
+    refute File.exists?(Path.join(path, "scratch.txt"))
+    assert File.read!(Path.join(path, "keep.txt")) == "keep\n"
+    refute has_element?(view, "#git-file-unstaged-#{slug("README.md")}")
+    assert has_element?(view, "#git-file-unstaged-#{slug("keep.txt")}[aria-selected=false]")
+    assert selected_files(view) == []
+  end
+
+  test "a discard can be called off", context do
+    %{view: view, path: path} = context
+    File.write!(Path.join(path, "README.md"), "changed\n")
+    open(view, path)
+
+    view |> element("#git-panel-changes") |> render_click()
+    file_menu(view, "README.md")
+    view |> element("#git-menu-discard-files") |> render_click()
+    view |> element("#git-confirm-cancel") |> render_click()
+
+    refute has_element?(view, "#git-confirm")
+    assert File.read!(Path.join(path, "README.md")) == "changed\n"
+    assert has_element?(view, "#git-file-unstaged-#{slug("README.md")}[aria-selected=true]")
+  end
+
   test "committing the staged files refreshes the graph", context do
     %{view: view, path: path} = context
 
@@ -971,8 +1357,7 @@ defmodule MDTClientWeb.GitLiveTest do
     open(view, path)
 
     view |> element("#git-panel-changes") |> render_click()
-    view |> element("#git-select-all-paths") |> render_click()
-    view |> element("#git-stage-selected") |> render_click()
+    view |> element("#git-unstaged-all") |> render_click()
     render_async(view)
 
     view |> form("#git-commit-form", %{"message" => "from the inspector"}) |> render_submit()
@@ -1127,7 +1512,8 @@ defmodule MDTClientWeb.GitLiveTest do
 
     view |> element("#git-panel-changes") |> render_click()
     view |> element("#git-select-all-paths") |> render_click()
-    view |> element("#git-prepare-stash") |> render_click()
+    file_menu(view, "README.md")
+    view |> element("#git-menu-stash-files") |> render_click()
 
     view
     |> form("#git-stash-form", %{"message" => "left panel stash", "include_untracked" => "true"})
@@ -1224,13 +1610,15 @@ defmodule MDTClientWeb.GitLiveTest do
 
     view |> element("#git-panel-changes") |> render_click()
     view |> element("#git-select-all-paths") |> render_click()
-    view |> element("#git-prepare-stash") |> render_click()
+    file_menu(view, "one.txt")
+    view |> element("#git-menu-stash-files") |> render_click()
     assert has_element?(view, "#git-stash-form")
+    refute has_element?(view, "#git-selection")
 
     view |> element("#git-cancel-stash") |> render_click()
 
     refute has_element?(view, "#git-stash-form")
-    assert has_element?(view, "#git-prepare-stash")
+    assert has_element?(view, "#git-selection")
     assert has_element?(view, "#git-stashes-empty")
   end
 
