@@ -50,6 +50,8 @@ defmodule MDTClientWeb do
     quote do
       use Phoenix.LiveView
 
+      import MDTClientWeb.Notices, only: [put_notice: 3, put_notice: 4]
+
       unquote(html_helpers())
     end
   end

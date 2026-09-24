@@ -2274,18 +2274,6 @@ defmodule MDTClientWeb.GitLive.Components do
 
       <div class="min-h-0 flex-1 overflow-y-auto">
         <.operation_banner :if={@tab.snapshot.operation} tab={@tab} />
-        <div :if={@tab.notices != []} id="git-notices" class="m-2.5 space-y-2.5">
-          <%= for notice <- ordered_notices(@tab.notices) do %>
-            <.error_notice
-              :if={notice.kind == :error}
-              id={"git-notice-#{notice.id}"}
-              error={notice.content}
-              dismiss_id={notice.id}
-              class=""
-            />
-            <.result_notice :if={notice.kind == :success} notice={notice} />
-          <% end %>
-        </div>
         <.action_form :if={@tab.action} tab={@tab} />
 
         <%= cond do %>
@@ -2306,11 +2294,6 @@ defmodule MDTClientWeb.GitLive.Components do
       </div>
     </aside>
     """
-  end
-
-  defp ordered_notices(notices) do
-    Enum.filter(notices, &(&1.kind == :error)) ++
-      Enum.filter(notices, &(&1.kind == :success))
   end
 
   attr :tab, :map, required: true
@@ -3216,7 +3199,6 @@ defmodule MDTClientWeb.GitLive.Components do
   attr :id, :string, default: nil
   attr :error, :map, required: true
   attr :class, :any, default: "mt-4"
-  attr :dismiss_id, :string, default: nil
 
   def error_notice(assigns) do
     ~H"""
@@ -3255,54 +3237,6 @@ defmodule MDTClientWeb.GitLive.Components do
           phx-no-curly-interpolation
         ><%= String.trim(@error.message) %></pre>
       </div>
-      <button
-        :if={@dismiss_id}
-        type="button"
-        id={"git-dismiss-notice-#{@dismiss_id}"}
-        phx-click="dismiss_notice"
-        phx-value-id={@dismiss_id}
-        title="Dismiss"
-        aria-label="Dismiss error"
-        class="flex size-5 shrink-0 cursor-pointer items-center justify-center rounded text-faint transition-colors hover:bg-hover hover:text-ink"
-      >
-        <.icon name="hero-x-mark" class="size-3.5" />
-      </button>
-    </div>
-    """
-  end
-
-  attr :notice, :map, required: true
-
-  def result_notice(assigns) do
-    ~H"""
-    <div
-      id={"git-notice-#{@notice.id}"}
-      role="status"
-      phx-hook="NoticeTimer"
-      data-notice-id={@notice.id}
-      data-timeout="6000"
-      class="flex items-start gap-2 rounded-md border border-ok/30 bg-ok-soft/20 p-2.5"
-    >
-      <.icon name="hero-check-circle" class="mt-px size-4 shrink-0 text-ok" />
-      <div class="min-w-0 flex-1">
-        <p class="text-[11px] font-semibold text-ok">{result_title(@notice.content)}</p>
-        <pre
-          :if={@notice.content.output != ""}
-          class="mt-0.5 max-h-28 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-muted"
-          phx-no-curly-interpolation
-        ><%= @notice.content.output %></pre>
-      </div>
-      <button
-        type="button"
-        id={"git-dismiss-notice-#{@notice.id}"}
-        phx-click="dismiss_notice"
-        phx-value-id={@notice.id}
-        title="Dismiss"
-        aria-label="Dismiss"
-        class="flex size-5 shrink-0 cursor-pointer items-center justify-center rounded text-faint transition-colors hover:bg-hover hover:text-ink"
-      >
-        <.icon name="hero-x-mark" class="size-3.5" />
-      </button>
     </div>
     """
   end
@@ -3527,17 +3461,14 @@ defmodule MDTClientWeb.GitLive.Components do
   defp skippable?(%Operation{kind: kind}), do: kind in [:rebase, :cherry_pick, :revert]
   defp abortable?(%Operation{kind: kind}), do: kind in [:merge, :rebase, :cherry_pick, :revert]
 
-  defp error_title(%{kind: :conflict}), do: "Stopped for conflict resolution"
-  defp error_title(%{kind: :invalid_repository}), do: "Not a Git worktree"
-  defp error_title(%{kind: :git_not_found}), do: "Git is unavailable"
-  defp error_title(%{kind: :invalid_argument}), do: "That will not work"
-  defp error_title(%{kind: :unsupported}), do: "Not supported here"
-  defp error_title(%{kind: :invalid_output}), do: "Unexpected Git output"
-  defp error_title(_error), do: "Git reported a problem"
-
-  defp result_title(%{action: action}) do
-    action |> to_string() |> String.replace("_", " ") |> String.capitalize()
-  end
+  @doc "A heading for a Git error, shown above its message."
+  def error_title(%{kind: :conflict}), do: "Stopped for conflict resolution"
+  def error_title(%{kind: :invalid_repository}), do: "Not a Git worktree"
+  def error_title(%{kind: :git_not_found}), do: "Git is unavailable"
+  def error_title(%{kind: :invalid_argument}), do: "That will not work"
+  def error_title(%{kind: :unsupported}), do: "Not supported here"
+  def error_title(%{kind: :invalid_output}), do: "Unexpected Git output"
+  def error_title(_error), do: "Git reported a problem"
 
   defp action_title(%{kind: :create_branch}), do: "Create branch"
   defp action_title(%{kind: :rename_branch}), do: "Rename branch"

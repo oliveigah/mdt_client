@@ -6,6 +6,7 @@ defmodule MDTClientWeb.Layouts do
   use MDTClientWeb, :html
 
   alias MDTClient.Tools
+  alias MDTClientWeb.Notices
 
   # Embed all files in layouts/* within this module.
   # The default root.html.heex file contains the HTML
@@ -34,6 +35,7 @@ defmodule MDTClientWeb.Layouts do
 
   attr :tool, :map, default: nil, doc: "the tool currently open, see `MDTClient.Tools`"
   attr :chrome, :boolean, default: true, doc: "renders the title bar"
+  attr :notices, :list, default: [], doc: "the notices to float, see `MDTClientWeb.Notices`"
 
   slot :inner_block, required: true
 
@@ -53,34 +55,11 @@ defmodule MDTClientWeb.Layouts do
           <span class="text-[13px] font-semibold tracking-wide text-ink">MDT</span>
         </.link>
 
-        <%= if @tool do %>
-          <span class="text-faint">/</span>
-          <span class="flex items-center gap-1.5 text-xs text-muted">
-            <.icon name={@tool.icon} class="size-3.5" />
-            {@tool.name}
-          </span>
-        <% end %>
+        <div class="mx-1 h-4 w-px bg-line"></div>
+
+        <.tool_switcher current={@tool} />
 
         <div class="flex-1"></div>
-
-        <nav class="flex items-center gap-0.5">
-          <.link
-            :for={tool <- Tools.all()}
-            navigate={tool.path}
-            title={tool.name}
-            class={[
-              "flex size-7 items-center justify-center rounded transition-colors",
-              if(@tool && @tool.id == tool.id,
-                do: "bg-active text-ink",
-                else: "text-muted hover:bg-hover hover:text-ink"
-              )
-            ]}
-          >
-            <.icon name={tool.icon} class="size-4" />
-          </.link>
-        </nav>
-
-        <div class="mx-1 h-4 w-px bg-line"></div>
 
         <.theme_toggle />
 
@@ -115,7 +94,49 @@ defmodule MDTClientWeb.Layouts do
       </main>
 
       <.flash_group flash={@flash} />
+      <.notice_group notices={@notices} />
     </div>
+    """
+  end
+
+  @doc """
+  Switches between tools, naming every one of them and marking the one open.
+  """
+  attr :current, :map, default: nil, doc: "the tool currently open, if any"
+
+  def tool_switcher(assigns) do
+    ~H"""
+    <nav
+      id="tool-switcher"
+      aria-label="Tools"
+      class="flex items-center gap-0.5"
+    >
+      <.link
+        :for={tool <- Tools.all()}
+        id={"tool-switch-#{tool.id}"}
+        navigate={tool.path}
+        aria-current={@current && @current.id == tool.id && "page"}
+        class={[
+          "group flex h-6 items-center gap-1.5 rounded px-2 text-xs transition-colors",
+          if(@current && @current.id == tool.id,
+            do: "bg-active font-medium text-ink",
+            else: "text-muted hover:bg-hover hover:text-ink"
+          )
+        ]}
+      >
+        <.icon
+          name={tool.icon}
+          class={[
+            "size-3.5 transition-colors",
+            if(@current && @current.id == tool.id,
+              do: "text-accent",
+              else: "text-faint group-hover:text-muted"
+            )
+          ]}
+        />
+        {tool.name}
+      </.link>
+    </nav>
     """
   end
 
@@ -184,6 +205,105 @@ defmodule MDTClientWeb.Layouts do
     </svg>
     """
   end
+
+  @doc """
+  Floats the notices raised through `MDTClientWeb.Notices` in the bottom left
+  corner, the ones waiting to be dismissed ahead of the ones leaving on their own.
+
+  The padding stands in for the corner offset so the cards' shadows are not
+  clipped when a long stack has to scroll.
+  """
+  attr :notices, :list, required: true
+
+  def notice_group(assigns) do
+    {persistent, passing} = Enum.split_with(assigns.notices, &Notices.persistent?/1)
+    assigns = assign(assigns, :notices, persistent ++ passing)
+
+    ~H"""
+    <div
+      :if={@notices != []}
+      id="notices"
+      aria-live="polite"
+      class="pointer-events-none fixed bottom-0 left-0 z-50 flex max-h-[calc(100vh-2.25rem)] w-[25.5rem] max-w-full flex-col gap-2 overflow-y-auto p-3"
+    >
+      <.notice :for={notice <- @notices} notice={notice} />
+    </div>
+    """
+  end
+
+  attr :notice, :map, required: true
+
+  defp notice(assigns) do
+    assigns = assign(assigns, :persistent?, Notices.persistent?(assigns.notice))
+
+    ~H"""
+    <div
+      id={"notice-#{@notice.id}"}
+      role={if @persistent?, do: "alert", else: "status"}
+      phx-hook={if not @persistent?, do: "NoticeTimer"}
+      data-notice-id={@notice.id}
+      data-timeout={if not @persistent?, do: "6000"}
+      class={[
+        "pointer-events-auto flex shrink-0 items-start gap-2.5 rounded-lg border bg-panel px-3 py-2.5",
+        "shadow-lg shadow-black/10 dark:shadow-black/40",
+        "transition duration-150 ease-out motion-safe:starting:translate-y-1.5 starting:opacity-0",
+        notice_border(@notice.kind)
+      ]}
+    >
+      <.icon
+        name={notice_icon(@notice.kind)}
+        class={["mt-px size-4 shrink-0", notice_tone(@notice.kind)]}
+      />
+      <div class="min-w-0 flex-1">
+        <div class="flex items-baseline gap-2">
+          <p class={["min-w-0 flex-1 text-[11px] font-semibold", notice_tone(@notice.kind)]}>
+            {@notice.title}
+          </p>
+          <span
+            :if={@notice.source}
+            class="max-w-[40%] shrink-0 truncate font-mono text-[10px] text-faint"
+          >
+            {@notice.source}
+          </span>
+        </div>
+        <pre
+          :if={@notice.body not in [nil, ""]}
+          class={[
+            "mt-0.5 max-h-40 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed",
+            if(@persistent?, do: "text-ink/90", else: "text-muted")
+          ]}
+          phx-no-curly-interpolation
+        ><%= @notice.body %></pre>
+      </div>
+      <button
+        type="button"
+        id={"dismiss-notice-#{@notice.id}"}
+        phx-click="dismiss_notice"
+        phx-value-id={@notice.id}
+        title="Dismiss"
+        aria-label="Dismiss"
+        class="flex size-5 shrink-0 cursor-pointer items-center justify-center rounded text-faint transition-colors hover:bg-hover hover:text-ink"
+      >
+        <.icon name="hero-x-mark" class="size-3.5" />
+      </button>
+    </div>
+    """
+  end
+
+  defp notice_icon(:success), do: "hero-check-circle"
+  defp notice_icon(:info), do: "hero-information-circle"
+  defp notice_icon(:warning), do: "hero-exclamation-triangle"
+  defp notice_icon(:error), do: "hero-exclamation-circle"
+
+  defp notice_tone(:success), do: "text-ok"
+  defp notice_tone(:info), do: "text-accent"
+  defp notice_tone(:warning), do: "text-warn"
+  defp notice_tone(:error), do: "text-bad"
+
+  defp notice_border(:success), do: "border-ok/30"
+  defp notice_border(:info), do: "border-accent/40"
+  defp notice_border(:warning), do: "border-warn/40"
+  defp notice_border(:error), do: "border-bad/40"
 
   @doc """
   Shows the flash group with standard titles and content.

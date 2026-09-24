@@ -15,7 +15,7 @@ defmodule MDTClientWeb.ToolsLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_scope={@current_scope}>
+    <Layouts.app flash={@flash} current_scope={@current_scope} notices={@notices}>
       <div class="flex min-h-0 flex-1 items-center justify-center overflow-y-auto p-6">
         <div class="w-full max-w-2xl">
           <header class="mb-6">
@@ -30,7 +30,7 @@ defmodule MDTClientWeb.ToolsLive do
           </div>
 
           <p class="mt-6 text-[11px] text-faint">
-            Tip: switch tools any time from the icons in the title bar.
+            Tip: switch tools any time from the title bar.
           </p>
         </div>
       </div>

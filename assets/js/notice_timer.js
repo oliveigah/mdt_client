@@ -1,5 +1,6 @@
-// Each successful Git action keeps its own visible-time countdown. LiveView
-// removes the hook when a notice is dismissed or its repository tab is hidden.
+// Each notice that leaves on its own keeps its own visible-time countdown,
+// paused while it is hovered or focused. LiveView removes the hook when the
+// notice is dismissed.
 export const NoticeTimer = {
   mounted() {
     this.remaining = Number(this.el.dataset.timeout)

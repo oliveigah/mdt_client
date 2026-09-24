@@ -50,7 +50,7 @@ defmodule MDTClientWeb.HttpClientLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_scope={@current_scope} tool={@tool}>
+    <Layouts.app flash={@flash} current_scope={@current_scope} tool={@tool} notices={@notices}>
       <div
         class="flex min-h-0 flex-1 overflow-hidden"
         phx-window-keydown="maybe_send"

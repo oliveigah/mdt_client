@@ -26,7 +26,11 @@ defmodule MDTClientWeb.Router do
     delete "/logout", SessionController, :delete
 
     live_session :app,
-      on_mount: [{MDTClientWeb.UserAuth, :unlocked}, {MDTClientWeb.Hooks.Theme, :default}] do
+      on_mount: [
+        {MDTClientWeb.UserAuth, :unlocked},
+        {MDTClientWeb.Hooks.Theme, :default},
+        {MDTClientWeb.Notices, :default}
+      ] do
       live "/tools", ToolsLive
       live "/tools/http", HttpClientLive
       live "/tools/git", GitLive

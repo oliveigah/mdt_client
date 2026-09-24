@@ -76,7 +76,7 @@ defmodule MDTClientWeb.GitLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_scope={@current_scope} tool={@tool}>
+    <Layouts.app flash={@flash} current_scope={@current_scope} tool={@tool} notices={@notices}>
       <div
         class="flex min-h-0 flex-1 flex-col overflow-hidden"
         phx-window-keydown="close_overlays"
@@ -390,15 +390,6 @@ defmodule MDTClientWeb.GitLive do
     end
   end
 
-  @impl true
-  def handle_event("dismiss_notice", %{"id" => id}, socket) do
-    {:noreply,
-     update_tab(
-       socket,
-       &%{&1 | notices: Enum.reject(&1.notices, fn notice -> notice.id == id end)}
-     )}
-  end
-
   ## SSH credentials
 
   @impl true
@@ -684,6 +675,7 @@ defmodule MDTClientWeb.GitLive do
             {:noreply,
              socket
              |> put_tab(tab.id, fn _current -> tab end)
+             |> notify(tab, state)
              |> refresh_reads(state)}
 
           _unchanged_or_busy ->
@@ -782,11 +774,9 @@ defmodule MDTClientWeb.GitLive do
         error = Error.new(:command_failed, "The Git command stopped: #{inspect(reason)}")
 
         {:noreply,
-         put_tab(socket, tab.id, fn current ->
-           current
-           |> Map.merge(%{pending: nil, pending_label: nil})
-           |> add_notice(:error, error)
-         end)}
+         socket
+         |> put_tab(tab.id, &Map.merge(&1, %{pending: nil, pending_label: nil}))
+         |> notify(tab, {:error, error})}
 
       _stale ->
         {:noreply, socket}
@@ -955,7 +945,6 @@ defmodule MDTClientWeb.GitLive do
       menu: nil,
       action: nil,
       confirm: nil,
-      notices: [],
       pending: nil,
       pending_label: nil,
       stash_message: "",
@@ -1285,6 +1274,8 @@ defmodule MDTClientWeb.GitLive do
 
     socket
     |> put_tab(tab.id, fn _current -> tab end)
+    |> notify(tab, state)
+    |> notify(tab, result)
     |> refresh_reads(state)
   end
 
@@ -1342,7 +1333,7 @@ defmodule MDTClientWeb.GitLive do
     }
   end
 
-  defp apply_state(tab, {:error, %Error{} = error}), do: add_notice(tab, :error, error)
+  defp apply_state(tab, {:error, %Error{}}), do: tab
 
   defp clear_refresh_check(socket, tab_id) do
     assign(socket, :refresh_checks, Map.delete(socket.assigns.refresh_checks, tab_id))
@@ -1411,8 +1402,6 @@ defmodule MDTClientWeb.GitLive do
   defp apply_result(tab, :ok), do: tab
 
   defp apply_result(tab, {:ok, %CommandResult{} = result}) do
-    tab = add_notice(tab, :success, result)
-
     # The draft that produced the commit or stash is spent once Git accepted it.
     case result.action do
       :commit -> %{tab | commit_message: ""}
@@ -1422,10 +1411,7 @@ defmodule MDTClientWeb.GitLive do
   end
 
   defp apply_result(tab, {:error, %Error{} = error}) do
-    tab =
-      tab
-      |> add_notice(:error, error)
-      |> Map.put(:ssh_open?, tab.ssh_open? or https_authentication_error?(error))
+    tab = Map.put(tab, :ssh_open?, tab.ssh_open? or https_authentication_error?(error))
 
     cond do
       error.kind == :conflict -> %{tab | panel: "changes"}
@@ -1434,14 +1420,25 @@ defmodule MDTClientWeb.GitLive do
     end
   end
 
-  defp add_notice(tab, kind, content) do
-    notice = %{
-      id: Integer.to_string(System.unique_integer([:positive])),
-      kind: kind,
-      content: content
-    }
+  # Outcomes are told through the app wide notices, which outlive switching tabs,
+  # so each one names the repository it came from.
+  defp notify(socket, tab, {:error, %Error{} = error}) do
+    kind = if error.kind == :conflict, do: :warning, else: :error
 
-    %{tab | notices: tab.notices ++ [notice]}
+    put_notice(socket, kind, Components.error_title(error),
+      body: String.trim(error.message),
+      source: tab.name
+    )
+  end
+
+  defp notify(socket, tab, {:ok, %CommandResult{} = result}) do
+    put_notice(socket, :success, result_title(result), body: result.output, source: tab.name)
+  end
+
+  defp notify(socket, _tab, _quiet), do: socket
+
+  defp result_title(%CommandResult{action: action}) do
+    action |> to_string() |> String.replace("_", " ") |> String.capitalize()
   end
 
   defp https_authentication_error?(%Error{message: message}) do

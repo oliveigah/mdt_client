@@ -37,7 +37,7 @@ defmodule MDTClientWeb.GitLiveTest do
     view
     |> render()
     |> LazyHTML.from_fragment()
-    |> LazyHTML.query("#git-notices > *")
+    |> LazyHTML.query("#notices > *")
     |> LazyHTML.attribute("id")
   end
 
@@ -1023,7 +1023,7 @@ defmodule MDTClientWeb.GitLiveTest do
     render_hook(view, "request", %{"action" => "merge", "revision" => "does-not-exist"})
     render_async(view)
 
-    assert count(view, "#git-notices > [role=alert]") == 1
+    assert count(view, "#notices > [role=alert]") == 1
     assert render(view) =~ "Git reported a problem"
   end
 
@@ -1043,11 +1043,11 @@ defmodule MDTClientWeb.GitLiveTest do
 
     assert first != second
 
-    assert count(view, "#git-notices > [role=status][phx-hook=NoticeTimer][data-timeout='6000']") ==
+    assert count(view, "#notices > [role=status][phx-hook=NoticeTimer][data-timeout='6000']") ==
              2
 
     view
-    |> element("#git-dismiss-notice-#{String.replace_prefix(first, "git-notice-", "")}")
+    |> element("#dismiss-notice-#{String.replace_prefix(first, "notice-", "")}")
     |> render_click()
 
     assert notice_ids(view) == [second]
@@ -1080,10 +1080,36 @@ defmodule MDTClientWeb.GitLiveTest do
     assert notice_ids(view) == [first_error, second_error, success, later_success]
 
     view
-    |> element("#git-dismiss-notice-#{String.replace_prefix(first_error, "git-notice-", "")}")
+    |> element("#dismiss-notice-#{String.replace_prefix(first_error, "notice-", "")}")
     |> render_click()
 
     assert notice_ids(view) == [second_error, success, later_success]
+  end
+
+  test "notices float outside the panels and outlive switching tabs", context do
+    %{view: view, path: path, base: base} = context
+
+    other = Path.join(base, "other")
+    File.mkdir_p!(other)
+    git!(other, ["init", "--initial-branch=main"])
+    git!(other, ["config", "user.name", "MDT Test"])
+    git!(other, ["config", "user.email", "mdt@example.test"])
+    commit_file(other, "other.txt", "other\n", "other commit")
+
+    open(view, path)
+    open(view, other)
+
+    render_hook(view, "request", %{"action" => "merge", "revision" => "does-not-exist"})
+    render_async(view)
+
+    [notice] = notice_ids(view)
+    refute has_element?(view, "#git-inspector ##{notice}")
+    assert has_element?(view, "##{notice}", "other")
+
+    [first, _second] = tab_ids(view)
+    view |> element("#git-tab-#{first}") |> render_click()
+
+    assert notice_ids(view) == [notice]
   end
 
   test "a conflict moves the inspector into resolution mode", context do
@@ -1874,7 +1900,7 @@ defmodule MDTClientWeb.GitLiveTest do
     assert render(view) =~ "made outside"
     # A background refresh stays quiet: no spinner, no result banner.
     refute has_element?(view, "#git-operation-status")
-    refute has_element?(view, "#git-notices")
+    refute has_element?(view, "#notices")
   end
 
   test "a background refresh holds off while a dialog is open", context do
