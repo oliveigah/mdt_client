@@ -7,7 +7,8 @@ defmodule MDTClientWeb.GitLive do
   belongs to it: snapshot, selection, SSH credentials and the operation it is running.
   Git work never happens inside a callback; commands run through `start_async/3`
   and always refresh the snapshot in the same task, so a successful mutation and
-  the state it produced arrive together.
+  the state it produced arrive together. Reading a commit's files or a diff is
+  lighter: it runs on its own and reloads nothing else.
 
   Graph geometry lives in `MDTClientWeb.GitLive.Graph.Layout` and the markup in
   `MDTClientWeb.GitLive.Components`; this module only coordinates.
@@ -44,10 +45,12 @@ defmodule MDTClientWeb.GitLive do
      |> assign(:active_id, nil)
      |> assign(:tab, nil)
      |> assign_graph(nil)
+     |> assign_inspector(nil)
      |> assign(:opening, nil)
      |> assign(:open_error, nil)
      |> assign(:open_dialog, nil)
      |> assign(:refresh_checks, %{})
+     |> assign(:graph_top, 0)
      |> assign(:restore_order, [])
      |> assign(:restore_active, nil)
      |> restore_session()}
@@ -99,6 +102,8 @@ defmodule MDTClientWeb.GitLive do
             <Components.graph_panel
               snapshot={@graph_snapshot}
               graph={@graph_layout}
+              lanes={@graph_lanes}
+              refs={@graph_refs}
               changes={@graph_changes}
               pending={@graph_pending}
               pending_label={@graph_pending_label}
@@ -110,6 +115,7 @@ defmodule MDTClientWeb.GitLive do
               menu={@graph_menu}
               diff={@graph_diff}
               limits={@limits}
+              top={@graph_top}
             />
 
             <.resizer
@@ -124,7 +130,12 @@ defmodule MDTClientWeb.GitLive do
               label="Resize the inspector"
             />
 
-            <Components.inspector_panel tab={@tab} />
+            <Components.inspector_panel
+              tab={@tab}
+              commit={@inspector_commit}
+              loaded={@inspector_loaded}
+              diff={@graph_diff}
+            />
           </div>
         <% else %>
           <Components.empty_state error={@open_error} />
@@ -221,7 +232,7 @@ defmodule MDTClientWeb.GitLive do
   def handle_event("select_tab", %{"id" => id}, socket) do
     socket = socket |> assign(:active_id, id) |> sync_tab() |> remember_session()
 
-    {:noreply, auto_refresh(socket)}
+    {:noreply, socket |> auto_refresh() |> refresh_reads()}
   end
 
   @impl true
@@ -309,6 +320,13 @@ defmodule MDTClientWeb.GitLive do
   @impl true
   def handle_event("show_working_tree", _params, socket) do
     {:noreply, update_tab(socket, &%{&1 | panel: "changes", diff: nil, menu: nil})}
+  end
+
+  # The graph only puts the rows around the viewport on the page; its hook says
+  # which row is at the top as the reader scrolls.
+  @impl true
+  def handle_event("graph_scroll", %{"top" => top}, socket) when is_integer(top) and top >= 0 do
+    {:noreply, assign(socket, :graph_top, top)}
   end
 
   @impl true
@@ -685,14 +703,44 @@ defmodule MDTClientWeb.GitLive do
     end
   end
 
+  # Only the read the tab is still waiting for counts: one that another read
+  # replaced, or that a command started after, may describe an older state.
+  @impl true
+  def handle_async({:git_read, tab_id, ref}, {:ok, {request, result}}, socket) do
+    case find_tab(socket, tab_id) do
+      %{reading: {^ref, ^request}} = tab ->
+        tab = %{
+          tab
+          | reading: nil,
+            diff: keep_diff(tab, result.diff),
+            commit_changes: keep_commit_changes(tab, result.commit_changes)
+        }
+
+        {:noreply, socket |> put_tab(tab_id, fn _current -> tab end) |> refresh_reads()}
+
+      _stale ->
+        {:noreply, socket}
+    end
+  end
+
+  @impl true
+  def handle_async({:git_read, tab_id, ref}, {:exit, _reason}, socket) do
+    case find_tab(socket, tab_id) do
+      %{reading: {^ref, _request}} -> {:noreply, put_tab(socket, tab_id, &%{&1 | reading: nil})}
+      _stale -> {:noreply, socket}
+    end
+  end
+
   @impl true
   def handle_async({:open, _ref}, {:ok, {kind, path, result}}, socket) do
     socket = finished_opening(socket, path)
     log_open_result(socket.assigns.current_scope.user.username, kind, path, result)
 
     case {result, kind} do
+      # The commit a tab opens on has its files read straight away, not on the
+      # first click.
       {{:ok, repository, {:ok, state}}, _kind} ->
-        {:noreply, open_tab(socket, repository, state, kind)}
+        {:noreply, socket |> open_tab(repository, state, kind) |> refresh_reads()}
 
       {_failure, :restore} ->
         {:noreply, forget_repository(socket, path)}
@@ -889,6 +937,7 @@ defmodule MDTClientWeb.GitLive do
       repository: repository,
       snapshot: state.snapshot,
       graph: state.graph,
+      refs: state.refs,
       commits_by_id: state.commits_by_id,
       fingerprint: state.fingerprint,
       changes: state.changes,
@@ -915,6 +964,7 @@ defmodule MDTClientWeb.GitLive do
       stashes_open?: true,
       diff: nil,
       commit_changes: nil,
+      reading: nil,
       include_untracked?: true,
       ssh_private_key: private_key,
       ssh_public_key: public_key,
@@ -962,35 +1012,33 @@ defmodule MDTClientWeb.GitLive do
 
   # One command at a time per tab: two Git processes in the same worktree race
   # for the index lock, and the second failure would be the one shown.
-  defp run(socket, tab, action, opts \\ [])
-
-  defp run(socket, %{pending: pending} = tab, _action, _opts) when not is_nil(pending) do
+  defp run(socket, %{pending: pending} = tab, _action) when not is_nil(pending) do
     put_tab(socket, tab.id, &%{&1 | menu: nil, confirm: nil})
   end
 
-  defp run(socket, tab, action, opts) do
+  defp run(socket, tab, action) do
     task = {:git, tab.id, System.unique_integer([:positive])}
     repository = tab.repository
     limit = tab.limit
     username = socket.assigns.current_scope.user.username
 
     reads = requested_reads(tab)
-
-    # A refresh on a timer should not flash a spinner over the toolbar.
-    label = if Keyword.get(opts, :quiet, false), do: nil, else: label(action)
+    label = label(action)
 
     if action != :refresh do
       Logger.info(
-        "git action started action=#{label(action)} repository=#{inspect(repository.path)}",
+        "git action started action=#{label} repository=#{inspect(repository.path)}",
         user: username,
         system: :git_gui
       )
     end
 
+    # The command reloads whatever the tab is waiting to read, so a read already
+    # in flight could only answer with the state from before it.
     socket
     |> put_tab(
       tab.id,
-      &%{&1 | pending: task, pending_label: label, menu: nil, confirm: nil}
+      &%{&1 | pending: task, pending_label: label, menu: nil, confirm: nil, reading: nil}
     )
     |> start_async(task, fn ->
       result = perform(repository, action)
@@ -1061,6 +1109,33 @@ defmodule MDTClientWeb.GitLive do
   defp commit_changes_wanted(%{panel: "commit"} = tab), do: tab.selected_commit
   defp commit_changes_wanted(_tab), do: nil
 
+  # What the tab is waiting to read: an open diff with nothing in it yet, or the
+  # files of the commit on show when the ones loaded belong to another.
+  defp missing_reads(tab) do
+    diff = if match?(%{diff: nil, error: nil}, tab.diff), do: requested_reads(tab).diff
+
+    commit =
+      case {commit_changes_wanted(tab), tab.commit_changes} do
+        {nil, _loaded} -> nil
+        {commit, %{commit: commit}} -> nil
+        {commit, _loaded} -> commit
+      end
+
+    if diff || commit, do: %{diff: diff, commit: commit}
+  end
+
+  defp read(repository, changes, request) do
+    [diff, commit_changes] =
+      [
+        fn -> load_diff(repository, changes, request.diff) end,
+        fn -> load_commit_changes(repository, request.commit) end
+      ]
+      |> Enum.map(&Task.async/1)
+      |> Task.await_many(:infinity)
+
+    %{diff: diff, commit_changes: commit_changes}
+  end
+
   defp load(repository, limit, reads \\ %{diff: nil, commit: nil}) do
     [snapshot, changes, stashes, remotes, fingerprint_sources] =
       [
@@ -1082,6 +1157,7 @@ defmodule MDTClientWeb.GitLive do
        %{
          snapshot: snapshot,
          graph: Layout.layout(snapshot.commits),
+         refs: Components.refs_by_commit(snapshot.commits),
          commits_by_id: Map.new(snapshot.commits, &{&1.id, &1}),
          commit_ids: MapSet.new(snapshot.commits, & &1.id),
          branch_names: MapSet.new(snapshot.branches, & &1.full_name),
@@ -1098,8 +1174,19 @@ defmodule MDTClientWeb.GitLive do
 
   defp load_commit_changes(_repository, nil), do: nil
 
-  defp load_commit_changes(repository, commit),
-    do: {commit, Files.commit_status(repository, commit)}
+  # The graph leaves signatures unchecked, so the inspector's is read here, for
+  # the one commit on show.
+  defp load_commit_changes(repository, commit) do
+    [files, signature] =
+      [
+        fn -> Files.commit_status(repository, commit) end,
+        fn -> Core.signature(repository, commit) end
+      ]
+      |> Enum.map(&Task.async/1)
+      |> Task.await_many(:infinity)
+
+    {commit, files, signature}
+  end
 
   # A diff of a commit is history, so the working tree has no say in it.
   defp load_diff(repository, _changes, %{commit: commit} = request) when is_binary(commit) do
@@ -1201,16 +1288,29 @@ defmodule MDTClientWeb.GitLive do
     |> refresh_reads(state)
   end
 
-  # A diff or a commit file list asked for while a command was running is left
-  # waiting for an answer, so it is fetched as soon as the tab is free again.
+  # A diff or a commit file list is read on its own, without reloading the rest
+  # of the repository. One asked for while a command was running is left
+  # waiting, and fetched as soon as the tab is free again.
   defp refresh_reads(socket) do
-    case socket.assigns.tab do
-      %{pending: nil} = tab ->
-        if waiting_on_read?(tab), do: run(socket, tab, :refresh, quiet: true), else: socket
-
-      _busy ->
-        socket
+    with %{pending: nil} = tab <- socket.assigns.tab,
+         %{} = request <- missing_reads(tab),
+         false <- match?({_ref, ^request}, tab.reading) do
+      start_read(socket, tab, request)
+    else
+      _nothing_to_read -> socket
     end
+  end
+
+  defp start_read(socket, tab, request) do
+    ref = System.unique_integer([:positive])
+    repository = tab.repository
+    changes = tab.changes
+
+    socket
+    |> put_tab(tab.id, &%{&1 | reading: {ref, request}})
+    |> start_async({:git_read, tab.id, ref}, fn ->
+      {request, read(repository, changes, request)}
+    end)
   end
 
   # After a load that failed there is nothing to chase: the repository itself is
@@ -1218,18 +1318,16 @@ defmodule MDTClientWeb.GitLive do
   defp refresh_reads(socket, {:ok, _state}), do: refresh_reads(socket)
   defp refresh_reads(socket, _failed), do: socket
 
-  defp waiting_on_read?(tab) do
-    match?(%{diff: nil, error: nil}, tab.diff) or
-      (not is_nil(commit_changes_wanted(tab)) and is_nil(tab.commit_changes))
-  end
-
   defp apply_state(tab, {:ok, state}) do
     snapshot = state.snapshot
+    same_commits? = snapshot.commits == tab.snapshot.commits
 
+    # Handing the graph back unchanged lets LiveView see that nothing in it moved.
     %{
       tab
       | snapshot: snapshot,
-        graph: if(snapshot.commits == tab.snapshot.commits, do: tab.graph, else: state.graph),
+        graph: if(same_commits?, do: tab.graph, else: state.graph),
+        refs: if(same_commits?, do: tab.refs, else: state.refs),
         commits_by_id: state.commits_by_id,
         fingerprint: state.fingerprint,
         changes: state.changes,
@@ -1262,12 +1360,24 @@ defmodule MDTClientWeb.GitLive do
 
   defp keep_diff(tab, _stale), do: tab.diff
 
-  # An answer about a commit that is no longer selected is of no use.
-  defp keep_commit_changes(%{selected_commit: commit} = _tab, {commit, {:ok, files}}),
-    do: %{commit: commit, files: files, error: nil}
+  # An answer about a commit that is no longer selected is of no use. A
+  # signature that could not be checked reads as unknown rather than failing
+  # the file list with it.
+  defp keep_commit_changes(%{selected_commit: commit} = _tab, {commit, files, signature}) do
+    {files, error} =
+      case files do
+        {:ok, files} -> {files, nil}
+        {:error, error} -> {[], error}
+      end
 
-  defp keep_commit_changes(%{selected_commit: commit} = _tab, {commit, {:error, error}}),
-    do: %{commit: commit, files: [], error: error}
+    signature =
+      case signature do
+        {:ok, signature} -> signature
+        {:error, _error} -> {:unknown, nil}
+      end
+
+    %{commit: commit, files: files, error: error, signature: signature}
+  end
 
   defp keep_commit_changes(tab, _stale), do: tab.commit_changes
 
@@ -1810,6 +1920,25 @@ defmodule MDTClientWeb.GitLive do
     socket
     |> assign(:tab, tab)
     |> assign_graph(tab)
+    |> assign_inspector(tab)
+  end
+
+  # The commit on show and what was read about it, compared by value like the
+  # graph's inputs, so the inspector only redraws them when they change.
+  defp assign_inspector(socket, nil),
+    do: assign(socket, inspector_commit: nil, inspector_loaded: nil)
+
+  defp assign_inspector(socket, tab) do
+    loaded =
+      case tab.commit_changes do
+        %{commit: id} = loaded when id == tab.selected_commit -> loaded
+        _other -> nil
+      end
+
+    assign(socket,
+      inspector_commit: tab.selected_commit && Map.get(tab.commits_by_id, tab.selected_commit),
+      inspector_loaded: loaded
+    )
   end
 
   # The commit graph is the largest tree in this LiveView. Keeping its inputs as
@@ -1819,6 +1948,8 @@ defmodule MDTClientWeb.GitLive do
     assign(socket,
       graph_snapshot: nil,
       graph_layout: nil,
+      graph_lanes: 0,
+      graph_refs: %{},
       graph_changes: [],
       graph_pending: nil,
       graph_pending_label: nil,
@@ -1836,6 +1967,8 @@ defmodule MDTClientWeb.GitLive do
     assign(socket,
       graph_snapshot: tab.snapshot,
       graph_layout: tab.graph,
+      graph_lanes: Components.graph_lanes(tab.graph),
+      graph_refs: tab.refs,
       graph_changes: tab.changes,
       graph_pending: tab.pending,
       graph_pending_label: tab.pending_label,

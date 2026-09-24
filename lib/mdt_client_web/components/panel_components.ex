@@ -9,7 +9,9 @@ defmodule MDTClientWeb.PanelComponents do
   Panel sizes are written to a CSS variable on `<html>`, outside anything
   LiveView patches, and persisted in local storage so they survive navigation
   and restarts. The pre-paint script in `root.html.heex` reads the same keys
-  back.
+  back. While a handle is dragged the size is set on the panel alone, and the
+  variable only takes it once the drag ends: every element inherits the
+  variable, so changing it restyles the whole page.
   """
   use Phoenix.Component
 
@@ -79,6 +81,7 @@ defmodule MDTClientWeb.PanelComponents do
       export default {
         mounted() {
           this.axis = this.el.dataset.axis
+          this.property = this.axis === "x" ? "width" : "height"
           this.variable = this.el.dataset.variable
           this.storageKey = this.el.dataset.key
           this.fromEnd = this.el.dataset.edge === "end"
@@ -90,9 +93,13 @@ defmodule MDTClientWeb.PanelComponents do
 
           this.clamp = (size) => Math.round(Math.max(this.min, Math.min(size, this.limit ?? this.max)))
 
+          // While the size changes it is written on the panel itself. The CSS
+          // variable lives on <html>, and every element inherits it, so setting
+          // it restyles the whole page: on a large repository that was most of
+          // each frame. The variable is set once, when the size settles.
           this.applySize = (size) => {
             this.size = `${size}px`
-            document.documentElement.style.setProperty(this.variable, this.size)
+            this.panel.style.setProperty(this.property, this.size)
           }
 
           this.commitSize = () => {
@@ -104,23 +111,41 @@ defmodule MDTClientWeb.PanelComponents do
             this.pendingPoint = null
           }
 
+          // Hands the size over to the variable, which the pre-paint script and
+          // any later render of the panel read, and forgets the inline one.
+          this.persist = () => {
+            if (!this.size || !this.panel?.style.getPropertyValue(this.property)) return
+            document.documentElement.style.setProperty(this.variable, this.size)
+            this.panel?.style.removeProperty(this.property)
+            localStorage.setItem(this.storageKey, this.size)
+          }
+
           this.onMove = (event) => {
             if (!this.panel) return
             this.pendingPoint = this.horizontal ? event.clientX : event.clientY
             if (this.frame === null) this.frame = requestAnimationFrame(this.commitSize)
           }
 
+          // Selecting text while dragging is prevented without touching styles:
+          // user-select on <body> would restyle the page twice per drag.
+          this.preventSelect = (event) => event.preventDefault()
+
           this.onUp = () => {
             if (this.frame !== null) {
               cancelAnimationFrame(this.frame)
               this.commitSize()
             }
-            document.removeEventListener("pointermove", this.onMove)
-            document.removeEventListener("pointerup", this.onUp)
-            document.removeEventListener("pointercancel", this.onUp)
-            document.body.style.userSelect = ""
+            this.stopDragging()
+            this.persist()
+          }
+
+          this.stopDragging = () => {
+            this.el.removeEventListener("pointermove", this.onMove)
+            this.el.removeEventListener("pointerup", this.onUp)
+            this.el.removeEventListener("pointercancel", this.onUp)
+            this.el.removeEventListener("lostpointercapture", this.onUp)
+            document.removeEventListener("selectstart", this.preventSelect)
             this.el.removeAttribute("data-dragging")
-            if (this.size) { localStorage.setItem(this.storageKey, this.size) }
           }
 
           this.measure = () => {
@@ -142,17 +167,22 @@ defmodule MDTClientWeb.PanelComponents do
             return true
           }
 
+          // Capturing the pointer keeps every move on the handle, so the rows it
+          // passes over do not change their hover state, and restyle, on the way.
           this.el.addEventListener("pointerdown", (event) => {
             if (!this.measure()) return
             event.preventDefault()
+            this.el.setPointerCapture(event.pointerId)
             this.el.setAttribute("data-dragging", "")
-            document.body.style.userSelect = "none"
-            document.addEventListener("pointermove", this.onMove)
-            document.addEventListener("pointerup", this.onUp)
-            document.addEventListener("pointercancel", this.onUp)
+            document.addEventListener("selectstart", this.preventSelect)
+            this.el.addEventListener("pointermove", this.onMove)
+            this.el.addEventListener("pointerup", this.onUp)
+            this.el.addEventListener("pointercancel", this.onUp)
+            this.el.addEventListener("lostpointercapture", this.onUp)
           })
 
-          // Arrow keys move the handle too, so the layout is reachable without a pointer.
+          // Arrow keys move the handle too, so the layout is reachable without a
+          // pointer. A held key repeats, so the size settles when it is let go.
           this.el.addEventListener("keydown", (event) => {
             const [back, forward] =
               this.axis === "x" ? ["ArrowLeft", "ArrowRight"] : ["ArrowUp", "ArrowDown"]
@@ -162,11 +192,14 @@ defmodule MDTClientWeb.PanelComponents do
             event.preventDefault()
             const direction = (event.key === forward ? 1 : -1) * (this.fromEnd ? -1 : 1)
             this.applySize(this.clamp(this.current + direction * this.step))
-            localStorage.setItem(this.storageKey, this.size)
           })
+
+          this.el.addEventListener("keyup", () => this.persist())
+          this.el.addEventListener("blur", () => this.persist())
 
           this.el.addEventListener("dblclick", () => {
             document.documentElement.style.removeProperty(this.variable)
+            this.panel?.style.removeProperty(this.property)
             localStorage.removeItem(this.storageKey)
             this.size = null
           })
@@ -174,9 +207,7 @@ defmodule MDTClientWeb.PanelComponents do
 
         destroyed() {
           if (this.frame !== null) cancelAnimationFrame(this.frame)
-          document.removeEventListener("pointermove", this.onMove)
-          document.removeEventListener("pointerup", this.onUp)
-          document.removeEventListener("pointercancel", this.onUp)
+          this.stopDragging()
         }
       }
     </script>

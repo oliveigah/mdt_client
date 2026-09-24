@@ -476,6 +476,10 @@ defmodule MDTClientWeb.GitLiveTest do
     assert has_element?(view, "#git-select-commit-#{head}[aria-selected=true]")
     assert has_element?(view, "#git-commit-details")
     assert render(view) =~ "second commit"
+
+    # Its files are read as soon as the tab opens, not on the first click.
+    render_async(view)
+    assert view |> element("#git-commit-files") |> render() =~ "second.txt"
   end
 
   test "selecting a commit updates the inspector", context do
@@ -484,6 +488,8 @@ defmodule MDTClientWeb.GitLiveTest do
     open(view, path)
 
     view |> element("#git-select-commit-#{initial}") |> render_click()
+    # The signature is checked on its own, after the commit is picked.
+    render_async(view)
 
     details = view |> element("#git-commit-details") |> render()
     assert details =~ "initial commit"
@@ -718,6 +724,33 @@ defmodule MDTClientWeb.GitLiveTest do
     commit_menu(view, c4)
 
     assert view |> element("#git-squash-blocker") |> render() =~ "Commit or stash"
+  end
+
+  test "a long graph only puts the rows around the viewport on the page", context do
+    %{view: view, path: path, initial_commit: initial} = context
+    head = empty_commits(path, 200)
+    open(view, path)
+
+    assert count(view, "#git-commits [role=option]") == 160
+    assert has_element?(view, "#git-commit-rows[data-first='0'][data-total='201']")
+    assert has_element?(view, "#git-commit-#{head}")
+    refute has_element?(view, "#git-commit-#{initial}")
+
+    # Scrolling to the bottom brings the oldest rows in and lets the newest go.
+    render_hook(view, "graph_scroll", %{"top" => 190})
+
+    assert count(view, "#git-commits [role=option]") == 160
+    assert has_element?(view, "#git-commit-rows[data-first='41']")
+    assert has_element?(view, "#git-commit-#{initial}")
+    refute has_element?(view, "#git-commit-#{head}")
+
+    # A row off the page can still be part of a range picked with Shift.
+    view |> element("#git-select-commit-#{initial}") |> render_click()
+    render_hook(view, "graph_scroll", %{"top" => 0})
+    render_click(view, "select_commit", %{"id" => head, "shiftKey" => true})
+
+    assert count(view, "#git-commits [role=option][aria-selected=true]") == 160
+    assert view |> element("#git-commit-details") |> render() =~ "201 commits selected"
   end
 
   test "the graph draws one lane per concurrent branch", context do

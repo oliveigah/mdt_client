@@ -3,7 +3,9 @@ defmodule MDTClient.Git.Commit do
   Commit metadata used by the graph and commit inspector.
 
   `labels` holds every reference pointing at this commit: local and remote
-  branches, and the tags that resolve to it.
+  branches, and the tags that resolve to it. `signature_status` is `nil` when
+  the signature was not checked, which is how the graph loads commits; see
+  `MDTClient.Git.Core.signature/2`.
   """
 
   alias MDTClient.Git.Branch
@@ -61,7 +63,7 @@ defmodule MDTClient.Git.Commit do
           committed_at: DateTime.t(),
           summary: String.t(),
           body: String.t(),
-          signature_status: signature_status(),
+          signature_status: signature_status() | nil,
           signature_signer: String.t() | nil,
           labels: [Branch.t() | Tag.t()]
         }

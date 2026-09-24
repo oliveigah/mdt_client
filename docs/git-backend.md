@@ -41,8 +41,7 @@ transport and offers the equivalent `git@host:path` URL for HTTP(S) remotes.
   behind counts, target commit, and symbolic remote references;
 - tags, resolved through annotated tag objects to the commits they name;
 - commits in topological order, with parents, author and committer metadata,
-  message, signature state, and every label pointing at the commit, branch or
-  tag;
+  message, and every label pointing at the commit, branch or tag;
 - HEAD and detached-state information; and
 - a merge, rebase, cherry-pick, revert, or bisect operation currently in
   progress.
@@ -51,6 +50,13 @@ The graph result describes topology through each commit's ordered `parents`
 list. Lane assignment and edge routing belong in the client because they depend
 on viewport and rendering choices. The default graph window is 500 commits and
 can be changed with `snapshot(repository, limit: count)` up to 5,000.
+
+Signatures are left unchecked in a snapshot: their commits carry
+`signature_status: nil`. Checking one runs gpg or ssh-keygen, once per signed
+commit, and on a repository that signs its history that costs more than the
+rest of the snapshot put together. `signature/2` checks one commit, which is
+what the inspector shows; `get_commit/2` and `snapshot(repository, signatures:
+true)` fill the fields in as well.
 
 `list_branches/1`, `graph/2`, and `get_commit/2` expose the same data separately
 for targeted refreshes.
@@ -141,7 +147,18 @@ command runner, so a tab's SSH credentials apply to either.
 `MDTClientWeb.GitLive` is the only consumer. It keeps one repository handle per
 tab, runs every command through `start_async/3` — refreshing the snapshot,
 status, and stash list in the same task — and turns a `%Error{kind: :conflict}`
-into the continue, skip, and abort panel. Lane assignment lives in
+into the continue, skip, and abort panel. Picking a commit or opening a diff is
+lighter: only the commit's files and signature, or the diff, are read, in a
+task of their own that reloads nothing else. While a command runs such a read
+waits, because the command's own refresh answers it.
+
+The page is kept cheap to patch however large the repository. Every patch walks
+the whole LiveView, so the graph only puts the rows around the viewport on the
+page, with spacers standing in for the rest, and a hook asks for the next rows
+as the reader scrolls; a commit limit of 5,000 costs a click what 500 does.
+The graph, branch and file lists hand each row what the rest of the page says
+about it — picked, menu open, HEAD — and are keyed, so a click sends the rows
+it changed rather than the whole list. Lane assignment lives in
 `MDTClientWeb.GitLive.Graph.Layout`, a pure function from the commit list to
 rows, lanes, and edges.
 

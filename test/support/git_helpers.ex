@@ -43,6 +43,14 @@ defmodule MDTClient.GitHelpers do
     git!(path, ["rev-parse", "HEAD"])
   end
 
+  def empty_commits(path, count) do
+    for index <- 1..count do
+      git!(path, ["commit", "--allow-empty", "--quiet", "-m", "empty #{index}"])
+    end
+
+    git!(path, ["rev-parse", "HEAD"])
+  end
+
   def ssh_key_pair(base, name \\ "id_ed25519") do
     private_key = Path.join(base, name)
     executable = System.find_executable("ssh-keygen")

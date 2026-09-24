@@ -35,23 +35,14 @@ defmodule MDTClient.Git.Core do
   @default_graph_limit 500
   @maximum_graph_limit 5_000
 
-  @commit_format Enum.join(
-                   [
-                     "%H",
-                     "%P",
-                     "%an",
-                     "%ae",
-                     "%aI",
-                     "%cn",
-                     "%ce",
-                     "%cI",
-                     "%s",
-                     "%b",
-                     "%G?",
-                     "%GS"
-                   ],
-                   "%x00"
-                 ) <> "%x00%x1e"
+  @metadata_fields ["%H", "%P", "%an", "%ae", "%aI", "%cn", "%ce", "%cI", "%s", "%b"]
+
+  # Checking a signature runs gpg or ssh-keygen once per signed commit, which on
+  # a repository that signs its history costs more than the rest of a snapshot
+  # put together. The graph leaves it out; one commit is checked on request.
+  @graph_format Enum.join(@metadata_fields, "%x00") <> "%x00%x1e"
+  @commit_format Enum.join(@metadata_fields ++ ["%G?", "%GS"], "%x00") <> "%x00%x1e"
+  @signature_format "%G?%x00%GS"
 
   @branch_format Enum.join(
                    [
@@ -199,47 +190,57 @@ defmodule MDTClient.Git.Core do
     end
   end
 
-  @doc "Loads the dynamic state used by the branch list and graph."
+  @doc """
+  Loads the dynamic state used by the branch list and graph.
+
+  Commits leave their signature unchecked (`signature_status: nil`) unless
+  `signatures: true` is given; `signature/2` checks one commit on its own.
+  """
   @spec snapshot(Repository.t(), keyword()) :: result(Snapshot.t())
   def snapshot(%Repository{} = repository, opts \\ []) do
-    with {:ok, limit} <- graph_limit(opts) do
-      [head, current_branch, branches, tags, operation] =
+    with {:ok, limit} <- graph_limit(opts),
+         {:ok, signatures?} <- boolean_option(opts, :signatures, false) do
+      # The log does not wait for the references: `--all` already walks from
+      # every one of them and from HEAD, and labels are matched up afterwards.
+      [head, current_branch, branches, tags, operation, log] =
         [
           fn -> head(repository) end,
           fn -> current_branch(repository) end,
           fn -> list_branches(repository) end,
           fn -> list_tags(repository) end,
-          fn -> operation(repository) end
+          fn -> operation(repository) end,
+          fn -> read_log(repository, limit, signatures?) end
         ]
         |> Enum.map(&Task.async/1)
         |> Task.await_many(:infinity)
 
       build_snapshot(
         repository,
-        limit,
         head,
         current_branch,
         branches,
         tags,
-        operation
+        operation,
+        log
       )
     end
   end
 
   defp build_snapshot(
          repository,
-         limit,
          head_result,
          current_branch_result,
          branches_result,
          tags_result,
-         operation_result
+         operation_result,
+         log_result
        ) do
     with {:ok, head} <- head_result,
          {:ok, current_branch} <- current_branch_result,
          {:ok, branches} <- branches_result,
          {:ok, tags} <- tags_result,
-         {:ok, commits} <- graph_with_refs(repository, branches, tags, head, limit),
+         {:ok, log} <- log_result,
+         {:ok, commits} <- parse_commits(log, labels_by_commit(branches, tags)),
          {:ok, operation} <- operation_result do
       {:ok,
        %Snapshot{
@@ -333,14 +334,44 @@ defmodule MDTClient.Git.Core do
     end
   end
 
-  @doc "Returns commits in topological order, ready for graph layout."
+  @doc """
+  Returns commits in topological order, ready for graph layout.
+
+  Accepts the same `:limit` and `:signatures` options as `snapshot/2`.
+  """
   @spec graph(Repository.t(), keyword()) :: result([Commit.t()])
   def graph(%Repository{} = repository, opts \\ []) do
     with {:ok, limit} <- graph_limit(opts),
+         {:ok, signatures?} <- boolean_option(opts, :signatures, false),
          {:ok, branches} <- list_branches(repository),
          {:ok, tags} <- list_tags(repository),
-         {:ok, head} <- head(repository) do
-      graph_with_refs(repository, branches, tags, head, limit)
+         {:ok, log} <- read_log(repository, limit, signatures?) do
+      parse_commits(log, labels_by_commit(branches, tags))
+    end
+  end
+
+  @doc """
+  Checks the signature of one commit-ish.
+
+  Returns the same `signature_status` and `signature_signer` values
+  `get_commit/2` fills in, without loading anything else.
+  """
+  @spec signature(Repository.t(), String.t()) ::
+          result({Commit.signature_status(), String.t() | nil})
+  def signature(%Repository{} = repository, revision) do
+    with {:ok, revision} <- text_argument(revision, "Revision"),
+         {:ok, output} <-
+           Command.run(repository, [
+             "show",
+             "--no-patch",
+             "--format=#{@signature_format}",
+             "--end-of-options",
+             "#{revision}^{commit}"
+           ]) do
+      case String.split(output_line(output), <<0>>, parts: 2) do
+        [status, signer] -> {:ok, {signature_status(status), blank_to_nil(signer)}}
+        _invalid -> {:error, Error.new(:invalid_output, "Git returned invalid signature data")}
+      end
     end
   end
 
@@ -939,21 +970,17 @@ defmodule MDTClient.Git.Core do
     end
   end
 
-  defp graph_with_refs(repository, branches, tags, head, limit) do
-    revisions = ["--all"] ++ if(is_nil(head), do: [], else: [head])
+  # `--all` walks from every reference and from HEAD, detached or not.
+  defp read_log(repository, limit, signatures?) do
+    format = if signatures?, do: @commit_format, else: @graph_format
 
-    with {:ok, output} <-
-           Command.run(
-             repository,
-             [
-               "log",
-               "--topo-order",
-               "--max-count=#{limit}",
-               "--format=#{@commit_format}"
-             ] ++ revisions
-           ) do
-      parse_commits(output, labels_by_commit(branches, tags))
-    end
+    Command.run(repository, [
+      "log",
+      "--topo-order",
+      "--max-count=#{limit}",
+      "--format=#{format}",
+      "--all"
+    ])
   end
 
   defp parse_branches(output) do
@@ -1149,45 +1176,53 @@ defmodule MDTClient.Git.Core do
     end
   end
 
+  # A record holds the metadata fields, then the signature fields when they
+  # were asked for, then the empty field before the record separator.
   defp parse_commit(record, labels) do
     case String.split(record, <<0>>, trim: false) do
-      [
-        id,
-        parents,
-        author_name,
-        author_email,
-        authored_at,
-        committer_name,
-        committer_email,
-        committed_at,
-        summary,
-        body,
-        signature_status,
-        signature_signer,
-        ""
-      ] ->
-        with {:ok, authored_at} <- parse_datetime(authored_at),
-             {:ok, committed_at} <- parse_datetime(committed_at) do
-          {:ok,
-           %Commit{
-             id: id,
-             parents: words(parents),
-             author_name: author_name,
-             author_email: author_email,
-             authored_at: authored_at,
-             committer_name: committer_name,
-             committer_email: committer_email,
-             committed_at: committed_at,
-             summary: summary,
-             body: String.trim_trailing(body, "\n"),
-             signature_status: signature_status(signature_status),
-             signature_signer: blank_to_nil(signature_signer),
-             labels: Map.get(labels, id, [])
-           }}
-        end
+      [_id, _parents, _an, _ae, _aI, _cn, _ce, _cI, _summary, _body, status, signer, ""] = fields ->
+        build_commit(fields, labels, signature_status(status), blank_to_nil(signer))
+
+      [_id, _parents, _an, _ae, _aI, _cn, _ce, _cI, _summary, _body, ""] = fields ->
+        build_commit(fields, labels, nil, nil)
 
       _invalid ->
         {:error, Error.new(:invalid_output, "Git returned invalid commit data")}
+    end
+  end
+
+  defp build_commit(fields, labels, signature_status, signature_signer) do
+    [
+      id,
+      parents,
+      author_name,
+      author_email,
+      authored_at,
+      committer_name,
+      committer_email,
+      committed_at,
+      summary,
+      body | _signature
+    ] = fields
+
+    with {:ok, authored_at} <- parse_datetime(authored_at),
+         {:ok, committed_at} <- parse_datetime(committed_at) do
+      {:ok,
+       %Commit{
+         id: id,
+         parents: words(parents),
+         author_name: author_name,
+         author_email: author_email,
+         authored_at: authored_at,
+         committer_name: committer_name,
+         committer_email: committer_email,
+         committed_at: committed_at,
+         summary: summary,
+         body: String.trim_trailing(body, "\n"),
+         signature_status: signature_status,
+         signature_signer: signature_signer,
+         labels: Map.get(labels, id, [])
+       }}
     end
   end
 

@@ -116,11 +116,17 @@ defmodule MDTClient.Git.CoreTest do
     assert commit.author_name == "MDT Test"
     assert commit.author_email == "mdt@example.test"
     assert %DateTime{} = commit.authored_at
-    assert commit.signature_status == :no_signature
     assert Enum.map(commit.labels, & &1.name) |> Enum.sort() == ["feature", "origin/feature"]
 
+    # Signatures are checked per commit, not for the whole graph.
+    assert commit.signature_status == nil
+    assert {:ok, {:no_signature, nil}} = Core.signature(repository, feature_commit)
+
     assert {:ok, inspected} = Core.get_commit(repository, feature_commit)
-    assert inspected == commit
+    assert inspected == %{commit | signature_status: :no_signature}
+
+    assert {:ok, %{commits: signed}} = Core.snapshot(repository, signatures: true)
+    assert Enum.find(signed, &(&1.id == feature_commit)) == inspected
   end
 
   test "fingerprints stay stable until repository state changes", %{
