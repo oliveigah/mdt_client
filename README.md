@@ -133,7 +133,9 @@ including compilation with warnings treated as errors and the full test suite.
 
 Publishing a GitHub Release runs the `Release Linux packages` workflow. It
 checks out the release tag, builds the Debian and Fedora packages independently,
-and attaches the `.deb`, `.rpm`, and `SHA256SUMS` files directly to that release.
+and uses the tag as the version in both packages. Tags such as `0.3.0` and
+`v0.3.0` produce `MDT_0.3.0.deb` and `MDT_0.3.0.rpm`. The workflow attaches
+both packages and `SHA256SUMS` directly to that release.
 
 ## Development
 

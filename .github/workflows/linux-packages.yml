@@ -19,12 +19,14 @@ jobs:
         include:
           - label: Debian
             script: ./scripts/build-deb.sh
-            artifact: MDT-deb-amd64
-            path: dist/MDT_*.deb
+            extension: deb
           - label: Fedora
             script: ./scripts/build-rpm.sh
-            artifact: MDT-rpm-x86_64
-            path: dist/MDT-*.rpm
+            extension: rpm
+
+    env:
+      RELEASE_TAG: ${{ github.event.release.tag_name }}
+      PACKAGE_EXTENSION: ${{ matrix.extension }}
 
     steps:
       - name: Check out release tag
@@ -32,17 +34,35 @@ jobs:
         with:
           ref: ${{ github.event.release.tag_name }}
 
+      - name: Set package version from release tag
+        run: |
+          package_version="$(python3 scripts/set-release-version.py "$RELEASE_TAG")"
+          printf 'PACKAGE_VERSION=%s\n' "$package_version" >> "$GITHUB_ENV"
+
       - name: Build ${{ matrix.label }} package
         run: ${{ matrix.script }}
 
+      - name: Name package for release
+        run: |
+          shopt -s nullglob
+          packages=(dist/*."$PACKAGE_EXTENSION")
+          if (( ${#packages[@]} != 1 )); then
+            printf 'Expected one .%s package, found %s\n' "$PACKAGE_EXTENSION" "${#packages[@]}" >&2
+            exit 1
+          fi
+          target="dist/MDT_${PACKAGE_VERSION}.${PACKAGE_EXTENSION}"
+          if [[ "${packages[0]}" != "$target" ]]; then
+            mv -- "${packages[0]}" "$target"
+          fi
+
       - name: Record package checksum
-        run: sha256sum ${{ matrix.path }}
+        run: sha256sum "dist/MDT_${PACKAGE_VERSION}.${PACKAGE_EXTENSION}"
 
       - name: Store ${{ matrix.label }} package for publishing
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ matrix.artifact }}
-          path: ${{ matrix.path }}
+          name: MDT_${{ env.PACKAGE_VERSION }}.${{ matrix.extension }}
+          path: dist/MDT_${{ env.PACKAGE_VERSION }}.${{ matrix.extension }}
           if-no-files-found: error
           retention-days: 1
           compression-level: 0
@@ -61,7 +81,7 @@ jobs:
       - name: Download built packages
         uses: actions/download-artifact@v8
         with:
-          pattern: MDT-*
+          pattern: MDT_*
           path: release-assets
           merge-multiple: true
 
