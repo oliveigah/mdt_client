@@ -15,6 +15,7 @@
     "dialog:allow-open",
     "dialog:allow-save",
     "allow-set-webview-zoom",
+    "allow-restart-app",
     "core:window:allow-set-theme",
     "core:window:allow-set-title",
     "core:window:allow-minimize",

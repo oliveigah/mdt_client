@@ -1,0 +1,11 @@
+{
+  "permission": [
+    {
+      "identifier": "allow-restart-app",
+      "description": "Restart MDT after its verified system package update has installed.",
+      "commands": {
+        "allow": ["restart_app"]
+      }
+    }
+  ]
+}

@@ -1,6 +1,15 @@
+use std::process::Child;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tauri::Manager;
 
 const DESKTOP_PORT: &str = "12995";
+
+struct DesktopProcess {
+    child: Mutex<Option<Child>>,
+    restarting: AtomicBool,
+}
 
 #[tauri::command]
 fn set_webview_zoom(webview: tauri::WebviewWindow, scale: f64) -> Result<(), String> {
@@ -11,16 +20,33 @@ fn set_webview_zoom(webview: tauri::WebviewWindow, scale: f64) -> Result<(), Str
     webview.set_zoom(scale).map_err(|error| error.to_string())
 }
 
+#[tauri::command]
+fn restart_app(app: tauri::AppHandle, process: tauri::State<'_, Arc<DesktopProcess>>) {
+    process.restarting.store(true, Ordering::SeqCst);
+
+    if let Some(mut child) = process.child.lock().unwrap().take() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    app.restart();
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let pubsub = elixirkit::PubSub::listen("tcp://127.0.0.1:0").expect("failed to listen");
 
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![set_webview_zoom])
+        .invoke_handler(tauri::generate_handler![set_webview_zoom, restart_app])
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(move |app| {
             let app_handle = app.handle().clone();
+            let process = Arc::new(DesktopProcess {
+                child: Mutex::new(None),
+                restarting: AtomicBool::new(false),
+            });
+            app.manage(process.clone());
 
             pubsub.subscribe("messages", move |msg| {
                 if msg == b"ready" {
@@ -35,9 +61,30 @@ pub fn run() {
             tauri::async_runtime::spawn_blocking(move || {
                 let mut command = elixir_command(&app_handle);
                 command.env("ELIXIRKIT_PUBSUB", pubsub.url());
-                let status = command.status().expect("failed to start Elixir");
+                let child = command.spawn().expect("failed to start Elixir");
+                *process.child.lock().unwrap() = Some(child);
 
-                app_handle.exit(status.code().unwrap_or(1));
+                loop {
+                    let status = {
+                        let mut guard = process.child.lock().unwrap();
+                        guard
+                            .as_mut()
+                            .and_then(|child| child.try_wait().ok().flatten())
+                    };
+
+                    if let Some(status) = status {
+                        if !process.restarting.load(Ordering::SeqCst) {
+                            app_handle.exit(status.code().unwrap_or(1));
+                        }
+                        break;
+                    }
+
+                    if process.restarting.load(Ordering::SeqCst) {
+                        break;
+                    }
+
+                    std::thread::sleep(Duration::from_millis(100));
+                }
             });
 
             Ok(())
@@ -75,6 +122,7 @@ fn elixir_command(app_handle: &tauri::AppHandle) -> std::process::Command {
         let mut command = elixirkit::release(rel_dir, "mdt_client");
         // Installed resources live under /usr/lib and are not writable by the user.
         command.env("RELEASE_TMP", release_tmp);
+        command.env("MDT_DESKTOP_BUILD", "true");
         command.env("PHX_SERVER", "true");
         command.env("PHX_HOST", "127.0.0.1");
         command.env("PORT", DESKTOP_PORT);

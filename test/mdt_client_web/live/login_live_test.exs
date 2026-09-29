@@ -145,6 +145,12 @@ defmodule MDTClientWeb.LoginLiveTest do
     assert Preferences.get("theme") == "system"
   end
 
+  test "the sign-in screen offers a manual update check", %{conn: conn} do
+    {:ok, view, _html} = live(conn, ~p"/")
+
+    assert has_element?(view, "#check-updates")
+  end
+
   test "an explicit theme is seeded into the page before any script runs", %{conn: conn} do
     :ok = Preferences.put("theme", "light")
 

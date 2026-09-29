@@ -18,7 +18,11 @@ defmodule MDTClientWeb.Router do
   scope "/", MDTClientWeb do
     pipe_through :browser
 
-    live_session :public, on_mount: {MDTClientWeb.Hooks.Theme, :default} do
+    live_session :public,
+      on_mount: [
+        {MDTClientWeb.Hooks.Theme, :default},
+        {MDTClientWeb.Hooks.Updates, :default}
+      ] do
       live "/", LoginLive
     end
 
@@ -29,6 +33,7 @@ defmodule MDTClientWeb.Router do
       on_mount: [
         {MDTClientWeb.UserAuth, :unlocked},
         {MDTClientWeb.Hooks.Theme, :default},
+        {MDTClientWeb.Hooks.Updates, :default},
         {MDTClientWeb.Notices, :default}
       ] do
       live "/tools", ToolsLive

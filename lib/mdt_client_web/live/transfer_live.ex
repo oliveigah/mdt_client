@@ -29,7 +29,7 @@ defmodule MDTClientWeb.TransferLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_scope={@current_scope} notices={@notices}>
+    <Layouts.app flash={@flash} current_scope={@current_scope} notices={@notices} update={@update}>
       <div class="flex min-h-0 flex-1 justify-center overflow-y-auto p-6">
         <div class="w-full max-w-2xl py-2">
           <header class="mb-6 flex items-start gap-3">

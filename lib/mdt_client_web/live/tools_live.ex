@@ -15,7 +15,7 @@ defmodule MDTClientWeb.ToolsLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_scope={@current_scope} notices={@notices}>
+    <Layouts.app flash={@flash} current_scope={@current_scope} notices={@notices} update={@update}>
       <div class="flex min-h-0 flex-1 items-center justify-center overflow-y-auto p-6">
         <div class="w-full max-w-2xl">
           <header class="mb-6">

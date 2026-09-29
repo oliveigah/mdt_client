@@ -82,7 +82,13 @@ defmodule MDTClientWeb.GitLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_scope={@current_scope} tool={@tool} notices={@notices}>
+    <Layouts.app
+      flash={@flash}
+      current_scope={@current_scope}
+      tool={@tool}
+      notices={@notices}
+      update={@update}
+    >
       <div
         class="flex min-h-0 flex-1 flex-col overflow-hidden"
         phx-window-keydown="close_overlays"

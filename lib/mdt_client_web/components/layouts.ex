@@ -36,6 +36,7 @@ defmodule MDTClientWeb.Layouts do
   attr :tool, :map, default: nil, doc: "the tool currently open, see `MDTClient.Tools`"
   attr :chrome, :boolean, default: true, doc: "renders the title bar"
   attr :notices, :list, default: [], doc: "the notices to float, see `MDTClientWeb.Notices`"
+  attr :update, :map, default: %{status: :idle, release: nil, message: nil}
 
   slot :inner_block, required: true
 
@@ -60,6 +61,8 @@ defmodule MDTClientWeb.Layouts do
         <.tool_switcher current={@tool} />
 
         <div class="flex-1"></div>
+
+        <.update_check update={@update} />
 
         <.theme_toggle />
 
@@ -95,7 +98,112 @@ defmodule MDTClientWeb.Layouts do
 
       <.flash_group flash={@flash} />
       <.notice_group notices={@notices} />
+      <div
+        :if={@update.status in [:available, :installing, :installed, :current, :error]}
+        id="update-notice"
+        role="status"
+        class="fixed bottom-3 right-3 z-50 flex w-[min(22rem,calc(100vw-1.5rem))] items-center gap-3 rounded-xl border border-line bg-panel px-3 py-2.5 shadow-xl shadow-black/15"
+      >
+        <span class="flex size-8 shrink-0 items-center justify-center rounded-lg bg-accent-soft text-accent">
+          <.icon
+            name={
+              case @update.status do
+                :current -> "hero-check"
+                :error -> "hero-exclamation-circle"
+                _ -> "hero-arrow-down-tray"
+              end
+            }
+            class="size-4"
+          />
+        </span>
+        <div class="min-w-0 flex-1">
+          <p class="text-xs font-semibold text-ink">
+            <%= case @update.status do %>
+              <% :current -> %>
+                MDT is up to date
+              <% :error -> %>
+                Update check failed
+              <% :installed -> %>
+                Update installed
+              <% _ -> %>
+                MDT {@update.release.version} is available
+            <% end %>
+          </p>
+          <p :if={@update.message} id="update-error" class="mt-0.5 text-[11px] leading-4 text-bad">
+            {@update.message}
+          </p>
+          <p :if={@update.status == :installing} class="mt-0.5 text-[11px] text-muted">
+            Downloading and installing…
+          </p>
+          <p :if={@update.status == :installed} class="mt-0.5 text-[11px] text-muted">
+            Restarting MDT…
+          </p>
+        </div>
+        <button
+          :if={@update.status == :available}
+          id="install-update"
+          type="button"
+          phx-click="install_update"
+          class="shrink-0 cursor-pointer rounded-md bg-accent px-2.5 py-1.5 text-[11px] font-semibold text-white transition-colors hover:bg-accent/85 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+        >
+          Install
+        </button>
+        <button
+          :if={@update.status in [:available, :current, :error]}
+          id="dismiss-update"
+          type="button"
+          phx-click="dismiss_update"
+          aria-label="Dismiss update notice"
+          title="Dismiss"
+          class="flex size-6 shrink-0 cursor-pointer items-center justify-center rounded text-muted transition-colors hover:bg-hover hover:text-ink"
+        >
+          <.icon name="hero-x-mark" class="size-3.5" />
+        </button>
+        <.icon
+          :if={@update.status == :installing}
+          name="hero-arrow-path"
+          class="size-4 animate-spin text-accent"
+        />
+        <button
+          :if={@update.status == :installed}
+          id="restart-after-update"
+          type="button"
+          phx-click={JS.dispatch("mdt:restart-after-update")}
+          class="shrink-0 cursor-pointer rounded-md bg-accent px-2.5 py-1.5 text-[11px] font-semibold text-white transition-colors hover:bg-accent/85 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+        >
+          Restart
+        </button>
+      </div>
     </div>
+    """
+  end
+
+  @doc "The user controlled update check, shared by the sign-in screen and app bar."
+  attr :update, :map, required: true
+
+  def update_check(assigns) do
+    ~H"""
+    <button
+      id="check-updates"
+      type="button"
+      phx-click="check_updates"
+      disabled={@update.status in [:checking, :installing]}
+      title="Check for updates"
+      aria-label="Check for updates"
+      class="flex h-7 shrink-0 cursor-pointer items-center gap-1.5 rounded-md px-2 text-[11px] font-medium text-muted transition-colors hover:bg-hover hover:text-ink disabled:cursor-wait disabled:opacity-60"
+    >
+      <.icon
+        name="hero-arrow-path"
+        class={[
+          "size-3.5",
+          @update.status == :checking && "animate-spin"
+        ]}
+      />
+      <span class="hidden sm:inline">{if(@update.status == :checking,
+        do: "Checking…",
+        else: "Check updates"
+      )}</span>
+    </button>
     """
   end
 

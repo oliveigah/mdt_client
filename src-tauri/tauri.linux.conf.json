@@ -6,6 +6,7 @@
       "deb": {
         "depends": [
           "xdg-utils",
+          "pkexec",
           "git",
           "openssh-client",
           "libssl3",
@@ -20,6 +21,7 @@
         "release": "5",
         "depends": [
           "xdg-utils",
+          "polkit",
           "git",
           "openssh-clients",
           "openssl-libs",

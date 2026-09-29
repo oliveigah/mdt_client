@@ -4,6 +4,7 @@ defmodule MDTClientWeb.ToolsLiveTest do
   import Phoenix.LiveViewTest
 
   alias MDTClient.VaultHelpers
+  alias MDTClient.Updates
 
   setup %{conn: conn} do
     VaultHelpers.reset_data_dir!()
@@ -24,6 +25,45 @@ defmodule MDTClientWeb.ToolsLiveTest do
     assert has_element?(view, "[data-phx-theme=system]")
     assert has_element?(view, "[data-phx-theme=light]")
     assert has_element?(view, "[data-phx-theme=dark]")
+  end
+
+  test "shows a compact install action when a newer release is announced", %{conn: conn} do
+    {:ok, view, _html} = live(conn, ~p"/tools")
+
+    assert has_element?(view, "#check-updates")
+    refute has_element?(view, "#update-notice")
+
+    send(
+      view.pid,
+      {:mdt_update, %{status: :available, release: %{version: "0.6.0"}, message: nil}}
+    )
+
+    assert has_element?(view, "#update-notice")
+    assert has_element?(view, "#install-update", "Install")
+    assert has_element?(view, "#dismiss-update")
+
+    send(
+      view.pid,
+      {:mdt_update, %{status: :installing, release: %{version: "0.6.0"}, message: nil}}
+    )
+
+    assert has_element?(view, "#update-notice")
+    refute has_element?(view, "#install-update")
+  end
+
+  test "checking is only started by the update button", %{conn: conn} do
+    {:ok, view, _html} = live(conn, ~p"/tools")
+
+    refute has_element?(view, "#update-notice")
+    view |> element("#check-updates") |> render_click()
+
+    assert has_element?(view, "#update-notice")
+    assert has_element?(view, "#update-error")
+
+    view |> element("#dismiss-update") |> render_click()
+    refute has_element?(view, "#update-notice")
+
+    on_exit(fn -> Updates.dismiss() end)
   end
 
   test "the title bar names every tool and marks the one open", %{conn: conn} do

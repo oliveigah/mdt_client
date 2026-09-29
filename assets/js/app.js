@@ -114,6 +114,19 @@ if (appWindow) {
     attributeFilter: ["data-theme"],
   })
   syncWindowTheme()
+
+  let restartingForUpdate = false
+  const restartForUpdate = () => {
+    if (restartingForUpdate) return
+    restartingForUpdate = true
+    window.__TAURI__.core.invoke("restart_app")
+      .catch(error => {
+        restartingForUpdate = false
+        console.warn("Could not restart after update", error)
+      })
+  }
+  window.addEventListener("phx:update-installed", restartForUpdate)
+  window.addEventListener("mdt:restart-after-update", restartForUpdate)
 }
 
 // connect if there are any LiveViews on the page

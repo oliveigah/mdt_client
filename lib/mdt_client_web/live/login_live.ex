@@ -28,8 +28,9 @@ defmodule MDTClientWeb.LoginLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} chrome={false}>
-      <div class="absolute right-3 top-3">
+    <Layouts.app flash={@flash} chrome={false} update={@update}>
+      <div class="absolute right-3 top-3 flex items-center gap-2">
+        <Layouts.update_check update={@update} />
         <Layouts.theme_toggle />
       </div>
 
