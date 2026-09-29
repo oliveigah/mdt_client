@@ -83,6 +83,10 @@
 /* Make LiveView wrapper divs transparent for layout */
 [data-phx-session], [data-phx-teleported-src] { display: contents }
 
+/* The slim window bar is only present inside Tauri, which supplies its controls. */
+body.tauri-window #window-titlebar { display: flex }
+body.tauri-window #window-resize { display: block }
+
 @layer base {
   :root {
     color-scheme: dark;

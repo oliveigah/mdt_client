@@ -58,7 +58,84 @@
       })();
     </script>
   </head>
-  <body class="h-full">
-    {@inner_content}
+  <body class="flex h-full flex-col">
+    <header
+      id="window-titlebar"
+      data-tauri-drag-region="deep"
+      class="relative hidden h-7 shrink-0 items-center justify-between border-b border-line-soft bg-panel pl-2 text-ink select-none"
+    >
+      <.logo class="pointer-events-none size-3.5" />
+      <span
+        id="window-title"
+        class="pointer-events-none absolute inset-y-0 left-24 right-24 truncate text-center text-[11px] leading-7 font-semibold tracking-wide"
+      >
+        MDT
+      </span>
+      <div class="flex h-full items-stretch" data-tauri-drag-region="false">
+        <button
+          id="window-minimize"
+          type="button"
+          title="Minimize"
+          aria-label="Minimize window"
+          class="flex w-8 items-center justify-center text-muted transition-colors hover:bg-hover hover:text-ink focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
+        >
+          <.icon name="hero-minus" class="size-3.5" />
+        </button>
+        <button
+          id="window-maximize"
+          type="button"
+          title="Maximize or restore"
+          aria-label="Maximize or restore window"
+          class="flex w-8 items-center justify-center text-muted transition-colors hover:bg-hover hover:text-ink focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
+        >
+          <.icon name="hero-stop" class="size-3.5" />
+        </button>
+        <button
+          id="window-close"
+          type="button"
+          title="Close"
+          aria-label="Close window"
+          class="flex w-8 items-center justify-center text-muted transition-colors hover:bg-bad hover:text-white focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
+        >
+          <.icon name="hero-x-mark" class="size-3.5" />
+        </button>
+      </div>
+    </header>
+    <div id="window-content" class="min-h-0 flex-1">
+      {@inner_content}
+    </div>
+    <div id="window-resize" class="hidden" aria-hidden="true">
+      <div data-resize-direction="North" class="fixed inset-x-2 top-0 z-[60] h-1 cursor-n-resize">
+      </div>
+      <div
+        data-resize-direction="South"
+        class="fixed inset-x-2 bottom-0 z-[60] h-1 cursor-s-resize"
+      >
+      </div>
+      <div data-resize-direction="West" class="fixed inset-y-2 left-0 z-[60] w-1 cursor-w-resize">
+      </div>
+      <div data-resize-direction="East" class="fixed inset-y-2 right-0 z-[60] w-1 cursor-e-resize">
+      </div>
+      <div
+        data-resize-direction="NorthWest"
+        class="fixed left-0 top-0 z-[60] size-2 cursor-nwse-resize"
+      >
+      </div>
+      <div
+        data-resize-direction="NorthEast"
+        class="fixed right-0 top-0 z-[60] size-2 cursor-nesw-resize"
+      >
+      </div>
+      <div
+        data-resize-direction="SouthWest"
+        class="fixed bottom-0 left-0 z-[60] size-2 cursor-nesw-resize"
+      >
+      </div>
+      <div
+        data-resize-direction="SouthEast"
+        class="fixed bottom-0 right-0 z-[60] size-2 cursor-nwse-resize"
+      >
+      </div>
+    </div>
   </body>
 </html>

@@ -148,6 +148,7 @@ defmodule MDTClientWeb.GitLiveTest do
 
   test "opens, switches between and closes repository tabs", context do
     %{view: view, base: base, path: path} = context
+    assert page_title(view) == "Git GUI · MDT"
 
     other = Path.join(base, "other")
     File.mkdir_p!(other)
@@ -160,21 +161,25 @@ defmodule MDTClientWeb.GitLiveTest do
     open(view, other)
 
     assert count(view, "#git-tabs [role=tab]") == 2
+    assert page_title(view) == "Git GUI - other"
     assert render(view) =~ "other commit"
 
     [first, _second] = tab_ids(view)
     view |> element("#git-tab-#{first}") |> render_click()
 
     assert render(view) =~ "initial commit"
+    assert page_title(view) == "Git GUI - #{Path.basename(path)}"
     assert has_element?(view, "#git-tab-#{first}[aria-selected=true]")
 
     view |> element("#git-close-tab-#{first}") |> render_click()
     assert count(view, "#git-tabs [role=tab]") == 1
+    assert page_title(view) == "Git GUI - other"
     assert render(view) =~ "other commit"
 
     [last] = tab_ids(view)
     view |> element("#git-close-tab-#{last}") |> render_click()
     assert has_element?(view, "#git-empty-state")
+    assert page_title(view) == "Git GUI"
   end
 
   defp tab_ids(view) do

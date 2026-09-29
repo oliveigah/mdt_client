@@ -2229,8 +2229,12 @@ defmodule MDTClientWeb.GitLive do
   defp sync_tab(socket) do
     tab = Enum.find(socket.assigns.tabs, &(&1.id == socket.assigns.active_id))
 
+    page_title =
+      if tab, do: "#{socket.assigns.tool.name} - #{tab.name}", else: socket.assigns.tool.name
+
     socket
     |> assign(:tab, tab)
+    |> assign(:page_title, page_title)
     |> assign_graph(tab)
     |> assign_inspector(tab)
   end

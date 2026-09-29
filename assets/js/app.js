@@ -56,6 +56,66 @@ window.addEventListener("phx:page-loading-stop", _info => topbar.hide())
 // Ctrl/Cmd +, - , 0 and Ctrl/Cmd + wheel resize the whole interface
 initZoom()
 
+// The desktop bar follows LiveView's page title and the theme resolved by the
+// pre-paint script in root.html.heex.
+const appWindow = window.__TAURI__?.window?.getCurrentWindow?.()
+if (appWindow) {
+  document.body.classList.add("tauri-window")
+
+  let windowTitle
+  const syncWindowTitle = () => {
+    const browserTitle = document.title.trim()
+    const pageTitle = browserTitle.endsWith(" · MDT")
+      ? browserTitle.slice(0, -" · MDT".length)
+      : browserTitle
+    const title = pageTitle && pageTitle !== "MDT" ? `MDT | ${pageTitle}` : "MDT"
+    if (title === windowTitle) return
+
+    windowTitle = title
+    document.getElementById("window-title").textContent = title
+    appWindow.setTitle(title).catch(error => console.warn("Could not set window title", error))
+  }
+
+  new MutationObserver(syncWindowTitle).observe(document.head, {
+    subtree: true,
+    childList: true,
+    characterData: true,
+  })
+  syncWindowTitle()
+
+  for (const [id, action] of [
+    ["window-minimize", () => appWindow.minimize()],
+    ["window-maximize", () => appWindow.toggleMaximize()],
+    ["window-close", () => appWindow.close()],
+  ]) {
+    document.getElementById(id)?.addEventListener("click", () => {
+      action().catch(error => console.warn("Could not control window", error))
+    })
+  }
+
+  document.querySelectorAll("#window-resize [data-resize-direction]").forEach(handle => {
+    handle.addEventListener("mousedown", event => {
+      if (event.button === 0) {
+        appWindow.startResizeDragging(handle.dataset.resizeDirection)
+          .catch(error => console.warn("Could not resize window", error))
+      }
+    })
+  })
+
+  const syncWindowTheme = () => {
+    const theme = document.documentElement.dataset.theme
+    if (theme === "light" || theme === "dark") {
+      appWindow.setTheme(theme).catch(error => console.warn("Could not set window theme", error))
+    }
+  }
+
+  new MutationObserver(syncWindowTheme).observe(document.documentElement, {
+    attributes: true,
+    attributeFilter: ["data-theme"],
+  })
+  syncWindowTheme()
+}
+
 // connect if there are any LiveViews on the page
 liveSocket.connect()
 

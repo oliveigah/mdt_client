@@ -44,7 +44,7 @@ defmodule MDTClientWeb.Layouts do
     <div class="relative flex h-full flex-col overflow-hidden bg-app text-ink">
       <header
         :if={@chrome}
-        class="flex h-9 shrink-0 items-center gap-2 border-b border-line-soft bg-panel px-2.5"
+        class="flex h-10 shrink-0 items-center gap-2 border-b border-line-soft bg-panel px-3"
       >
         <.link
           navigate={~p"/tools"}
@@ -109,7 +109,7 @@ defmodule MDTClientWeb.Layouts do
     <nav
       id="tool-switcher"
       aria-label="Tools"
-      class="flex items-center gap-0.5"
+      class="flex items-center gap-1"
     >
       <.link
         :for={tool <- Tools.all()}
@@ -117,7 +117,7 @@ defmodule MDTClientWeb.Layouts do
         navigate={tool.path}
         aria-current={@current && @current.id == tool.id && "page"}
         class={[
-          "group flex h-6 items-center gap-1.5 rounded px-2 text-xs transition-colors",
+          "group flex h-7 items-center gap-2 rounded-md px-2.5 text-[13px] transition-colors",
           if(@current && @current.id == tool.id,
             do: "bg-active font-medium text-ink",
             else: "text-muted hover:bg-hover hover:text-ink"
@@ -127,7 +127,7 @@ defmodule MDTClientWeb.Layouts do
         <.icon
           name={tool.icon}
           class={[
-            "size-3.5 transition-colors",
+            "size-4 transition-colors",
             if(@current && @current.id == tool.id,
               do: "text-accent",
               else: "text-faint group-hover:text-muted"

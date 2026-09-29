@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "local-server",
-  "description": "The interface is served by the bundled Phoenix server over loopback, so the webview's origin is http://127.0.0.1:<port> rather than the tauri:// scheme. Tauri treats that as a remote origin and rejects every IPC call from it unless a capability names the origin, which is what this one does. Only the open and save pickers and the interface zoom command are granted; the app talks to Elixir over the same loopback connection for everything else.",
+  "description": "The interface is served by the bundled Phoenix server over loopback, so the webview's origin is http://127.0.0.1:<port> rather than the tauri:// scheme. Tauri treats that as a remote origin and rejects every IPC call from it unless a capability names the origin. The open and save pickers, interface zoom command, window theme, and slim title bar controls are granted; the app talks to Elixir over the same loopback connection for everything else.",
   "windows": ["main", "window-*"],
   "remote": {
     "urls": [
@@ -11,5 +11,16 @@
       "http://localhost:12995/*"
     ]
   },
-  "permissions": ["dialog:allow-open", "dialog:allow-save", "allow-set-webview-zoom"]
+  "permissions": [
+    "dialog:allow-open",
+    "dialog:allow-save",
+    "allow-set-webview-zoom",
+    "core:window:allow-set-theme",
+    "core:window:allow-set-title",
+    "core:window:allow-minimize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-close",
+    "core:window:allow-start-dragging",
+    "core:window:allow-start-resize-dragging"
+  ]
 }
