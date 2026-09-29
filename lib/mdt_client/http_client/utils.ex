@@ -82,6 +82,8 @@ defmodule MDTClient.HttpClient.Utils do
         response_tab: "body",
         state: :idle,
         pending: nil,
+        started_at: nil,
+        cancelled_after: nil,
         response: nil
       },
       attrs

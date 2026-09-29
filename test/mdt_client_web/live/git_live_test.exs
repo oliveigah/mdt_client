@@ -390,6 +390,98 @@ defmodule MDTClientWeb.GitLiveTest do
     assert has_element?(view, "#git-branch-#{slug("refs/heads/shipped")}")
   end
 
+  test "checking out a remote branch a local one tracks brings that one in line", context do
+    %{view: view, path: path, base: base} = context
+    git!(path, ["branch", "feature"])
+    elsewhere = origin!(base, path, ["main", "feature"])
+    remote_head = push_commit!(elsewhere, "feature", "remote.txt", "remote work")
+    git!(path, ["fetch", "--quiet", "origin"])
+
+    open(view, path)
+
+    feature = slug("refs/remotes/origin/feature")
+    view |> element("#git-branch-menu-button-#{feature}") |> render_click()
+    assert view |> element("#git-menu-checkout-remote-#{feature}") |> render() =~ "as feature"
+
+    # Only trailing the remote, with nothing uncommitted: nothing to ask.
+    view |> element("#git-menu-checkout-remote-#{feature}") |> render_click()
+    render_async(view)
+
+    refute has_element?(view, "#git-confirm")
+    refute has_element?(view, "#git-action-form")
+    assert git!(path, ["rev-parse", "--abbrev-ref", "HEAD"]) == "feature"
+    assert head_commit(path) == remote_head
+    assert git!(path, ["branch", "--list", "--format=%(refname:short)"]) == "feature\nmain"
+
+    # Checked out and level with it, there is nothing left to do.
+    view |> element("#git-branch-menu-button-#{feature}") |> render_click()
+    assert has_element?(view, "#git-menu-checkout-remote-#{feature}[disabled]")
+  end
+
+  test "with work at stake, it asks whether to stash, soft or hard reset", context do
+    %{view: view, path: path, base: base} = context
+    git!(path, ["branch", "feature"])
+    elsewhere = origin!(base, path, ["main", "feature"])
+    remote_head = push_commit!(elsewhere, "feature", "remote.txt", "remote work")
+    git!(path, ["fetch", "--quiet", "origin"])
+    git!(path, ["switch", "--quiet", "feature"])
+    commit_file(path, "local.txt", "local\n", "local work")
+    File.write!(Path.join(path, "README.md"), "uncommitted\n")
+
+    open(view, path)
+
+    feature = slug("refs/remotes/origin/feature")
+    view |> element("#git-branch-menu-button-#{feature}") |> render_click()
+    view |> element("#git-menu-checkout-remote-#{feature}") |> render_click()
+
+    assert has_element?(view, "#git-confirm-choices")
+    dialog = view |> element("#git-confirm") |> render()
+    assert dialog =~ "1 commit origin/feature lacks"
+    assert dialog =~ "1 file changed"
+
+    for choice <- ~w(stash soft hard), do: assert(has_element?(view, "#git-confirm-#{choice}"))
+
+    # Called off, nothing moved.
+    view |> element("#git-confirm-cancel") |> render_click()
+    refute has_element?(view, "#git-confirm")
+    refute head_commit(path) == remote_head
+
+    view |> element("#git-branch-menu-button-#{feature}") |> render_click()
+    view |> element("#git-menu-checkout-remote-#{feature}") |> render_click()
+    view |> element("#git-confirm-stash") |> render_click()
+    render_async(view)
+
+    assert head_commit(path) == remote_head
+    assert git!(path, ["status", "--porcelain"]) == ""
+    assert git!(path, ["stash", "list"]) =~ "Before resetting feature to origin/feature"
+    assert has_element?(view, "#git-stash-0")
+  end
+
+  test "a clean branch with commits of its own is offered no stash", context do
+    %{view: view, path: path, base: base} = context
+    git!(path, ["branch", "feature"])
+    elsewhere = origin!(base, path, ["main", "feature"])
+    remote_head = push_commit!(elsewhere, "feature", "remote.txt", "remote work")
+    git!(path, ["fetch", "--quiet", "origin"])
+    git!(path, ["switch", "--quiet", "feature"])
+    commit_file(path, "local.txt", "local\n", "local work")
+    git!(path, ["switch", "--quiet", "main"])
+
+    open(view, path)
+
+    feature = slug("refs/remotes/origin/feature")
+    view |> element("#git-branch-menu-button-#{feature}") |> render_click()
+    view |> element("#git-menu-checkout-remote-#{feature}") |> render_click()
+
+    refute has_element?(view, "#git-confirm-stash")
+    view |> element("#git-confirm-hard") |> render_click()
+    render_async(view)
+
+    assert git!(path, ["rev-parse", "--abbrev-ref", "HEAD"]) == "feature"
+    assert head_commit(path) == remote_head
+    refute File.exists?(Path.join(path, "local.txt"))
+  end
+
   test "a branch in the graph carries its own menu, checkout included", context do
     %{view: view, path: path} = context
     git!(path, ["branch", "feature"])
@@ -1589,6 +1681,90 @@ defmodule MDTClientWeb.GitLiveTest do
     refute has_element?(view, "#git-stashes")
   end
 
+  test "a stash hangs off the commit it was made on, drawn as a box", context do
+    %{view: view, path: path} = context
+    File.write!(Path.join(path, "README.md"), "parked\n")
+    git!(path, ["stash", "push", "--quiet", "--message", "parked work"])
+    stash = git!(path, ["rev-parse", "stash@{0}"])
+    head = head_commit(path)
+
+    open(view, path)
+
+    row = "#git-graph-stash-#{stash}"
+    assert has_element?(view, row)
+    assert view |> element(row) |> render() =~ "parked work"
+    assert has_element?(view, "#{row} svg rect")
+    refute has_element?(view, "#{row} svg circle")
+    assert has_element?(view, "#git-commit-#{head} svg circle")
+
+    # The stash is its own row, right above its commit; Git's bookkeeping
+    # commits for it are nowhere in the graph.
+    ids =
+      view
+      |> render()
+      |> LazyHTML.from_fragment()
+      |> LazyHTML.query("#git-commit-rows > [id]")
+      |> LazyHTML.attribute("id")
+
+    assert ids == ["git-graph-stash-#{stash}", "git-commit-#{head}"]
+  end
+
+  test "picking a stash shows what it holds, and its menu pops it", context do
+    %{view: view, path: path} = context
+    File.write!(Path.join(path, "README.md"), "parked\n")
+    git!(path, ["stash", "push", "--quiet", "--message", "parked work"])
+    stash = git!(path, ["rev-parse", "stash@{0}"])
+
+    open(view, path)
+
+    view |> element("#git-select-stash-#{stash}") |> render_click()
+    render_async(view)
+
+    assert has_element?(view, "#git-select-stash-#{stash}[aria-selected=true]")
+    assert has_element?(view, "#git-stash-details")
+    refute has_element?(view, "#git-commit-details")
+    assert has_element?(view, "#git-commit-file-#{slug("README.md")}")
+
+    # Its files open the diff the stash made to them.
+    view |> element("#git-commit-file-#{slug("README.md")}") |> render_click()
+    render_async(view)
+    assert view |> element("#git-diff-body") |> render() =~ "parked"
+    view |> element("#git-close-diff") |> render_click()
+
+    render_hook(view, "open_menu", %{"kind" => "stash", "id" => stash, "x" => 10, "y" => 10})
+    assert has_element?(view, "#git-stash-menu-0[role=menu]")
+
+    view |> element("#git-menu-pop-stash") |> render_click()
+    render_async(view)
+
+    refute has_element?(view, "#git-graph-stash-#{stash}")
+    refute has_element?(view, "#git-stash-details")
+    assert File.read!(Path.join(path, "README.md")) == "parked\n"
+  end
+
+  test "a stash picked in the branch panel is the one inspected", context do
+    %{view: view, path: path} = context
+    File.write!(Path.join(path, "README.md"), "parked\n")
+    git!(path, ["stash", "push", "--quiet", "--message", "parked work"])
+
+    open(view, path)
+
+    view |> element("#git-stash-select-0") |> render_click()
+    render_async(view)
+
+    assert has_element?(view, "#git-stash-details")
+    assert has_element?(view, "#git-stash-select-0[aria-pressed=true]")
+
+    # Dropping it from the inspector asks first, like the panel does.
+    view |> element("#git-stash-details-drop") |> render_click()
+    view |> element("#git-confirm-accept") |> render_click()
+    render_async(view)
+
+    assert git!(path, ["stash", "list"]) == ""
+    refute has_element?(view, "#git-stash-details")
+    assert has_element?(view, "#git-commit-details")
+  end
+
   test "a dirty worktree gets a WIP row above the newest commit", context do
     %{view: view, path: path} = context
     open(view, path)
@@ -1915,6 +2091,119 @@ defmodule MDTClientWeb.GitLiveTest do
     render_async(view)
 
     assert count(view, "#git-commits [role=option]") == 1
+  end
+
+  ## Background fetch
+
+  defp auto_fetch(interval \\ :timer.seconds(30)) do
+    Application.put_env(:mdt_client, :git_auto_fetch, true)
+    Application.put_env(:mdt_client, :git_fetch_interval, interval)
+
+    on_exit(fn ->
+      Application.put_env(:mdt_client, :git_auto_fetch, false)
+      Application.delete_env(:mdt_client, :git_fetch_interval)
+    end)
+  end
+
+  test "there is no Fetch button: opening a tab fetches its remotes", context do
+    %{view: view, path: path, base: base} = context
+    auto_fetch()
+    elsewhere = origin!(base, path)
+    remote_head = push_commit!(elsewhere, "main", "remote.txt", "made elsewhere")
+
+    open(view, path)
+    render_async(view)
+
+    refute has_element?(view, "#git-fetch")
+
+    assert git!(path, ["rev-parse", "origin/main"]) == remote_head
+    assert has_element?(view, "#git-fetch-status[data-state=idle]")
+    assert has_element?(view, "#git-commit-#{remote_head}")
+    # It is done quietly.
+    refute has_element?(view, "#notices")
+  end
+
+  test "a repository without remotes has nothing to fetch", context do
+    %{view: view, path: path} = context
+    auto_fetch()
+    open(view, path)
+
+    refute has_element?(view, "#git-fetch-status")
+  end
+
+  test "fetches again as the reader works, but not more often than the interval", context do
+    %{view: view, path: path, base: base} = context
+    auto_fetch()
+    elsewhere = origin!(base, path)
+
+    open(view, path)
+    render_async(view)
+
+    later = push_commit!(elsewhere, "main", "later.txt", "later")
+    view |> element("#git-panel-changes") |> render_click()
+    render_async(view)
+
+    # Just fetched: the click is not reason enough to go again.
+    refute has_element?(view, "#git-commit-#{later}")
+
+    Application.put_env(:mdt_client, :git_fetch_interval, 0)
+    view |> element("#git-panel-commit") |> render_click()
+    render_async(view)
+
+    assert has_element?(view, "#git-commit-#{later}")
+  end
+
+  test "switching to a tab fetches it", context do
+    %{view: view, path: path, base: base} = context
+    auto_fetch(0)
+    elsewhere = origin!(base, path)
+    other = Path.join(base, "other")
+    File.mkdir_p!(other)
+    git!(other, ["init", "--quiet", "--initial-branch=main"])
+    File.write!(Path.join(other, "other.txt"), "other\n")
+
+    open(view, path)
+    render_async(view)
+    open(view, other)
+
+    later = push_commit!(elsewhere, "main", "later.txt", "later")
+    [first, _second] = tab_ids(view)
+    view |> element("#git-tab-#{first}") |> render_click()
+    render_async(view)
+
+    assert has_element?(view, "#git-commit-#{later}")
+  end
+
+  test "a failed background fetch stays quiet and shows in the toolbar", context do
+    %{view: view, path: path, base: base} = context
+    auto_fetch()
+    git!(path, ["remote", "add", "origin", Path.join(base, "missing.git")])
+
+    open(view, path)
+    render_async(view)
+
+    assert has_element?(view, "#git-fetch-status[data-state=failed]")
+    assert view |> element("#git-fetch-status") |> render() =~ "The last background fetch failed"
+    refute has_element?(view, "#notices")
+    refute has_element?(view, "#git-ssh-popover")
+  end
+
+  test "a push asked for while a fetch runs goes once it is done", context do
+    %{view: view, path: path, base: base} = context
+    auto_fetch()
+    origin!(base, path)
+    local = commit_file(path, "local.txt", "local\n", "local work")
+
+    # The fetch the tab opened with is most likely still running: the push
+    # waits for it, and starts once it is done.
+    open(view, path)
+    view |> element("#git-push") |> render_click()
+
+    render_async(view)
+    render_async(view)
+
+    assert git!(path, ["rev-parse", "origin/main"]) == local
+    refute has_element?(view, "#git-operation-status")
   end
 
   ## Cloning

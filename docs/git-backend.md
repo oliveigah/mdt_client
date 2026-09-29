@@ -47,7 +47,11 @@ transport and offers the equivalent `git@host:path` URL for HTTP(S) remotes.
   progress.
 
 The graph result describes topology through each commit's ordered `parents`
-list. Lane assignment and edge routing belong in the client because they depend
+list. Stash commits are left out of it: Git keeps each stash entry as a merge
+of the commit it was made on with commits holding the index and untracked
+files, which is bookkeeping rather than history. `list_stashes/1` reports each
+entry with that base commit as its `parent`, and whether it holds untracked
+files, so the client can hang the entry off the graph itself. Lane assignment and edge routing belong in the client because they depend
 on viewport and rendering choices. The default graph window is 500 commits and
 can be changed with `snapshot(repository, limit: count)` up to 5,000.
 
@@ -67,7 +71,10 @@ The core currently supports:
 
 - cloning a remote repository into an empty folder;
 - creating, checking out, renaming, and deleting local branches;
-- checking out a remote branch into a local tracking branch;
+- checking out a remote branch into a local tracking branch, or, when a local
+  branch already tracks it, checking that one out and moving it there by
+  fast-forward, soft or hard reset, or a hard reset after stashing everything
+  uncommitted (`reset_to_remote/4`);
 - detached commit checkout;
 - commit, merge, rebase, cherry-pick, revert, and soft or hard reset;
 - staging and unstaging an exact selection of repository files;
@@ -76,7 +83,9 @@ The core currently supports:
   deletion;
 - editing HEAD or an older commit message on the checked-out branch;
 - squashing consecutive commits on the checked-out branch into one;
-- fetch, pull, push, remote URL changes, and remote branch deletion; and
+- fetch, pull, push, remote URL changes, and remote branch deletion, where a
+  fetch passed `prompt: false` tells credential helpers and SSH askpass
+  programs not to open a window; and
 - continue, skip, and abort for operations that stop on conflicts.
 
 Successful mutations return `{:ok, %MDTClient.Git.CommandResult{}}`. The UI
@@ -173,10 +182,22 @@ others dropping down on hover, and a right click on any of them opening that
 branch's menu. A name too long for the column is cut short, and hovering it
 drops down the same list with the name in full. The graph is the primary surface: a right click, a row menu, or the inspector's
 Actions button opens the same commit menu, and every entry maps to one `Core`
-call. A dirty worktree takes a row of its own above the newest commit, drawn by
-`Layout.pending_row/1`, and opening a file diff replaces the graph until it is
+call. A dirty worktree takes a row of its own above the graph, drawn by
+`Layout.pending_row/1`, whose line runs down to HEAD in a lane held open for it, and opening a file diff replaces the graph until it is
 closed. The open folders are remembered by `MDTClientWeb.GitLive.Session`, and a timer
-refreshes the active tab so work done outside MDT appears on its own. Selecting
+refreshes the active tab so work done outside MDT appears on its own. There is
+no Fetch button: the active tab's remotes are fetched in the background when
+the tab opens or is switched to, whenever the reader does anything, and on the
+timer, but never twice within 30 seconds. The fetch is quiet; a cloud in the
+toolbar says when it ran and whether it failed. A pull, push or remote delete
+asked for while it runs waits for it, since they write the same references;
+anything else goes ahead. Stashes appear in the graph as hollow boxes, each in
+a row right above the commit it was made on, linked to it by a dashed line in a
+lane of its own; picking one inspects its files like a commit's, and its menu
+applies, pops or drops it. Checking out a remote branch that a local branch
+already tracks resets that local branch instead of creating another: at once
+when it only trails the remote and nothing is uncommitted, otherwise after
+asking whether to stash first, soft reset or hard reset. Selecting
 a commit lists the files it touched under its metadata, and picking one of them
 opens the same diff view; the working tree keeps a tab of its own. Its files are
 picked the way a file manager picks them: a click takes one, Ctrl or Cmd adds or

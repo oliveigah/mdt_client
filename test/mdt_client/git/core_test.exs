@@ -193,6 +193,107 @@ defmodule MDTClient.Git.CoreTest do
     assert branch.upstream == "origin/server-topic"
   end
 
+  describe "resetting a local branch to the remote branch it tracks" do
+    setup %{base: base, path: path} do
+      git!(path, ["branch", "feature"])
+      elsewhere = origin!(base, path, ["main", "feature"])
+      remote_head = push_commit!(elsewhere, "feature", "remote.txt", "remote work")
+      git!(path, ["fetch", "--quiet", "origin"])
+
+      %{remote_head: remote_head}
+    end
+
+    test "fast-forwards a branch that only trails it, checking it out", context do
+      %{path: path, repository: repository, remote_head: remote_head} = context
+
+      assert {:ok, %CommandResult{action: :reset_to_remote}} =
+               Core.reset_to_remote(repository, "feature", "origin/feature", :fast_forward)
+
+      assert git!(path, ["rev-parse", "--abbrev-ref", "HEAD"]) == "feature"
+      assert git!(path, ["rev-parse", "HEAD"]) == remote_head
+    end
+
+    test "refuses to fast-forward over commits only the local branch has", context do
+      %{path: path, repository: repository} = context
+      git!(path, ["switch", "--quiet", "feature"])
+      local_head = commit_file(path, "local.txt", "local\n", "local work")
+
+      assert {:error, %Error{}} =
+               Core.reset_to_remote(repository, "feature", "origin/feature", :fast_forward)
+
+      assert git!(path, ["rev-parse", "HEAD"]) == local_head
+    end
+
+    test "a hard reset discards local commits and changes", context do
+      %{path: path, repository: repository, remote_head: remote_head} = context
+      git!(path, ["switch", "--quiet", "feature"])
+      commit_file(path, "local.txt", "local\n", "local work")
+      git!(path, ["switch", "--quiet", "main"])
+      File.write!(Path.join(path, "README.md"), "uncommitted\n")
+
+      assert {:ok, _result} = Core.reset_to_remote(repository, "feature", "origin/feature", :hard)
+
+      assert git!(path, ["rev-parse", "--abbrev-ref", "HEAD"]) == "feature"
+      assert git!(path, ["rev-parse", "HEAD"]) == remote_head
+      assert git!(path, ["status", "--porcelain"]) == ""
+    end
+
+    test "a soft reset moves only the branch and leaves every file as it was", context do
+      %{path: path, repository: repository, remote_head: remote_head} = context
+      git!(path, ["switch", "--quiet", "feature"])
+      commit_file(path, "local.txt", "local\n", "local work")
+
+      assert {:ok, _result} = Core.reset_to_remote(repository, "feature", "origin/feature", :soft)
+
+      assert git!(path, ["rev-parse", "HEAD"]) == remote_head
+      assert File.read!(Path.join(path, "local.txt")) == "local\n"
+      assert git!(path, ["diff", "--cached", "--name-only"]) =~ "local.txt"
+    end
+
+    test "stashing first keeps the uncommitted changes, untracked files included", context do
+      %{path: path, repository: repository, remote_head: remote_head} = context
+      git!(path, ["switch", "--quiet", "feature"])
+      File.write!(Path.join(path, "README.md"), "uncommitted\n")
+      File.write!(Path.join(path, "untracked.txt"), "untracked\n")
+
+      assert {:ok, _result} =
+               Core.reset_to_remote(repository, "feature", "origin/feature", :stash)
+
+      assert git!(path, ["rev-parse", "HEAD"]) == remote_head
+      assert git!(path, ["status", "--porcelain"]) == ""
+
+      assert {:ok, [stash]} = Core.list_stashes(repository)
+      assert stash.summary =~ "Before resetting feature to origin/feature"
+      assert stash.untracked?
+
+      git!(path, ["stash", "pop", "--quiet"])
+      assert File.read!(Path.join(path, "README.md")) == "uncommitted\n"
+      assert File.read!(Path.join(path, "untracked.txt")) == "untracked\n"
+    end
+
+    test "rejects an unknown mode or a branch that does not exist", %{repository: repository} do
+      assert {:error, %Error{kind: :invalid_argument}} =
+               Core.reset_to_remote(repository, "feature", "origin/feature", :mixed)
+
+      assert {:error, %Error{kind: :invalid_argument}} =
+               Core.reset_to_remote(repository, "missing", "origin/feature", :hard)
+
+      assert {:error, %Error{kind: :invalid_argument}} =
+               Core.reset_to_remote(repository, "feature", "origin/missing", :hard)
+    end
+  end
+
+  test "a fetch nobody asked for can run without prompting", context do
+    %{base: base, path: path, repository: repository} = context
+    elsewhere = origin!(base, path)
+    remote_head = push_commit!(elsewhere, "main", "remote.txt", "remote work")
+
+    assert {:ok, %CommandResult{action: :fetch}} = Core.fetch(repository, nil, prompt: false)
+    assert git!(path, ["rev-parse", "origin/main"]) == remote_head
+
+    assert {:error, %Error{kind: :invalid_argument}} = Core.fetch(repository, nil, prompt: "no")
+  end
+
   test "merges, cherry-picks, reverts, and resets commits", context do
     %{path: path, repository: repository, initial_commit: initial_commit} = context
 
@@ -527,6 +628,44 @@ defmodule MDTClient.Git.CoreTest do
     assert {:ok, _result} = Core.stash(repository, ["README.md"])
     assert {:ok, %CommandResult{action: :drop_stash}} = Core.drop_stash(repository)
     assert {:ok, []} = Core.list_stashes(repository)
+  end
+
+  test "a stash names the commit it was made on and stays out of the history", context do
+    %{path: path, repository: repository, initial_commit: initial_commit} = context
+
+    File.write!(Path.join(path, "README.md"), "tracked\n")
+    File.write!(Path.join(path, "fresh.txt"), "untracked\n")
+    assert {:ok, _result} = Core.stash(repository, ["README.md", "fresh.txt"], message: "older")
+
+    later = commit_file(path, "later.txt", "later\n", "later work")
+    File.write!(Path.join(path, "README.md"), "tracked again\n")
+
+    assert {:ok, _result} =
+             Core.stash(repository, ["README.md"], message: "newer", include_untracked: false)
+
+    assert {:ok, [newer, older]} = Core.list_stashes(repository)
+    assert newer.parent == later
+    refute newer.untracked?
+    assert older.parent == initial_commit
+    assert older.untracked?
+
+    # The entries' own commits, and the index and untracked commits Git keeps
+    # for them, are not history.
+    assert {:ok, snapshot} = Core.snapshot(repository)
+    assert Enum.map(snapshot.commits, & &1.id) == [later, initial_commit]
+  end
+
+  test "a fingerprint notices an older stash being dropped", %{path: path, repository: repository} do
+    for message <- ["first", "second"] do
+      File.write!(Path.join(path, "README.md"), "#{message}\n")
+      assert {:ok, _result} = Core.stash(repository, ["README.md"], message: message)
+    end
+
+    assert {:ok, before} = Core.fingerprint(repository)
+    assert {:ok, _result} = Core.drop_stash(repository, "stash@{1}")
+    assert {:ok, later} = Core.fingerprint(repository)
+
+    refute later == before
   end
 
   test "reports a conflicted operation and can abort it", %{path: path, repository: repository} do

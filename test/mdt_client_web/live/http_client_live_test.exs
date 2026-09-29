@@ -574,6 +574,128 @@ defmodule MDTClientWeb.HttpClientLiveTest do
     assert length(Resources.all(username)) == 2
   end
 
+  test "a running request shows how long it has waited and cancels with Escape", %{view: view} do
+    test_process = self()
+
+    Req.Test.stub(__MODULE__, fn conn ->
+      send(test_process, :slow_request_started)
+
+      receive do
+        :unexpected_finish -> Plug.Conn.send_resp(conn, 200, "too late")
+      end
+    end)
+
+    Req.Test.set_req_test_to_shared()
+    Req.default_options(plug: {Req.Test, __MODULE__})
+
+    on_exit(fn ->
+      Req.default_options([])
+      Req.Test.set_req_test_to_private()
+    end)
+
+    view
+    |> element("#request-form")
+    |> render_change(%{"request" => %{"url" => "https://api.example.test/slow"}})
+
+    view |> element("#request-form") |> render_submit(%{})
+    assert_receive :slow_request_started
+
+    assert has_element?(view, "#response-waiting [data-started-at]")
+    assert has_element?(view, "#cancel-request-waiting")
+    assert view |> element("#response-waiting") |> render() =~ "api.example.test"
+
+    view |> element("#response-waiting") |> render_keydown(%{"key" => "Escape"})
+
+    refute has_element?(view, "#response-waiting")
+    assert has_element?(view, "#response-cancelled")
+    assert has_element?(view, "#send-request")
+  end
+
+  test "the response sits below or beside the request, and the choice is kept", %{
+    view: view,
+    conn: conn
+  } do
+    assert has_element?(view, "#request-workspace[data-layout=vertical]")
+    assert has_element?(view, "#request-resizer[data-axis=y][data-panel=request-editor]")
+
+    view |> element("#toggle-layout") |> render_click()
+
+    assert has_element?(view, "#request-workspace[data-layout=horizontal]")
+    assert has_element?(view, "#request-resizer-x[data-axis=x][data-panel=request-pane]")
+    refute has_element?(view, "#request-resizer")
+
+    {:ok, reopened, _html} = live(conn, ~p"/tools/http")
+    assert has_element?(reopened, "#request-workspace[data-layout=horizontal]")
+
+    reopened |> element("#toggle-layout") |> render_click()
+    assert has_element?(reopened, "#request-workspace[data-layout=vertical]")
+  end
+
+  test "JSON responses switch between pretty and raw without a new viewer", %{
+    view: view,
+    health_id: health_id
+  } do
+    view |> element("#history-#{health_id}") |> render_click()
+    render_async(view)
+
+    [tab_id] = view |> tab_ids() |> Enum.take(-1)
+    viewer = "#response-body-#{tab_id} [data-code-view]"
+
+    assert has_element?(view, "#{viewer}[data-language=json][data-format=pretty]")
+    assert has_element?(view, "#response-format-pretty[aria-pressed=true]")
+
+    assert has_element?(
+             view,
+             "#copy-response-#{tab_id}[data-copy-target=response-body-#{tab_id}]"
+           )
+
+    viewer_id = first_attribute(view, viewer, "id")
+
+    view |> element("#response-format-raw") |> render_click()
+
+    assert has_element?(view, "#{viewer}[data-format=raw]")
+    assert has_element?(view, "#response-format-raw[aria-pressed=true]")
+    assert first_attribute(view, viewer, "id") == viewer_id
+  end
+
+  test "a multi line curl command with bundled switches is imported", %{view: view} do
+    view |> element("[phx-click=open_dialog][phx-value-dialog=import_curl]") |> render_click()
+
+    view
+    |> element("#curl-dialog form")
+    |> render_submit(%{
+      "command" => """
+      curl -sS -X POST \\
+         'https://api.example.test/credit/bvs_datalake' \\
+         -H 'Content-Type: application/json' \\
+         -H 'X-Cache-Max-Age-Seconds: 0' \\
+         -d '{
+           "documento": "<CPF_11_DIGITOS>",
+           "origin": "UME_EOS26"
+         }'
+      """
+    })
+
+    refute has_element?(view, "#curl-dialog")
+
+    assert first_attribute(view, "#request-url", "value") ==
+             "https://api.example.test/credit/bvs_datalake"
+
+    assert has_element?(view, "#request-body-highlight")
+    assert view |> element("#request-body") |> render() =~ "UME_EOS26"
+  end
+
+  test "curl import errors keep their wording", %{view: view} do
+    view |> element("[phx-click=open_dialog][phx-value-dialog=import_curl]") |> render_click()
+
+    view
+    |> element("#curl-dialog form")
+    |> render_submit(%{"command" => "curl -X PURGE https://api.example.test"})
+
+    assert view |> element("#curl-import-error") |> render() =~
+             "The PURGE method is not supported"
+  end
+
   test "sending records the description and tags of the tab", %{view: view, username: username} do
     Req.Test.stub(__MODULE__, fn conn -> Plug.Conn.send_resp(conn, 200, "ok") end)
     Req.Test.set_req_test_to_shared()

@@ -14,10 +14,13 @@ defmodule MDTClientWeb.HttpClientLive do
   alias MDTClient.HttpClient.Resources
   alias MDTClient.HttpClient.Translation
   alias MDTClient.HttpClient.Utils
+  alias MDTClient.Preferences
   alias MDTClient.Tools
 
   @auto_load_response_bytes 5 * 1024 * 1024
   @max_display_response_bytes 100 * 1024 * 1024
+  @layouts ~w(vertical horizontal)
+  @layout_preference "http_client_layout"
 
   @impl true
   def mount(_params, _session, socket) do
@@ -34,6 +37,8 @@ defmodule MDTClientWeb.HttpClientLive do
      |> assign(:tabs, tabs)
      |> assign(:active_id, hd(tabs).id)
      |> assign(:sidebar?, true)
+     |> assign(:panel_layout, stored_layout())
+     |> assign(:response_format, "pretty")
      |> assign(:collapsed, MapSet.new())
      |> assign(:selected, MapSet.new())
      |> assign(:selection_anchor, nil)
@@ -81,19 +86,45 @@ defmodule MDTClientWeb.HttpClientLive do
           <.tab_bar tabs={@tabs} active_id={@active_id} sidebar?={@sidebar?} />
 
           <%= if @tab do %>
-            <.request_editor tab={@tab} form={@form} />
+            <div
+              id="request-workspace"
+              data-layout={@panel_layout}
+              class={[
+                "flex min-h-0 flex-1",
+                if(@panel_layout == "horizontal", do: "flex-row", else: "flex-col")
+              ]}
+            >
+              <.request_editor tab={@tab} form={@form} layout={@panel_layout} />
 
-            <.resizer
-              id="request-resizer"
-              panel="request-editor"
-              variable="--request-height"
-              storage_key="mdt:request-height"
-              axis="y"
-              min="96"
-              max="700"
-            />
+              <%= if @panel_layout == "horizontal" do %>
+                <.resizer
+                  id="request-resizer-x"
+                  panel="request-pane"
+                  variable="--request-width"
+                  storage_key="mdt:request-width"
+                  axis="x"
+                  min="380"
+                  max="1600"
+                />
+              <% else %>
+                <.resizer
+                  id="request-resizer"
+                  panel="request-editor"
+                  variable="--request-height"
+                  storage_key="mdt:request-height"
+                  axis="y"
+                  min="96"
+                  max="700"
+                />
+              <% end %>
 
-            <.response_panel tab={@tab} />
+              <.response_panel
+                tab={@tab}
+                layout={@panel_layout}
+                format={@response_format}
+                shortcuts?={is_nil(@dialog) and is_nil(@menu)}
+              />
+            </div>
           <% else %>
             <div class="flex flex-1 flex-col items-center justify-center gap-3 text-center">
               <span class="flex size-10 items-center justify-center rounded-xl border border-line bg-panel text-muted">
@@ -699,13 +730,31 @@ defmodule MDTClientWeb.HttpClientLive do
 
   attr :tab, :map, required: true
   attr :form, :map, required: true
+  attr :layout, :string, required: true
 
+  # Stacked, the editor keeps a height of its own above the response; side by
+  # side, the request fills a column whose width the resizer sets.
   defp request_editor(assigns) do
     ~H"""
-    <div class="flex shrink-0 flex-col">
+    <div
+      id="request-pane"
+      class={[
+        "@container flex flex-col",
+        if(@layout == "horizontal",
+          do: "min-h-0 w-[var(--request-width,45%)] min-w-0 shrink-0",
+          else: "shrink-0"
+        )
+      ]}
+    >
       <.request_meta tab={@tab} />
 
-      <.form for={@form} id="request-form" phx-change="update" phx-submit="send" class="flex flex-col">
+      <.form
+        for={@form}
+        id="request-form"
+        phx-change="update"
+        phx-submit="send"
+        class={["flex flex-col", @layout == "horizontal" && "min-h-0 flex-1"]}
+      >
         <div class="flex items-center gap-2 px-2.5 py-2">
           <div class="relative shrink-0">
             <select
@@ -801,34 +850,46 @@ defmodule MDTClientWeb.HttpClientLive do
             :if={@tab.editor_tab == "body" and @tab.body_type == "json"}
             type="button"
             phx-click="format_body"
-            class="my-1 cursor-pointer rounded px-2 text-[11px] text-muted transition-colors hover:bg-hover hover:text-accent"
+            class="my-1 shrink-0 cursor-pointer whitespace-nowrap rounded px-2 text-[11px] text-muted transition-colors hover:bg-hover hover:text-accent"
           >
             Format JSON
           </button>
 
-          <div class="my-2 mx-1 w-px bg-line-soft"></div>
+          <div class="my-2 mx-1 w-px shrink-0 bg-line-soft"></div>
 
+          <%!-- In a narrow column the curl actions keep their icons only. --%>
           <button
             type="button"
             phx-click="open_dialog"
             phx-value-dialog="import_curl"
             title="Create a request from a curl command"
-            class="my-1 flex cursor-pointer items-center gap-1 rounded px-1.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-accent"
+            class="my-1 flex shrink-0 cursor-pointer items-center gap-1 whitespace-nowrap rounded px-1.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-accent"
           >
-            <.icon name="hero-arrow-down-on-square" class="size-3.5" /> Import curl
+            <.icon name="hero-arrow-down-on-square" class="size-3.5" />
+            <span class="hidden @xl:inline">Import curl</span>
           </button>
           <button
             type="button"
             phx-click="open_dialog"
             phx-value-dialog="export_curl"
             title="Copy this request as a curl command"
-            class="my-1 flex cursor-pointer items-center gap-1 rounded px-1.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-accent"
+            class="my-1 flex shrink-0 cursor-pointer items-center gap-1 whitespace-nowrap rounded px-1.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-accent"
           >
-            <.icon name="hero-arrow-up-on-square" class="size-3.5" /> Export curl
+            <.icon name="hero-arrow-up-on-square" class="size-3.5" />
+            <span class="hidden @xl:inline">Export curl</span>
           </button>
         </div>
 
-        <div id="request-editor" class="h-[var(--request-height,34vh)] min-h-24 overflow-y-auto">
+        <div
+          id="request-editor"
+          class={[
+            "overflow-y-auto",
+            if(@layout == "horizontal",
+              do: "min-h-0 flex-1",
+              else: "h-[var(--request-height,34vh)] min-h-24"
+            )
+          ]}
+        >
           <%= case @tab.editor_tab do %>
             <% "params" -> %>
               <.row_editor kind="param" rows={@tab.params} placeholder="page" />
@@ -922,7 +983,7 @@ defmodule MDTClientWeb.HttpClientLive do
       phx-click="set_editor_tab"
       phx-value-tab={@name}
       class={[
-        "relative flex cursor-pointer items-center gap-1.5 px-2.5 py-2 text-xs transition-colors",
+        "relative flex shrink-0 cursor-pointer items-center gap-1.5 px-2.5 py-2 text-xs transition-colors",
         if(@tab.editor_tab == @name, do: "text-ink", else: "text-muted hover:text-ink")
       ]}
     >
@@ -1191,6 +1252,9 @@ defmodule MDTClientWeb.HttpClientLive do
   ## Response
 
   attr :tab, :map, required: true
+  attr :layout, :string, required: true
+  attr :format, :string, required: true, doc: "how JSON bodies are shown, pretty or raw"
+  attr :shortcuts?, :boolean, default: true, doc: "whether Escape cancels a running request"
 
   defp response_panel(assigns) do
     response = assigns.tab.response
@@ -1200,8 +1264,8 @@ defmodule MDTClientWeb.HttpClientLive do
       assigns
       |> assign(:body_loaded?, body_loaded?)
       |> assign(
-        :large_response?,
-        body_loaded? && is_binary(response.body) && large_content?(response.body)
+        :language,
+        body_loaded? && is_binary(response.body) && language(response.content_type, response.body)
       )
       |> assign(
         :displayable_response?,
@@ -1209,26 +1273,67 @@ defmodule MDTClientWeb.HttpClientLive do
       )
 
     ~H"""
-    <div class="flex min-h-0 flex-1 flex-col bg-deep">
+    <div id="response-panel" class="@container flex min-h-0 min-w-0 flex-1 flex-col bg-deep">
       <div class="flex h-9 shrink-0 items-center gap-2 border-b border-line-soft bg-panel px-2.5">
-        <span class="text-[11px] font-semibold uppercase tracking-wide text-muted">Response</span>
+        <span class="hidden text-[11px] font-semibold uppercase tracking-wide text-muted @md:inline">
+          Response
+        </span>
 
-        <%= if @tab.response do %>
-          <span class={[
-            "rounded border px-1.5 py-0.5 font-mono text-[10px] font-semibold",
-            status_pill(@tab.response.status)
-          ]}>
-            {@tab.response.status} {@tab.response.status_text}
-          </span>
-          <span class="font-mono text-[10px] text-muted">{@tab.response.duration_ms} ms</span>
-          <span class="text-faint">·</span>
-          <span class="font-mono text-[10px] text-muted">{@tab.response.size}</span>
+        <%= cond do %>
+          <% @tab.state == :sending -> %>
+            <span class="flex items-center gap-1.5 rounded border border-accent/40 bg-accent-soft/40 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-accent">
+              <span class="size-1.5 rounded-full bg-accent motion-safe:animate-pulse"></span> Sending
+            </span>
+          <% @tab.response -> %>
+            <span class={[
+              "shrink-0 rounded border px-1.5 py-0.5 font-mono text-[10px] font-semibold",
+              status_pill(@tab.response.status)
+            ]}>
+              {@tab.response.status} {@tab.response.status_text}
+            </span>
+            <span class="shrink-0 font-mono text-[10px] text-muted">
+              {@tab.response.duration_ms} ms
+            </span>
+            <span class="text-faint">·</span>
+            <span class="shrink-0 font-mono text-[10px] text-muted">{@tab.response.size}</span>
+          <% true -> %>
         <% end %>
 
         <div class="flex-1"></div>
 
-        <%= if @tab.response do %>
-          <div class="flex items-stretch gap-1">
+        <%= if @tab.response && @tab.state != :sending do %>
+          <div
+            :if={@tab.response_tab == "body" && @language == "json"}
+            id="response-format"
+            role="group"
+            aria-label="Body view"
+            class="flex shrink-0 items-center rounded-md border border-line-soft bg-deep p-0.5"
+          >
+            <button
+              :for={{value, label} <- [{"pretty", "Pretty"}, {"raw", "Raw"}]}
+              type="button"
+              id={"response-format-#{value}"}
+              phx-click="set_response_format"
+              phx-value-format={value}
+              aria-pressed={to_string(@format == value)}
+              title={
+                if value == "pretty",
+                  do: "Formatted and highlighted",
+                  else: "Exactly as the server sent it"
+              }
+              class={[
+                "cursor-pointer rounded px-1.5 py-px text-[11px] transition-colors",
+                if(@format == value,
+                  do: "bg-active text-ink shadow-sm",
+                  else: "text-muted hover:text-ink"
+                )
+              ]}
+            >
+              {label}
+            </button>
+          </div>
+
+          <div class="flex shrink-0 items-stretch gap-1">
             <.response_tab tab={@tab} name="body" label="Body" />
             <.response_tab
               tab={@tab}
@@ -1242,36 +1347,85 @@ defmodule MDTClientWeb.HttpClientLive do
             type="button"
             id={"copy-response-#{@tab.id}"}
             phx-hook=".Copy"
-            data-copy={if(@large_response?, do: nil, else: @tab.response.body)}
-            data-copy-target={if(@large_response?, do: "response-body-#{@tab.id}")}
+            data-copy-target={"response-body-#{@tab.id}"}
             title="Copy response body"
-            class="flex cursor-pointer items-center gap-1 rounded px-1.5 py-1 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
+            class="flex shrink-0 cursor-pointer items-center gap-1 rounded px-1.5 py-1 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
           >
             <.icon name="hero-clipboard-document" class="size-3.5" />
-            <span data-label>Copy</span>
+            <span data-label class="hidden @lg:inline">Copy</span>
           </button>
-          <script :type={Phoenix.LiveView.ColocatedHook} name=".Copy">
-            export default {
-              mounted() {
-                this.el.addEventListener("click", () => {
-                  const target = document.getElementById(this.el.dataset.copyTarget)
-                  navigator.clipboard?.writeText(target?.textContent || this.el.dataset.copy || "")
-                  const label = this.el.querySelector("[data-label]")
-                  if (!label) return
-                  label.textContent = "Copied"
-                  setTimeout(() => label.textContent = "Copy", 1200)
-                })
-              }
-            }
-          </script>
         <% end %>
+
+        <div class="my-2 w-px shrink-0 self-stretch bg-line-soft"></div>
+
+        <button
+          type="button"
+          id="toggle-layout"
+          phx-click="toggle_layout"
+          title={layout_toggle_label(@layout)}
+          aria-label={layout_toggle_label(@layout)}
+          class="flex size-6 shrink-0 cursor-pointer items-center justify-center rounded text-faint transition-colors hover:bg-hover hover:text-ink"
+        >
+          <.icon
+            name="hero-view-columns"
+            class={[
+              "size-4 transition-transform duration-200",
+              @layout == "horizontal" && "rotate-90"
+            ]}
+          />
+        </button>
       </div>
 
       <%= cond do %>
         <% @tab.state == :sending -> %>
-          <div class="flex flex-1 flex-col items-center justify-center gap-2 text-xs text-muted">
-            <.icon name="hero-arrow-path" class="size-5 text-accent motion-safe:animate-spin" />
-            Waiting for response…
+          <div
+            id="response-waiting"
+            phx-window-keydown={@shortcuts? && "cancel"}
+            phx-key={@shortcuts? && "Escape"}
+            class="flex flex-1 flex-col items-center justify-center gap-4 px-6 text-center"
+          >
+            <div class="relative flex size-12 items-center justify-center">
+              <span class="absolute inset-0 rounded-full border-2 border-accent/15"></span>
+              <span class="absolute inset-0 rounded-full border-2 border-transparent border-t-accent motion-safe:animate-spin"></span>
+              <.icon name="hero-paper-airplane" class="size-4 text-accent" />
+            </div>
+
+            <div class="space-y-1">
+              <p
+                id={"elapsed-#{@tab.pending}"}
+                phx-hook=".Elapsed"
+                phx-update="ignore"
+                data-started-at={@tab.started_at}
+                aria-live="off"
+                class="font-mono text-2xl font-semibold tabular-nums text-ink"
+              >
+                {format_elapsed(elapsed_since(@tab.started_at))}
+              </p>
+              <p class="max-w-md truncate text-xs text-muted">
+                Waiting for <span class="font-mono text-ink">{waiting_for(@tab)}</span>
+              </p>
+            </div>
+
+            <.button type="button" id="cancel-request-waiting" phx-click="cancel" variant="secondary">
+              <.icon name="hero-stop-circle" class="size-4" /> Cancel
+              <kbd
+                :if={@shortcuts?}
+                class="rounded border border-line bg-deep px-1 font-mono text-[10px] text-faint"
+              >
+                Esc
+              </kbd>
+            </.button>
+          </div>
+        <% is_nil(@tab.response) and not is_nil(@tab.cancelled_after) -> %>
+          <div
+            id="response-cancelled"
+            class="flex flex-1 flex-col items-center justify-center gap-1.5 text-center"
+          >
+            <.icon name="hero-stop-circle" class="size-5 text-faint" />
+            <p class="text-xs text-muted">
+              Cancelled after {format_elapsed(@tab.cancelled_after)}
+            </p>
+            <p class="text-[11px] text-faint">Hit Send to try again.</p>
           </div>
         <% is_nil(@tab.response) -> %>
           <div class="flex flex-1 flex-col items-center justify-center gap-1.5 text-center">
@@ -1337,11 +1491,60 @@ defmodule MDTClientWeb.HttpClientLive do
           <.code_block
             id={"response-body-#{@tab.id}"}
             content={@tab.response.body}
-            language="json"
+            language={@language}
+            format={@format}
             class="min-h-0 flex-1"
           />
       <% end %>
     </div>
+    <script :type={Phoenix.LiveView.ColocatedHook} name=".Copy">
+      // Copies `data-copy`, or what the viewer named by `data-copy-target` shows:
+      // the formatted body when it is formatted, the raw one otherwise.
+      export default {
+        mounted() {
+          this.el.addEventListener("click", () => {
+            const target = document.getElementById(this.el.dataset.copyTarget)
+            const viewer = target?.querySelector("[data-code-view]")
+            const text = viewer?.codeText?.() ?? target?.textContent ?? this.el.dataset.copy ?? ""
+            navigator.clipboard?.writeText(text)
+
+            const label = this.el.querySelector("[data-label]")
+            if (!label) return
+            label.textContent = "Copied"
+            setTimeout(() => label.textContent = "Copy", 1200)
+          })
+        }
+      }
+    </script>
+    <script :type={Phoenix.LiveView.ColocatedHook} name=".Elapsed">
+      // Counts up from `data-started-at`, the epoch milliseconds the request was
+      // sent at. The app and its server share a clock, so reopening a tab or
+      // reconnecting picks the count up where it is.
+      const format = (milliseconds) => {
+        const seconds = Math.max(0, milliseconds) / 1000
+        if (seconds < 60) return `${seconds.toFixed(1)}s`
+
+        const minutes = Math.floor(seconds / 60)
+        const pad = (value) => String(value).padStart(2, "0")
+        if (minutes < 60) return `${minutes}m ${pad(Math.floor(seconds % 60))}s`
+        return `${Math.floor(minutes / 60)}h ${pad(minutes % 60)}m`
+      }
+
+      export default {
+        mounted() {
+          this.tick()
+          this.timer = setInterval(() => this.tick(), 100)
+        },
+
+        updated() { this.tick() },
+
+        destroyed() { clearInterval(this.timer) },
+
+        tick() {
+          this.el.textContent = format(Date.now() - Number(this.el.dataset.startedAt))
+        }
+      }
+    </script>
     """
   end
 
@@ -1378,6 +1581,20 @@ defmodule MDTClientWeb.HttpClientLive do
   end
 
   @impl true
+  def handle_event("toggle_layout", _params, socket) do
+    layout = if socket.assigns.panel_layout == "horizontal", do: "vertical", else: "horizontal"
+    :ok = Preferences.put(@layout_preference, layout)
+
+    {:noreply, assign(socket, :panel_layout, layout)}
+  end
+
+  @impl true
+  def handle_event("set_response_format", %{"format" => format}, socket)
+      when format in ~w(pretty raw) do
+    {:noreply, assign(socket, :response_format, format)}
+  end
+
+  @impl true
   def handle_event("search", %{"term" => term}, socket) do
     {:noreply, socket |> assign(:term, term) |> assign_history()}
   end
@@ -1408,7 +1625,7 @@ defmodule MDTClientWeb.HttpClientLive do
          |> put_flash(:info, "Request imported from curl")}
 
       {:error, reason} ->
-        {:noreply, assign(socket, :dialog_error, String.capitalize(reason))}
+        {:noreply, assign(socket, :dialog_error, upcase_first(reason))}
     end
   end
 
@@ -1657,9 +1874,7 @@ defmodule MDTClientWeb.HttpClientLive do
       %{pending: pending} when not is_nil(pending) ->
         :ok = Requests.cancel(socket.assigns.username, pending)
 
-        {:noreply,
-         socket
-         |> update_active(&%{&1 | state: :idle, pending: nil})}
+        {:noreply, update_active(socket, &cancelled/1)}
 
       _tab ->
         {:noreply, socket}
@@ -1758,8 +1973,7 @@ defmodule MDTClientWeb.HttpClientLive do
 
   @impl true
   def handle_info({:http_request_cancelled, request_id}, socket) do
-    {:noreply,
-     update_request_tab(socket, request_id, fn tab -> %{tab | state: :idle, pending: nil} end)}
+    {:noreply, update_request_tab(socket, request_id, &cancelled/1)}
   end
 
   ## Assign helpers
@@ -1796,6 +2010,8 @@ defmodule MDTClientWeb.HttpClientLive do
                 &1
                 | state: :sending,
                   pending: request_id,
+                  started_at: System.system_time(:millisecond),
+                  cancelled_after: nil,
                   response: nil
               }
             )
@@ -1852,6 +2068,10 @@ defmodule MDTClientWeb.HttpClientLive do
           end
         end)
     end
+  end
+
+  defp cancelled(tab) do
+    %{tab | state: :idle, pending: nil, cancelled_after: elapsed_since(tab.started_at)}
   end
 
   defp finish_failed_request(socket, request_id, reason) do
@@ -2031,6 +2251,13 @@ defmodule MDTClientWeb.HttpClientLive do
     )
   end
 
+  defp stored_layout do
+    case Preferences.get(@layout_preference) do
+      layout when layout in @layouts -> layout
+      _unset -> "vertical"
+    end
+  end
+
   defp assign_history(socket) do
     entries =
       socket.assigns.username
@@ -2111,6 +2338,36 @@ defmodule MDTClientWeb.HttpClientLive do
   defp status_pill(status) when status < 400, do: "border-accent/40 bg-accent-soft/40 text-accent"
   defp status_pill(status) when status < 500, do: "border-warn/40 bg-warn-soft/40 text-warn"
   defp status_pill(_status), do: "border-bad/40 bg-bad-soft/40 text-bad"
+
+  defp layout_toggle_label("horizontal"), do: "Show the response below the request"
+  defp layout_toggle_label(_vertical), do: "Show the response beside the request"
+
+  # Milliseconds since `started_at`, an epoch timestamp in milliseconds.
+  defp elapsed_since(nil), do: nil
+  defp elapsed_since(started_at), do: max(System.system_time(:millisecond) - started_at, 0)
+
+  # Mirrors the `.Elapsed` hook, which takes over once the page is connected.
+  defp format_elapsed(nil), do: ""
+
+  defp format_elapsed(ms) when ms < 60_000,
+    do: :erlang.float_to_binary(ms / 1000, decimals: 1) <> "s"
+
+  defp format_elapsed(ms) when ms < 3_600_000,
+    do: "#{div(ms, 60_000)}m #{pad(div(rem(ms, 60_000), 1000))}s"
+
+  defp format_elapsed(ms), do: "#{div(ms, 3_600_000)}h #{pad(div(rem(ms, 3_600_000), 60_000))}m"
+
+  defp pad(value), do: value |> Integer.to_string() |> String.pad_leading(2, "0")
+
+  defp waiting_for(tab) do
+    case host(tab.url) do
+      "" -> "the server"
+      host -> host
+    end
+  end
+
+  defp upcase_first(<<first::utf8, rest::binary>>), do: String.upcase(<<first::utf8>>) <> rest
+  defp upcase_first(text), do: text
 
   defp requests(1), do: "1 request"
   defp requests(count), do: "#{count} requests"

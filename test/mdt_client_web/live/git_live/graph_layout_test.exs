@@ -2,6 +2,7 @@ defmodule MDTClientWeb.GitLive.Graph.LayoutTest do
   use ExUnit.Case, async: true
 
   alias MDTClient.Git.Commit
+  alias MDTClient.Git.Stash
   alias MDTClientWeb.GitLive.Graph.Layout
 
   defp commit(id, parents) do
@@ -21,9 +22,25 @@ defmodule MDTClientWeb.GitLive.Graph.LayoutTest do
     }
   end
 
-  defp lanes(layout), do: Map.new(layout.rows, &{&1.commit.id, &1.lane})
+  defp stash(id, parent) do
+    %Stash{
+      index: 0,
+      reference: "stash@{0}",
+      commit: id,
+      parent: parent,
+      summary: "On main: #{id}",
+      created_at: ~U[2026-01-02 00:00:00Z]
+    }
+  end
 
-  defp row(layout, id), do: Enum.find(layout.rows, &(&1.commit.id == id))
+  defp node_id(%{commit: %Commit{id: id}}), do: id
+  defp node_id(%{stash: %Stash{commit: id}}), do: id
+
+  defp lanes(layout), do: Map.new(layout.rows, &{node_id(&1), &1.lane})
+
+  defp row(layout, id), do: Enum.find(layout.rows, &(node_id(&1) == id))
+
+  defp order(layout), do: Enum.map(layout.rows, &node_id/1)
 
   test "an empty history lays out nothing" do
     assert %Layout{rows: [], lane_count: 0} = Layout.layout([])
@@ -125,6 +142,80 @@ defmodule MDTClientWeb.GitLive.Graph.LayoutTest do
     ]
 
     assert Layout.layout(commits) == Layout.layout(commits)
+  end
+
+  describe "stashes" do
+    test "a stash sits right above its commit, off to the side of the branch" do
+      layout = Layout.layout([commit("b", ["a"]), commit("a", [])], [stash("s", "a")])
+
+      assert order(layout) == ["b", "s", "a"]
+      assert lanes(layout) == %{"b" => 0, "s" => 1, "a" => 0}
+
+      # It links into the lane its commit is already expected in.
+      assert row(layout, "s").outgoing == [{1, 0, 0}]
+      assert row(layout, "s").through == [{0, 0, 0}]
+      assert row(layout, "s").commit == nil
+      assert row(layout, "s").color == 0
+    end
+
+    test "a stash on a branch tip leaves the tip its own lane" do
+      layout = Layout.layout([commit("tip", ["a"]), commit("a", [])], [stash("s", "tip")])
+
+      assert order(layout) == ["s", "tip", "a"]
+      assert lanes(layout) == %{"s" => 1, "tip" => 0, "a" => 0}
+      assert row(layout, "s").outgoing == [{1, 0, 0}]
+      assert row(layout, "s").through == []
+      assert row(layout, "tip").incoming == [{0, 0, 0}]
+      assert layout.lane_count == 2
+    end
+
+    test "several stashes on one commit stack newest first" do
+      layout =
+        Layout.layout([commit("a", [])], [stash("newest", "a"), stash("oldest", "a")])
+
+      assert order(layout) == ["newest", "oldest", "a"]
+      assert lanes(layout) == %{"newest" => 1, "oldest" => 1, "a" => 0}
+      assert row(layout, "oldest").through == [{0, 0, 0}]
+    end
+
+    test "a stash whose commit is past the window goes last" do
+      layout = Layout.layout([commit("a", [])], [stash("s", "truncated")])
+
+      assert order(layout) == ["a", "s"]
+      assert row(layout, "s").outgoing == [{1, 0, 0}]
+    end
+  end
+
+  describe "a dirty worktree" do
+    test "keeps HEAD's lane open from the top down to it" do
+      commits = [commit("other", ["base"]), commit("head", ["base"]), commit("base", [])]
+      layout = Layout.layout(commits, [], pending: "head")
+
+      assert %{commit: nil, lane: 0, outgoing: [{0, 0, 0}]} = Layout.pending_row(layout)
+
+      # "other" comes first and so keeps "base" in its own lane, as it would
+      # with a clean worktree; only HEAD's side moves to the lane held for it.
+      assert lanes(layout) == %{"other" => 1, "head" => 0, "base" => 1}
+      assert row(layout, "other").through == [{0, 0, 0}]
+      assert row(layout, "head").incoming == [{0, 0, 0}]
+      assert row(layout, "head").outgoing == [{0, 1, 1}]
+    end
+
+    test "runs its line past the stashes made on HEAD" do
+      layout = Layout.layout([commit("head", [])], [stash("s", "head")], pending: "head")
+
+      assert order(layout) == ["s", "head"]
+      assert row(layout, "s").through == [{0, 0, 0}]
+      assert row(layout, "s").outgoing == [{1, 0, 0}]
+      assert row(layout, "head").incoming == [{0, 0, 0}]
+    end
+
+    test "without HEAD among the commits, points at the newest row" do
+      layout = Layout.layout([commit("a", [])])
+
+      assert Layout.pending_row(layout).outgoing == [{0, 0, 0}]
+      assert Layout.pending_row(Layout.layout([])).outgoing == []
+    end
   end
 
   test "colors cycle with the lane index" do

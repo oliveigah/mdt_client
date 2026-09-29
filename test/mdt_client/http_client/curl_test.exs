@@ -135,6 +135,129 @@ defmodule MDTClient.HttpClient.CurlTest do
       assert rows(attrs.headers) == rows(request.headers)
     end
 
+    test "bundled switches do not swallow the flag after them" do
+      {:ok, attrs} =
+        Curl.from_curl("""
+        curl -sS -X POST \\
+           'https://internal.ume.com.br/credit/external-data-service/bvs_equifax/bvs_datalake' \\
+           -H 'Content-Type: application/json' \\
+           -H 'X-Cache-Max-Age-Seconds: 0' \\
+           -d '{
+             "documento": "<CPF_11_DIGITOS>",
+             "origin": "UME_EOS26"
+           }'
+        """)
+
+      assert attrs.method == "POST"
+
+      assert attrs.url ==
+               "https://internal.ume.com.br/credit/external-data-service/bvs_equifax/bvs_datalake"
+
+      assert rows(attrs.headers) == [
+               {"Content-Type", "application/json"},
+               {"X-Cache-Max-Age-Seconds", "0"},
+               {"", ""}
+             ]
+
+      assert attrs.body_type == "json"
+
+      assert Jason.decode!(attrs.body) == %{
+               "documento" => "<CPF_11_DIGITOS>",
+               "origin" => "UME_EOS26"
+             }
+    end
+
+    test "a short option takes its value from the same word or the next one" do
+      {:ok, attrs} = Curl.from_curl("curl -sSLXPUT -Haccept:text/plain -k https://mdt.dev")
+
+      assert attrs.method == "PUT"
+      assert attrs.url == "https://mdt.dev"
+      assert rows(attrs.headers) == [{"accept", "text/plain"}, {"", ""}]
+    end
+
+    test "switches never take the URL as their value" do
+      for switch <- ~w(-s -L -k -i -v --compressed --insecure --location --fail-with-body) do
+        assert {:ok, %{url: "https://mdt.dev/a"}} =
+                 Curl.from_curl("curl #{switch} https://mdt.dev/a"),
+               "#{switch} swallowed the URL"
+      end
+    end
+
+    test "options that take a value skip it, even when it looks like a URL" do
+      {:ok, attrs} =
+        Curl.from_curl(
+          "curl --proxy http://proxy.local:3128 -o out.json --retry 2 -m 45 https://mdt.dev/b"
+        )
+
+      assert attrs.url == "https://mdt.dev/b"
+      assert attrs.timeout_ms == "60000"
+    end
+
+    test "reads shell quoting the way a shell does" do
+      {:ok, attrs} =
+        Curl.from_curl(~S"""
+        curl "https://mdt.dev/q" --data-raw $'{"name":"O\'Neil","note":"a\nb"}' -H "X-Path: C:\temp \"x\""
+        """)
+
+      assert attrs.body == ~s({"name":"O'Neil","note":"a\nb"})
+      assert rows(attrs.headers) == [{"X-Path", ~S(C:\temp "x")}, {"", ""}]
+    end
+
+    test "keeps an empty quoted value" do
+      {:ok, attrs} = Curl.from_curl("curl -X POST -d '' https://mdt.dev")
+
+      assert attrs.url == "https://mdt.dev"
+      assert attrs.method == "POST"
+    end
+
+    test "stops at a pipe" do
+      {:ok, attrs} = Curl.from_curl("curl -s https://mdt.dev/items | jq '.items'")
+
+      assert attrs.url == "https://mdt.dev/items"
+      assert attrs.method == "GET"
+    end
+
+    test "--json sends JSON and asks for it back" do
+      {:ok, attrs} = Curl.from_curl(~s(curl --json '{"a":1}' https://mdt.dev))
+
+      assert attrs.method == "POST"
+      assert attrs.body_type == "json"
+      assert rows(attrs.headers) == [{"Accept", "application/json"}, {"", ""}]
+    end
+
+    test "-G moves the data into the query string" do
+      {:ok, attrs} =
+        Curl.from_curl(
+          "curl -G https://mdt.dev/search?lang=en -d q=elixir --data-urlencode 'tag=a b'"
+        )
+
+      assert attrs.method == "GET"
+      assert attrs.body_type == "none"
+      assert rows(attrs.params) == [{"lang", "en"}, {"q", "elixir"}, {"tag", "a b"}, {"", ""}]
+    end
+
+    test "reads the user agent, referer, cookies and bearer token options" do
+      {:ok, attrs} =
+        Curl.from_curl(
+          "curl -A mdt/1.0 -e https://from.dev -b 'a=1; b=2' --oauth2-bearer tok_1 mdt.dev"
+        )
+
+      assert attrs.url == "http://mdt.dev"
+      assert attrs.auth_type == "bearer"
+      assert attrs.auth_token == "tok_1"
+
+      assert rows(attrs.headers) == [
+               {"User-Agent", "mdt/1.0"},
+               {"Referer", "https://from.dev"},
+               {"Cookie", "a=1; b=2"},
+               {"", ""}
+             ]
+    end
+
+    test "-I asks for HEAD" do
+      assert {:ok, %{method: "HEAD"}} = Curl.from_curl("curl -I https://mdt.dev")
+    end
+
     test "reports what it cannot parse" do
       assert {:error, "the command has to start with `curl`"} =
                Curl.from_curl("wget https://mdt.dev")
@@ -143,6 +266,11 @@ defmodule MDTClient.HttpClient.CurlTest do
 
       assert {:error, "the command has an unbalanced quote"} =
                Curl.from_curl("curl 'https://mdt.dev")
+
+      assert {:error, "`-H` needs a value"} = Curl.from_curl("curl https://mdt.dev -H")
+
+      assert {:error, "the PURGE method is not supported"} =
+               Curl.from_curl("curl -X PURGE https://mdt.dev")
     end
   end
 

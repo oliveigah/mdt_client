@@ -17,6 +17,7 @@ defmodule MDTClientWeb.GitLive do
 
   require Logger
 
+  alias MDTClient.Git.Branch
   alias MDTClient.Git.CommandResult
   alias MDTClient.Git.Core
   alias MDTClient.Git.Error
@@ -31,6 +32,10 @@ defmodule MDTClientWeb.GitLive do
   @limits [500, 1_000, 2_500, 5_000]
   @default_limit 500
   @refresh_interval :timer.seconds(60)
+  # Remotes are fetched on their own: when a tab opens or is switched to, when
+  # the reader does anything, and on the refresh timer, but never twice within
+  # this long.
+  @fetch_interval :timer.seconds(30)
 
   @impl true
   def mount(_params, _session, socket) do
@@ -38,6 +43,7 @@ defmodule MDTClientWeb.GitLive do
 
     {:ok,
      socket
+     |> attach_hook(:auto_fetch, :handle_event, &fetch_on_activity/3)
      |> assign(:page_title, tool.name)
      |> assign(:tool, tool)
      |> assign(:limits, @limits)
@@ -114,6 +120,7 @@ defmodule MDTClientWeb.GitLive do
               selected_branch={@graph_selected_branch}
               menu={@graph_menu}
               diff={@graph_diff}
+              fetch={@graph_fetch}
               limits={@limits}
               top={@graph_top}
             />
@@ -133,6 +140,7 @@ defmodule MDTClientWeb.GitLive do
             <Components.inspector_panel
               tab={@tab}
               commit={@inspector_commit}
+              stash={@inspector_stash}
               loaded={@inspector_loaded}
               diff={@graph_diff}
             />
@@ -250,8 +258,13 @@ defmodule MDTClientWeb.GitLive do
   def handle_event("close_tab", %{"id" => id}, socket) do
     socket =
       case find_tab(socket, id) do
-        %{pending: task} when not is_nil(task) -> cancel_async(socket, task)
-        _tab -> socket
+        nil ->
+          socket
+
+        tab ->
+          [tab.pending, tab.fetching]
+          |> Enum.filter(&match?({_kind, _tab_id, _ref}, &1))
+          |> Enum.reduce(socket, &cancel_async(&2, &1))
       end
 
     tabs = Enum.reject(socket.assigns.tabs, &(&1.id == id))
@@ -284,6 +297,24 @@ defmodule MDTClientWeb.GitLive do
       update_tab(socket, fn tab ->
         %{
           pick_commit(tab, id, range?, toggle?)
+          | panel: "commit",
+            commit_changes: nil,
+            menu: nil,
+            diff: nil
+        }
+      end)
+
+    {:noreply, refresh_reads(socket)}
+  end
+
+  # A stash is inspected like a commit, since Git records it as one, but it is
+  # never part of a pick: nothing that acts on several commits applies to it.
+  @impl true
+  def handle_event("select_stash", %{"id" => id}, socket) do
+    socket =
+      update_tab(socket, fn tab ->
+        %{
+          pick_commit(tab, id, false, false)
           | panel: "commit",
             commit_changes: nil,
             menu: nil,
@@ -358,6 +389,10 @@ defmodule MDTClientWeb.GitLive do
         menu = %{kind: :commit, id: id, at: point(params), anchor: params["anchor"]}
         {:noreply, update_tab(socket, &(&1 |> commit_for_menu(id) |> toggle_menu(menu)))}
 
+      :stash ->
+        menu = %{kind: :stash, id: id, at: point(params), anchor: params["anchor"]}
+        {:noreply, update_tab(socket, &(&1 |> stash_for_menu(id) |> toggle_menu(menu)))}
+
       kind ->
         menu = %{kind: kind, id: id, at: point(params), anchor: params["anchor"]}
         {:noreply, update_tab(socket, &toggle_menu(&1, menu))}
@@ -382,11 +417,22 @@ defmodule MDTClientWeb.GitLive do
     {:noreply, update_tab(socket, &%{&1 | confirm: nil})}
   end
 
+  # A confirmation either accepts its one action or, when it offers several
+  # ways to go ahead, the one picked.
   @impl true
-  def handle_event("confirm_action", _params, socket) do
-    case socket.assigns.tab do
-      %{confirm: %{action: action}} = tab -> {:noreply, run(socket, tab, action)}
-      _tab -> {:noreply, socket}
+  def handle_event("confirm_action", params, socket) do
+    case {socket.assigns.tab, params["choice"]} do
+      {%{confirm: %{choices: choices}} = tab, choice} when is_binary(choice) ->
+        case Enum.find(choices, &(&1.id == choice)) do
+          nil -> {:noreply, socket}
+          %{action: action} -> {:noreply, run(socket, tab, action)}
+        end
+
+      {%{confirm: %{action: action}} = tab, _choice} ->
+        {:noreply, run(socket, tab, action)}
+
+      _nothing_to_confirm ->
+        {:noreply, socket}
     end
   end
 
@@ -572,12 +618,21 @@ defmodule MDTClientWeb.GitLive do
 
   ## Prepared actions
 
+  # Checking out a remote branch that a local one already tracks brings that
+  # local branch in line instead of asking for a name for another.
+  @impl true
+  def handle_event("prepare", %{"action" => "checkout_remote", "name" => name} = params, socket) do
+    with %{} = tab <- socket.assigns.tab,
+         %Branch{} = local <- Branch.tracking(tab.snapshot.branches, name) do
+      {:noreply, reset_to_remote(socket, tab, local, name)}
+    else
+      _untracked -> {:noreply, prepare_action(socket, params)}
+    end
+  end
+
   @impl true
   def handle_event("prepare", params, socket) do
-    case socket.assigns.tab do
-      nil -> {:noreply, socket}
-      tab -> {:noreply, update_tab(socket, &%{&1 | action: prepare(tab, params), menu: nil})}
-    end
+    {:noreply, prepare_action(socket, params)}
   end
 
   @impl true
@@ -617,22 +672,133 @@ defmodule MDTClientWeb.GitLive do
   @impl true
   def handle_info(:auto_refresh, socket) do
     schedule_refresh()
-    {:noreply, auto_refresh(socket)}
+    {:noreply, socket |> auto_refresh() |> auto_fetch()}
+  end
+
+  @impl true
+  def handle_info(:auto_fetch, socket) do
+    {:noreply, auto_fetch(socket)}
   end
 
   # Work done outside MDT should show up without being asked for, but not while
   # the reader is in the middle of something the refresh would disturb.
   defp auto_refresh(socket) do
+    case idle_tab(socket) do
+      nil -> socket
+      tab -> start_refresh_check(socket, tab)
+    end
+  end
+
+  defp idle_tab(socket) do
     case socket.assigns.tab do
       %{pending: nil, menu: nil, confirm: nil, action: nil} = tab ->
-        if socket.assigns.open_dialog, do: socket, else: start_refresh_check(socket, tab)
+        if socket.assigns.open_dialog, do: nil, else: tab
 
       _busy ->
-        socket
+        nil
     end
   end
 
   defp schedule_refresh, do: Process.send_after(self(), :auto_refresh, @refresh_interval)
+
+  # Any event counts as the reader being here. The fetch is decided once the
+  # event has been handled: a tab switch then concerns the tab switched to, and
+  # a command the event started holds the fetch off.
+  defp fetch_on_activity(_event, _params, socket) do
+    if socket.assigns.tabs != [], do: send(self(), :auto_fetch)
+    {:cont, socket}
+  end
+
+  # There is no Fetch button: what the remotes have is kept current by fetching
+  # in the background, quietly, for the tab on screen. A tab with no remote has
+  # nothing to fetch.
+  defp auto_fetch(socket) do
+    case idle_tab(socket) do
+      %{fetching: nil, remotes: [_ | _]} = tab ->
+        if auto_fetch?() and fetch_due?(tab), do: start_fetch(socket, tab), else: socket
+
+      _busy_or_local ->
+        socket
+    end
+  end
+
+  defp auto_fetch?, do: Application.get_env(:mdt_client, :git_auto_fetch, true)
+
+  defp fetch_due?(%{fetch_started: nil}), do: true
+
+  defp fetch_due?(%{fetch_started: started}) do
+    interval = Application.get_env(:mdt_client, :git_fetch_interval, @fetch_interval)
+    System.monotonic_time(:millisecond) - started >= interval
+  end
+
+  # The fetch reloads the tab itself when it changed anything, answered by the
+  # fingerprint the way a background refresh is.
+  defp start_fetch(socket, tab) do
+    task = {:git_fetch, tab.id, System.unique_integer([:positive])}
+    repository = tab.repository
+    fingerprint = tab.fingerprint
+    limit = tab.limit
+    reads = requested_reads(tab)
+
+    socket
+    |> put_tab(
+      tab.id,
+      &%{&1 | fetching: task, fetch_started: System.monotonic_time(:millisecond)}
+    )
+    |> start_async(task, fn ->
+      result = Core.fetch(repository, nil, prompt: false)
+
+      state =
+        case Core.fingerprint(repository) do
+          {:ok, ^fingerprint} -> :unchanged
+          {:ok, _changed} -> load(repository, limit, reads)
+          {:error, error} -> {:error, error}
+        end
+
+      {result, state, fingerprint}
+    end)
+  end
+
+  # A command that waited for the fetch runs now and reloads everything itself.
+  # Otherwise what the fetch loaded is shown, unless the tab moved on while it
+  # ran: that load may then predate the state on screen, so it is asked again.
+  # Either way the fetch stays quiet; its outcome only shows in the toolbar.
+  defp fetched(socket, tab, outcome) do
+    {result, state, base} =
+      case outcome do
+        {:ok, {result, state, base}} ->
+          {result, state, base}
+
+        {:exit, reason} ->
+          {{:error, Error.new(:command_failed, "The fetch stopped: #{inspect(reason)}")},
+           :unchanged, nil}
+      end
+
+    tab =
+      case result do
+        {:ok, _result} -> %{tab | fetching: nil, fetched_at: DateTime.utc_now(), fetch_error: nil}
+        {:error, error} -> %{tab | fetching: nil, fetch_error: error}
+      end
+
+    socket = put_tab(socket, tab.id, fn _current -> tab end)
+
+    cond do
+      match?({:after_fetch, _action}, tab.pending) ->
+        {:after_fetch, action} = tab.pending
+        run(socket, %{tab | pending: nil}, action)
+
+      state == :unchanged ->
+        socket
+
+      match?({:ok, _state}, state) and tab.pending == nil and tab.fingerprint == base and
+          tab.id == socket.assigns.active_id ->
+        tab = apply_state(tab, state)
+        socket |> put_tab(tab.id, fn _current -> tab end) |> refresh_reads(state)
+
+      true ->
+        auto_refresh(socket)
+    end
+  end
 
   defp start_refresh_check(socket, tab) do
     if Map.has_key?(socket.assigns.refresh_checks, tab.id) do
@@ -695,6 +861,14 @@ defmodule MDTClientWeb.GitLive do
     end
   end
 
+  @impl true
+  def handle_async({:git_fetch, tab_id, _ref} = task, outcome, socket) do
+    case find_tab(socket, tab_id) do
+      %{fetching: ^task} = tab -> {:noreply, fetched(socket, tab, outcome)}
+      _closed -> {:noreply, socket}
+    end
+  end
+
   # Only the read the tab is still waiting for counts: one that another read
   # replaced, or that a command started after, may describe an older state.
   @impl true
@@ -730,9 +904,9 @@ defmodule MDTClientWeb.GitLive do
 
     case {result, kind} do
       # The commit a tab opens on has its files read straight away, not on the
-      # first click.
+      # first click, and its remotes are fetched if it is the one on screen.
       {{:ok, repository, {:ok, state}}, _kind} ->
-        {:noreply, socket |> open_tab(repository, state, kind) |> refresh_reads()}
+        {:noreply, socket |> open_tab(repository, state, kind) |> refresh_reads() |> auto_fetch()}
 
       {_failure, :restore} ->
         {:noreply, forget_repository(socket, path)}
@@ -954,6 +1128,10 @@ defmodule MDTClientWeb.GitLive do
       diff: nil,
       commit_changes: nil,
       reading: nil,
+      fetching: nil,
+      fetch_started: nil,
+      fetched_at: nil,
+      fetch_error: nil,
       include_untracked?: true,
       ssh_private_key: private_key,
       ssh_public_key: public_key,
@@ -1005,7 +1183,35 @@ defmodule MDTClientWeb.GitLive do
     put_tab(socket, tab.id, &%{&1 | menu: nil, confirm: nil})
   end
 
-  defp run(socket, tab, action) do
+  # A background fetch writes the same remote references a pull, push or
+  # remote delete does, and a pull reads what the fetch writes to FETCH_HEAD.
+  # Those wait their turn, shown as running; everything else goes ahead.
+  defp run(socket, %{fetching: fetching} = tab, action) when not is_nil(fetching) do
+    if talks_to_remote?(action) do
+      put_tab(
+        socket,
+        tab.id,
+        &%{
+          &1
+          | pending: {:after_fetch, action},
+            pending_label: label(action),
+            menu: nil,
+            confirm: nil
+        }
+      )
+    else
+      start_command(socket, tab, action)
+    end
+  end
+
+  defp run(socket, tab, action), do: start_command(socket, tab, action)
+
+  defp talks_to_remote?({:pull, _strategy}), do: true
+  defp talks_to_remote?({:push, _opts}), do: true
+  defp talks_to_remote?({:delete_remote_branch, _remote, _name}), do: true
+  defp talks_to_remote?(_action), do: false
+
+  defp start_command(socket, tab, action) do
     task = {:git, tab.id, System.unique_integer([:positive])}
     repository = tab.repository
     limit = tab.limit
@@ -1142,13 +1348,20 @@ defmodule MDTClientWeb.GitLive do
          {:ok, stashes} <- stashes,
          {:ok, remotes} <- remotes,
          {:ok, fingerprint_sources} <- fingerprint_sources do
+      # The row a dirty worktree adds on top links down to HEAD, so HEAD's lane
+      # is held open for it through whatever is drawn in between.
+      pending = if changes != [], do: snapshot.head
+
       {:ok,
        %{
          snapshot: snapshot,
-         graph: Layout.layout(snapshot.commits),
+         graph: Layout.layout(snapshot.commits, stashes, pending: pending),
          refs: Components.refs_by_commit(snapshot.commits),
          commits_by_id: Map.new(snapshot.commits, &{&1.id, &1}),
-         commit_ids: MapSet.new(snapshot.commits, & &1.id),
+         # A stash can be selected like a commit, so it counts as one that
+         # stays selected across a refresh.
+         commit_ids:
+           MapSet.new(snapshot.commits, & &1.id) |> MapSet.union(MapSet.new(stashes, & &1.commit)),
          branch_names: MapSet.new(snapshot.branches, & &1.full_name),
          paths: MapSet.new(changes, & &1.path),
          fingerprint: Core.fingerprint(repository, changes, fingerprint_sources),
@@ -1208,7 +1421,6 @@ defmodule MDTClientWeb.GitLive do
   end
 
   defp perform(_repository, :refresh), do: :ok
-  defp perform(repository, :fetch), do: Core.fetch(repository)
   defp perform(repository, {:pull, strategy}), do: Core.pull(repository, strategy)
   defp perform(repository, {:push, opts}), do: Core.push(repository, opts)
   defp perform(repository, {:use_ssh_remote, remote}), do: Core.use_ssh_remote(repository, remote)
@@ -1217,6 +1429,9 @@ defmodule MDTClientWeb.GitLive do
 
   defp perform(repository, {:checkout_remote, remote, name}),
     do: Core.checkout_remote_branch(repository, remote, as: name)
+
+  defp perform(repository, {:reset_to_remote, local, remote, mode}),
+    do: Core.reset_to_remote(repository, local, remote, mode)
 
   defp perform(repository, {:create_branch, name, start, false}),
     do: Core.create_branch(repository, name, start)
@@ -1314,10 +1529,11 @@ defmodule MDTClientWeb.GitLive do
     same_commits? = snapshot.commits == tab.snapshot.commits
 
     # Handing the graph back unchanged lets LiveView see that nothing in it moved.
+    # Stashes and a worktree turning dirty or clean redraw it too.
     %{
       tab
       | snapshot: snapshot,
-        graph: if(same_commits?, do: tab.graph, else: state.graph),
+        graph: if(state.graph == tab.graph, do: tab.graph, else: state.graph),
         refs: if(same_commits?, do: tab.refs, else: state.refs),
         commits_by_id: state.commits_by_id,
         fingerprint: state.fingerprint,
@@ -1471,7 +1687,6 @@ defmodule MDTClientWeb.GitLive do
 
   defp requested(_action, _params, nil), do: nil
   defp requested("refresh", _params, _tab), do: :refresh
-  defp requested("fetch", _params, _tab), do: :fetch
   defp requested("pull", _params, _tab), do: {:pull, :ff_only}
   defp requested("push", _params, tab), do: {:push, push_options(tab)}
   defp requested("continue", _params, _tab), do: :continue
@@ -1549,6 +1764,98 @@ defmodule MDTClientWeb.GitLive do
       true -> nil
     end
   end
+
+  defp prepare_action(socket, params) do
+    case socket.assigns.tab do
+      nil -> socket
+      tab -> update_tab(socket, &%{&1 | action: prepare(tab, params), menu: nil})
+    end
+  end
+
+  # Nothing is lost when the local branch only trails the remote one and the
+  # worktree is clean, so that runs at once. Otherwise the reader says what
+  # becomes of the work a reset would take away.
+  defp reset_to_remote(socket, tab, local, remote) do
+    if tab.changes == [] and local.ahead == 0 do
+      run(socket, tab, {:reset_to_remote, local.name, remote, :fast_forward})
+    else
+      put_tab(socket, tab.id, &%{&1 | confirm: reset_confirmation(tab, local, remote), menu: nil})
+    end
+  end
+
+  defp reset_confirmation(tab, local, remote) do
+    files = length(tab.changes)
+    own = local.ahead
+    action = &{:reset_to_remote, local.name, remote, &1}
+    commits = "#{commits_label(own)} only #{local.name} has"
+    dropped = "The #{commits} #{if own == 1, do: "is", else: "are"} dropped."
+    worktree = "working tree has #{files_label(files)} changed"
+
+    at_stake =
+      case {own, files} do
+        {0, _files} -> "The #{worktree}."
+        {_own, 0} -> "It has #{commits_label(own)} #{remote} lacks."
+        {_own, _files} -> "It has #{commits_label(own)} #{remote} lacks, and the #{worktree}."
+      end
+
+    lost =
+      case {own, files} do
+        {0, _files} ->
+          "Uncommitted changes to tracked files are thrown away."
+
+        {_own, 0} ->
+          dropped
+
+        {_own, _files} ->
+          "Uncommitted changes to tracked files, and the #{commits}, are thrown away."
+      end
+
+    stash = %{
+      id: "stash",
+      action: action.(:stash),
+      icon: "hero-archive-box-arrow-down",
+      label: "Stash changes, then reset",
+      hint:
+        "The uncommitted changes, untracked files included, go into a new stash, then " <>
+          "#{local.name} matches #{remote} exactly." <>
+          if(own > 0, do: " " <> dropped, else: "")
+    }
+
+    choices = [
+      %{
+        id: "soft",
+        action: action.(:soft),
+        icon: "hero-arrow-left-circle",
+        label: "Soft reset",
+        hint:
+          "Only the branch moves. Every file stays as it is now, and whatever differs " <>
+            "from #{remote} is left staged."
+      },
+      %{
+        id: "hard",
+        action: action.(:hard),
+        icon: "hero-exclamation-triangle",
+        label: "Hard reset",
+        hint: "#{local.name} matches #{remote} exactly. #{lost}",
+        danger: true
+      }
+    ]
+
+    %{
+      title: "Reset #{local.name} to #{remote}?",
+      message:
+        "#{local.name} already tracks #{remote}, so it is checked out and moved there " <>
+          "instead of creating another branch. #{at_stake}",
+      icon: "hero-arrow-down-on-square",
+      choices: if(files > 0, do: [stash | choices], else: choices)
+    }
+  end
+
+  defp files_label(1), do: "1 file"
+  defp files_label(count), do: "#{count} files"
+
+  defp commits_label(1), do: "1 commit"
+  defp commits_label(count), do: "#{count} commits"
 
   defp prepare(tab, %{"action" => "create_branch"} = params) do
     %{
@@ -1680,6 +1987,13 @@ defmodule MDTClientWeb.GitLive do
   # commit it picks that one alone.
   defp commit_for_menu(tab, id) do
     if MapSet.member?(tab.selected_commits, id),
+      do: tab,
+      else: %{pick_commit(tab, id, false, false) | commit_changes: nil}
+  end
+
+  # A right clicked stash is the one inspected, as a right clicked commit is.
+  defp stash_for_menu(tab, id) do
+    if tab.selected_commit == id,
       do: tab,
       else: %{pick_commit(tab, id, false, false) | commit_changes: nil}
   end
@@ -1845,13 +2159,13 @@ defmodule MDTClientWeb.GitLive do
   ## Labels
 
   defp label(:refresh), do: "Refreshing"
-  defp label(:fetch), do: "Fetching"
   defp label({:pull, _strategy}), do: "Pulling"
   defp label({:push, _opts}), do: "Pushing"
   defp label({:use_ssh_remote, _remote}), do: "Switching remote to SSH"
   defp label({:checkout_branch, _name}), do: "Checking out"
   defp label({:checkout_commit, _id}), do: "Checking out"
   defp label({:checkout_remote, _remote, _name}), do: "Checking out"
+  defp label({:reset_to_remote, _local, _remote, _mode}), do: "Resetting branch"
   defp label({:create_branch, _name, _start, _checkout?}), do: "Creating branch"
   defp label({:rename_branch, _old, _new}), do: "Renaming branch"
   defp label({:delete_branch, _name, _force?}), do: "Deleting branch"
@@ -1880,6 +2194,7 @@ defmodule MDTClientWeb.GitLive do
   defp menu_kind("branch"), do: :branch
   defp menu_kind("commit"), do: :commit
   defp menu_kind("file"), do: :file
+  defp menu_kind("stash"), do: :stash
   defp menu_kind(_kind), do: nil
 
   # Clicking the same trigger twice closes the menu; a right click always opens
@@ -1923,7 +2238,7 @@ defmodule MDTClientWeb.GitLive do
   # The commit on show and what was read about it, compared by value like the
   # graph's inputs, so the inspector only redraws them when they change.
   defp assign_inspector(socket, nil),
-    do: assign(socket, inspector_commit: nil, inspector_loaded: nil)
+    do: assign(socket, inspector_commit: nil, inspector_stash: nil, inspector_loaded: nil)
 
   defp assign_inspector(socket, tab) do
     loaded =
@@ -1934,8 +2249,18 @@ defmodule MDTClientWeb.GitLive do
 
     assign(socket,
       inspector_commit: tab.selected_commit && Map.get(tab.commits_by_id, tab.selected_commit),
+      inspector_stash:
+        tab.selected_commit && Enum.find(tab.stashes, &(&1.commit == tab.selected_commit)),
       inspector_loaded: loaded
     )
+  end
+
+  # What the toolbar says about the background fetch: nothing for a repository
+  # with no remote, since there is nothing to fetch.
+  defp fetch_status(%{remotes: []}), do: nil
+
+  defp fetch_status(tab) do
+    %{fetching?: not is_nil(tab.fetching), at: tab.fetched_at, error: tab.fetch_error}
   end
 
   # The commit graph is the largest tree in this LiveView. Keeping its inputs as
@@ -1956,7 +2281,8 @@ defmodule MDTClientWeb.GitLive do
       graph_selected_commits: MapSet.new(),
       graph_selected_branch: nil,
       graph_menu: nil,
-      graph_diff: nil
+      graph_diff: nil,
+      graph_fetch: nil
     )
   end
 
@@ -1975,7 +2301,8 @@ defmodule MDTClientWeb.GitLive do
       graph_selected_commits: tab.selected_commits,
       graph_selected_branch: tab.selected_branch,
       graph_menu: tab.menu,
-      graph_diff: tab.diff
+      graph_diff: tab.diff,
+      graph_fetch: fetch_status(tab)
     )
   end
 end

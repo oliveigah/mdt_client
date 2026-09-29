@@ -69,11 +69,14 @@ defmodule MDTClient.Git.Core do
                 "%00"
               ) <> "%00%1e"
 
-  @stash_format Enum.join(["%gd", "%H", "%gs", "%cI"], "%x00") <> "%x00%x1e"
+  @stash_format Enum.join(["%gd", "%H", "%P", "%gs", "%cI"], "%x00") <> "%x00%x1e"
   @fingerprint_ref_format "%(refname)%00%(objectname)%00%(upstream:track)%00"
+
+  @reset_modes [:fast_forward, :soft, :hard, :stash]
 
   @type result(value) :: {:ok, value} | {:error, Error.t()}
   @type mutation_result :: result(CommandResult.t())
+  @type reset_mode :: :fast_forward | :soft | :hard | :stash
 
   @doc "Opens the worktree containing `path`."
   @spec open(Path.t(), keyword()) :: result(Repository.t())
@@ -493,6 +496,41 @@ defmodule MDTClient.Git.Core do
     end
   end
 
+  @doc """
+  Checks out an existing local branch and moves it to a remote branch.
+
+  This is checking a remote branch out when a local one already stands for it:
+  rather than creating another, the local branch is brought in line. `mode`
+  decides what happens to the work that move would otherwise lose:
+
+    * `:fast_forward` only advances the branch, and fails when it has commits
+      the remote branch lacks, so nothing is lost;
+    * `:soft` keeps those commits and any uncommitted change as staged changes;
+    * `:hard` discards both;
+    * `:stash` stashes uncommitted changes, untracked files included, before a
+      hard reset, so only the commits the local branch alone had are dropped.
+  """
+  @spec reset_to_remote(Repository.t(), String.t(), String.t(), reset_mode()) ::
+          mutation_result()
+  def reset_to_remote(%Repository{} = repository, local_name, remote_branch, mode)
+      when mode in @reset_modes do
+    with {:ok, local} <- find_branch(repository, local_name, :local),
+         {:ok, remote} <- find_branch(repository, remote_branch, :remote),
+         {:ok, target} <- resolve_commit(repository, remote.full_name) do
+      message = "Before resetting #{local.name} to #{remote.name}"
+      stash = ["stash", "push", "--include-untracked", "--message", message]
+
+      commands =
+        if_args(mode == :stash, stash) ++
+          reset_switch(local, mode) ++ [reset_move(mode, target)]
+
+      run_mutations(commands, repository, :reset_to_remote)
+    end
+  end
+
+  def reset_to_remote(%Repository{}, _local_name, _remote_branch, _mode),
+    do: {:error, Error.new(:invalid_argument, "Unknown reset mode")}
+
   @doc "Checks out a commit in detached HEAD mode."
   @spec checkout_commit(Repository.t(), String.t()) :: mutation_result()
   def checkout_commit(%Repository{} = repository, revision) do
@@ -762,17 +800,26 @@ defmodule MDTClient.Git.Core do
     end
   end
 
-  @doc "Fetches and prunes either every remote or one named remote."
-  @spec fetch(Repository.t(), String.t() | nil) :: mutation_result()
-  def fetch(repository, remote \\ nil)
+  @doc """
+  Fetches and prunes either every remote or one named remote.
 
-  def fetch(%Repository{} = repository, nil) do
-    run_mutation(repository, :fetch, ["fetch", "--all", "--prune"])
+  Pass `prompt: false` for a fetch nobody asked for, such as one run on a
+  timer: credential helpers and SSH askpass programs are told not to open a
+  window, so a remote that needs a password fails instead of interrupting.
+  """
+  @spec fetch(Repository.t(), String.t() | nil, keyword()) :: mutation_result()
+  def fetch(repository, remote \\ nil, opts \\ [])
+
+  def fetch(%Repository{} = repository, nil, opts) do
+    with {:ok, command_opts} <- fetch_options(opts) do
+      run_mutation(repository, :fetch, ["fetch", "--all", "--prune"], command_opts)
+    end
   end
 
-  def fetch(%Repository{} = repository, remote) do
-    with {:ok, remote} <- validate_remote(repository, remote) do
-      run_mutation(repository, :fetch, ["fetch", "--prune", "--", remote])
+  def fetch(%Repository{} = repository, remote, opts) do
+    with {:ok, remote} <- validate_remote(repository, remote),
+         {:ok, command_opts} <- fetch_options(opts) do
+      run_mutation(repository, :fetch, ["fetch", "--prune", "--", remote], command_opts)
     end
   end
 
@@ -970,7 +1017,10 @@ defmodule MDTClient.Git.Core do
     end
   end
 
-  # `--all` walks from every reference and from HEAD, detached or not.
+  # `--all` walks from every reference and from HEAD, detached or not, except
+  # the stash: its commits are Git's bookkeeping for one entry (the index, the
+  # untracked files) rather than history, and `list_stashes/1` reports each
+  # entry with the commit it was made on instead.
   defp read_log(repository, limit, signatures?) do
     format = if signatures?, do: @commit_format, else: @graph_format
 
@@ -979,6 +1029,7 @@ defmodule MDTClient.Git.Core do
       "--topo-order",
       "--max-count=#{limit}",
       "--format=#{format}",
+      "--exclude=refs/stash",
       "--all"
     ])
   end
@@ -1083,7 +1134,11 @@ defmodule MDTClient.Git.Core do
         {name, File.read(path)}
       end
 
-    marker_contents
+    # Only the newest stash has a reference; dropping an older one rewrites the
+    # stash reflog and nothing else.
+    stash_log = Path.join(repository.common_dir, "logs/refs/stash")
+
+    [{"logs/refs/stash", file_signature(stash_log)} | marker_contents]
   end
 
   defp file_signature(path) do
@@ -1143,20 +1198,27 @@ defmodule MDTClient.Git.Core do
     |> records()
     |> Enum.reduce_while({:ok, []}, fn record, {:ok, stashes} ->
       case String.split(record, <<0>>, trim: false) do
-        [reference, commit, summary, created_at, ""] ->
+        [reference, commit, parents, summary, created_at, ""] ->
           with {:ok, index} <- stash_index(reference),
-               {:ok, created_at} <- parse_datetime(created_at) do
+               {:ok, created_at} <- parse_datetime(created_at),
+               [parent | others] <- words(parents) do
             stash = %Stash{
               index: index,
               reference: reference,
               commit: commit,
+              parent: parent,
               summary: summary,
-              created_at: created_at
+              created_at: created_at,
+              untracked?: length(others) > 1
             }
 
             {:cont, {:ok, [stash | stashes]}}
           else
-            {:error, error} -> {:halt, {:error, error}}
+            {:error, error} ->
+              {:halt, {:error, error}}
+
+            [] ->
+              {:halt, {:error, Error.new(:invalid_output, "Git returned a stash with no base")}}
           end
 
         _invalid ->
@@ -1300,6 +1362,17 @@ defmodule MDTClient.Git.Core do
 
   defp local_name_for_remote(%Branch{name: name}), do: name
 
+  # A hard reset throws the uncommitted changes away anyway, so they are not
+  # allowed to stop the checkout; every other mode keeps them, and a checkout
+  # they would be overwritten by fails before anything moved.
+  defp reset_switch(%Branch{current?: true}, _mode), do: []
+  defp reset_switch(local, :hard), do: [["switch", "--discard-changes", "--", local.name]]
+  defp reset_switch(local, _mode), do: [["switch", "--", local.name]]
+
+  defp reset_move(:fast_forward, target), do: ["merge", "--ff-only", target]
+  defp reset_move(:soft, target), do: ["reset", "--soft", target]
+  defp reset_move(_hard_or_stash, target), do: ["reset", "--hard", target]
+
   defp validate_branch_name(repository, name) do
     with {:ok, name} <- text_argument(name, "Branch name") do
       case Command.capture(repository, ["check-ref-format", "--branch", name]) do
@@ -1441,6 +1514,18 @@ defmodule MDTClient.Git.Core do
     case Keyword.get(opts, key, default) do
       value when is_boolean(value) -> {:ok, value}
       _invalid -> {:error, Error.new(:invalid_argument, "#{key} must be a boolean")}
+    end
+  end
+
+  # GIT_TERMINAL_PROMPT, set for every command, only covers the terminal; these
+  # cover the graphical prompts OpenSSH and Git Credential Manager fall back to.
+  defp fetch_options(opts) do
+    with {:ok, prompt?} <- boolean_option(opts, :prompt, true) do
+      if prompt? do
+        {:ok, []}
+      else
+        {:ok, env: [{"SSH_ASKPASS_REQUIRE", "never"}, {"GCM_INTERACTIVE", "never"}]}
+      end
     end
   end
 
@@ -1780,8 +1865,8 @@ defmodule MDTClient.Git.Core do
     end
   end
 
-  defp run_mutation(repository, action, args) do
-    case Command.run(repository, args) do
+  defp run_mutation(repository, action, args, opts \\ []) do
+    case Command.run(repository, args, opts) do
       {:ok, output} ->
         {:ok, %CommandResult{action: action, output: String.trim_trailing(output)}}
 

@@ -5,35 +5,50 @@ defmodule MDTClientWeb.CodeComponentsTest do
 
   alias MDTClientWeb.CodeComponents
 
-  test "large bodies use the compact plain-text renderer" do
-    body = String.duplicate(~s({"value":"large"}\n), 8_000)
+  doctest CodeComponents
 
-    html =
-      render_component(&CodeComponents.code_block/1,
-        id: "large-response",
-        content: body,
-        language: "json"
-      )
-
-    document = LazyHTML.from_fragment(html)
-
-    assert document
-           |> LazyHTML.query("#large-response")
-           |> LazyHTML.attribute("data-renderer") == ["plain"]
+  defp render_block(attrs) do
+    (&CodeComponents.code_block/1)
+    |> render_component(attrs)
+    |> LazyHTML.from_fragment()
   end
 
-  test "small bodies keep syntax highlighting" do
-    html =
-      render_component(&CodeComponents.code_block/1,
-        id: "small-response",
-        content: ~s({"ok":true}),
-        language: "json"
-      )
+  test "hands the content to the viewer hook as plain text" do
+    document = render_block(id: "response", content: ~s({"ok":true}), language: "json")
 
-    document = LazyHTML.from_fragment(html)
+    [viewer_id] =
+      document |> LazyHTML.query("#response [data-code-view]") |> LazyHTML.attribute("id")
 
-    assert document
-           |> LazyHTML.query("#small-response")
-           |> LazyHTML.attribute("data-renderer") == ["highlighted"]
+    assert String.starts_with?(viewer_id, "response-")
+
+    viewer = LazyHTML.query(document, "##{viewer_id}")
+    assert LazyHTML.attribute(viewer, "phx-hook") == ["CodeView"]
+    assert LazyHTML.attribute(viewer, "phx-update") == ["ignore"]
+    assert LazyHTML.attribute(viewer, "data-language") == ["json"]
+    assert LazyHTML.attribute(viewer, "data-format") == ["pretty"]
+
+    assert document |> LazyHTML.query("[data-source]") |> LazyHTML.text() == ~s({"ok":true})
+  end
+
+  test "large bodies are rendered once, without per token markup" do
+    body = String.duplicate(~s({"value":"large"}\n), 8_000)
+    document = render_block(id: "large", content: body, language: "json")
+
+    assert document |> LazyHTML.query("#large span") |> Enum.count() == 0
+    assert document |> LazyHTML.query("[data-source]") |> LazyHTML.text() == body
+  end
+
+  test "other content mounts another viewer, another format does not" do
+    viewer_id = fn attrs ->
+      attrs
+      |> render_block()
+      |> LazyHTML.query("[data-code-view]")
+      |> LazyHTML.attribute("id")
+    end
+
+    pretty = viewer_id.(id: "body", content: "[1]", format: "pretty")
+
+    assert viewer_id.(id: "body", content: "[1]", format: "raw") == pretty
+    refute viewer_id.(id: "body", content: "[2]", format: "pretty") == pretty
   end
 end

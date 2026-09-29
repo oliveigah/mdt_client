@@ -29,4 +29,20 @@ defmodule MDTClient.Git.Branch do
           ahead: non_neg_integer(),
           behind: non_neg_integer()
         }
+
+  @doc """
+  The local branch that tracks the remote branch named `remote`, if any.
+
+  When several do, the checked-out one wins, then the one named like the remote
+  branch without its remote, as `origin/feature` would be checked out as.
+  """
+  @spec tracking([t()], String.t()) :: t() | nil
+  def tracking(branches, remote) when is_list(branches) and is_binary(remote) do
+    own_name = remote |> String.split("/", parts: 2) |> List.last()
+
+    branches
+    |> Enum.filter(&(&1.kind == :local and &1.upstream == remote))
+    |> Enum.sort_by(&{not &1.current?, &1.name != own_name, &1.name})
+    |> List.first()
+  end
 end

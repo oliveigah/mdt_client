@@ -16,32 +16,44 @@ defmodule MDTClientWeb.GitLive.Graph.Layout do
     * lanes are never renumbered mid graph, so a line never jumps sideways
       without an edge explaining it.
 
-  The result depends only on the commit list, so the same history always
-  produces the same picture.
+  Stashes are not history, so they hang off it: each takes a row directly above
+  the commit it was made on and links down into that commit's lane from a lane
+  of its own, even when it is the only thing above the commit, so the branch
+  keeps its straight line.
+
+  The result depends only on its inputs, so the same history always produces
+  the same picture.
   """
 
   alias MDTClient.Git.Commit
+  alias MDTClient.Git.Stash
   alias MDTClientWeb.GitLive.Graph.Row
 
   @colors 8
 
   @enforce_keys [:rows, :lane_count]
-  defstruct rows: [], lane_count: 0
+  defstruct rows: [], lane_count: 0, pending: nil
 
-  @type t :: %__MODULE__{rows: [Row.t()], lane_count: non_neg_integer()}
+  @type t :: %__MODULE__{
+          rows: [Row.t()],
+          lane_count: non_neg_integer(),
+          pending: Row.t() | nil
+        }
 
   @doc "The number of distinct lane colors the layout cycles through."
   @spec colors() :: pos_integer()
   def colors, do: @colors
 
   @doc """
-  The row a dirty worktree occupies above the newest commit.
+  The row a dirty worktree occupies above the graph.
 
-  It carries no commit, sits in the lane the newest commit uses, and draws a
-  single edge down into it, so uncommitted work reads as the tip of the branch
-  it will land on.
+  It carries no commit and draws a single edge down into the lane of the commit
+  the work sits on, so uncommitted work reads as the tip of the branch it will
+  land on. That lane is only kept open through the rows in between when the
+  layout was made with `pending:`; otherwise the edge points at the newest row.
   """
   @spec pending_row(t()) :: Row.t()
+  def pending_row(%__MODULE__{pending: %Row{} = row}), do: row
   def pending_row(%__MODULE__{rows: []}), do: %Row{commit: nil, lane: 0, color: color(0)}
 
   def pending_row(%__MODULE__{rows: [newest | _rest]}) do
@@ -53,18 +65,81 @@ defmodule MDTClientWeb.GitLive.Graph.Layout do
     }
   end
 
-  @doc "Lays out `commits`, which must already be in topological order."
-  @spec layout([Commit.t()]) :: t()
-  def layout(commits) when is_list(commits) do
+  @doc """
+  Lays out `commits`, which must already be in topological order, with
+  `stashes` hanging off the commits they were made on.
+
+  A stash whose commit is not among `commits` goes last, its link running off
+  the bottom like that of a commit whose parents are past the window.
+
+  ## Options
+
+    * `:pending` - the id of the commit a dirty worktree sits on. Its lane is
+      reserved from the very top, so the line from `pending_row/1` runs through
+      every row above that commit instead of stopping short.
+  """
+  @spec layout([Commit.t()], [Stash.t()], keyword()) :: t()
+  def layout(commits, stashes \\ [], opts \\ []) when is_list(commits) and is_list(stashes) do
+    {seed, pending} =
+      case Keyword.get(opts, :pending) do
+        nil ->
+          {[], nil}
+
+        head ->
+          {[head], %Row{commit: nil, lane: 0, color: color(0), outgoing: [{0, 0, color(0)}]}}
+      end
+
     {rows, _lanes, lane_count} =
-      Enum.reduce(commits, {[], [], 0}, fn commit, {rows, lanes, lane_count} ->
-        {row, next_lanes} = place(commit, lanes)
+      commits
+      |> interleave(stashes)
+      |> Enum.reduce({[], seed, length(seed)}, fn node, {rows, lanes, lane_count} ->
+        {row, next_lanes} = place(node, lanes)
 
         {[row | rows], next_lanes,
          Enum.max([lane_count, row.lane + 1, length(lanes), length(next_lanes)])}
       end)
 
-    %__MODULE__{rows: Enum.reverse(rows), lane_count: lane_count}
+    %__MODULE__{rows: Enum.reverse(rows), lane_count: lane_count, pending: pending}
+  end
+
+  # Newest stash first, which is the order Git lists them in, so stash@{0} sits
+  # highest when several were made on one commit.
+  defp interleave(commits, []), do: commits
+
+  defp interleave(commits, stashes) do
+    ids = MapSet.new(commits, & &1.id)
+    {placed, orphans} = Enum.split_with(stashes, &MapSet.member?(ids, &1.parent))
+    above = Enum.group_by(placed, & &1.parent)
+
+    Enum.flat_map(commits, &(Map.get(above, &1.id, []) ++ [&1])) ++ orphans
+  end
+
+  # The commit's lane is settled before the stash takes one: when nothing above
+  # expects the commit yet, it gets the lane it would have had with no stash at
+  # all, and the stash moves over to the next free one.
+  defp place(%Stash{} = stash, lanes) do
+    {reserved, target} =
+      case Enum.find_index(lanes, &(&1 == stash.parent)) do
+        nil ->
+          target = free_lane(lanes)
+          {List.replace_at(pad(lanes, target), target, stash.parent), target}
+
+        index ->
+          {lanes, index}
+      end
+
+    lane = free_lane(reserved)
+
+    row = %Row{
+      commit: nil,
+      stash: stash,
+      lane: lane,
+      color: color(target),
+      outgoing: [{lane, target, color(target)}],
+      through: for({id, index} <- Enum.with_index(lanes), id, do: {index, index, color(index)})
+    }
+
+    {row, trim(reserved)}
   end
 
   defp place(%Commit{} = commit, lanes) do

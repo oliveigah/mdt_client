@@ -8,9 +8,11 @@ defmodule MDTClientWeb.GitLive.Components do
   """
   use MDTClientWeb, :html
 
+  alias MDTClient.Git.Branch
   alias MDTClient.Git.FileChange
   alias MDTClient.Git.FileDiff
   alias MDTClient.Git.Operation
+  alias MDTClient.Git.Stash
   alias MDTClient.Git.Tag
   alias MDTClientWeb.GitLive.Graph.Layout
 
@@ -878,7 +880,15 @@ defmodule MDTClientWeb.GitLive.Components do
   attr :tab, :map, required: true
 
   defp branch_menu(assigns) do
-    assigns = assign(assigns, :slug, slug(assigns.branch.full_name))
+    %{branch: branch, tab: tab} = assigns
+
+    assigns =
+      assigns
+      |> assign(:slug, slug(branch.full_name))
+      |> assign(
+        :tracking,
+        branch.kind == :remote && Branch.tracking(tab.snapshot.branches, branch.name)
+      )
 
     ~H"""
     <.context_menu
@@ -897,15 +907,26 @@ defmodule MDTClientWeb.GitLive.Components do
       >
         Check out
       </.menu_item>
+      <%!-- A remote branch some local branch already tracks is checked out as
+            that one, reset to it, rather than as another new branch. --%>
       <.menu_item
         :if={@branch.kind == :remote}
         id={"git-menu-checkout-remote-#{@slug}"}
         icon="hero-arrow-down-on-square"
+        disabled={@tracking && @tracking.current? && @tracking.target == @branch.target}
+        title={
+          @tracking &&
+            "#{@tracking.name} already tracks #{@branch.name}: it is checked out and reset to it"
+        }
         phx-click="prepare"
         phx-value-action="checkout_remote"
         phx-value-name={@branch.name}
       >
-        Check out as local branch
+        <%= if @tracking do %>
+          Check out as {@tracking.name}
+        <% else %>
+          Check out as local branch
+        <% end %>
       </.menu_item>
 
       <.menu_item
@@ -998,6 +1019,7 @@ defmodule MDTClientWeb.GitLive.Components do
   attr :selected_branch, :string, default: nil
   attr :menu, :map, default: nil
   attr :diff, :map, default: nil
+  attr :fetch, :map, default: nil, doc: "the background fetch, or nil when there is no remote"
   attr :limits, :list, required: true
   attr :top, :integer, default: 0, doc: "the first row the reader has on screen"
 
@@ -1037,17 +1059,7 @@ defmodule MDTClientWeb.GitLive.Components do
         </span>
 
         <div class="flex shrink-0 items-center gap-0.5">
-          <button
-            type="button"
-            id="git-fetch"
-            phx-click="request"
-            phx-value-action="fetch"
-            disabled={not is_nil(@pending)}
-            title="Fetch and prune every remote"
-            class={toolbar_button()}
-          >
-            <.icon name="hero-arrow-down-tray" class="size-3.5" /> Fetch
-          </button>
+          <.fetch_status :if={@fetch} fetch={@fetch} />
           <button
             type="button"
             id="git-pull"
@@ -1159,7 +1171,7 @@ defmodule MDTClientWeb.GitLive.Components do
         >
           <div aria-hidden="true" style={"height: #{window_first(@graph, @top) * row_height()}px"}>
           </div>
-          <.commit_row
+          <.graph_row
             :for={
               {row, state} <-
                 commit_rows(
@@ -1172,7 +1184,7 @@ defmodule MDTClientWeb.GitLive.Components do
                   @menu
                 )
             }
-            :key={row.commit.id}
+            :key={row_key(row)}
             row={row}
             state={state}
             lanes={@lanes}
@@ -1267,6 +1279,66 @@ defmodule MDTClientWeb.GitLive.Components do
   defp rows_below(graph, top) do
     max(length(graph.rows) - window_first(graph, top) - @window_rows, 0)
   end
+
+  attr :fetch, :map, required: true
+
+  # Remotes are fetched in the background, so there is nothing to click: the
+  # cloud only says it is happening, when it last did, and whether it failed.
+  defp fetch_status(assigns) do
+    ~H"""
+    <span
+      id="git-fetch-status"
+      role="status"
+      data-state={fetch_state(@fetch)}
+      title={fetch_title(@fetch)}
+      aria-label={fetch_title(@fetch)}
+      class="relative flex size-6 shrink-0 items-center justify-center"
+    >
+      <.icon
+        name="hero-cloud-arrow-down"
+        class={[
+          "size-3.5 transition-colors",
+          case fetch_state(@fetch) do
+            "fetching" -> "text-accent motion-safe:animate-pulse"
+            "failed" -> "text-warn"
+            _idle -> "text-faint"
+          end
+        ]}
+      />
+      <span
+        :if={fetch_state(@fetch) == "failed"}
+        class="absolute right-0.5 top-0.5 size-1.5 rounded-full bg-warn ring-2 ring-panel"
+      ></span>
+    </span>
+    """
+  end
+
+  defp fetch_state(%{fetching?: true}), do: "fetching"
+  defp fetch_state(%{error: %{}}), do: "failed"
+  defp fetch_state(_fetch), do: "idle"
+
+  defp fetch_title(%{fetching?: true}), do: "Fetching every remote…"
+
+  defp fetch_title(%{error: %{message: message}}) do
+    "The last background fetch failed: " <> String.slice(String.trim(message), 0, 300)
+  end
+
+  defp fetch_title(%{at: %DateTime{} = at}),
+    do: "Remotes fetched #{relative_time(at)}, and again as you work"
+
+  defp fetch_title(_fetch), do: "Remotes are fetched in the background as you work"
+
+  attr :row, :map, required: true
+  attr :state, :map, required: true, doc: "what the page says about the row, from `commit_rows/7`"
+  attr :lanes, :integer, required: true
+
+  defp graph_row(%{row: %{stash: %Stash{}}} = assigns), do: stash_row(assigns)
+  defp graph_row(assigns), do: commit_row(assigns)
+
+  # A stash's commit never shows up among the commits, but the prefix keeps the
+  # two kinds of row apart regardless.
+  defp row_key(%{stash: %Stash{commit: id}}), do: "stash-" <> id
+  defp row_key(%{commit: %{id: id}}), do: id
 
   attr :graph, :map, required: true
   attr :changes, :list, required: true
@@ -1468,19 +1540,29 @@ defmodule MDTClientWeb.GitLive.Components do
     now = DateTime.utc_now()
 
     for row <- Enum.slice(graph.rows, first, @window_rows) do
-      id = row.commit.id
-      row_refs = Map.get(refs, id, [])
+      case row do
+        %{stash: %Stash{commit: id} = stash} ->
+          {row,
+           %{
+             selected?: MapSet.member?(selected_commits, id),
+             menu?: menu_open?(menu, :stash, id),
+             when: relative_time(stash.created_at, now)
+           }}
 
-      {row,
-       %{
-         refs: row_refs,
-         head?: id == head,
-         selected?: MapSet.member?(selected_commits, id),
-         menu?: menu_open?(menu, :commit, id),
-         selected_branch: ref_selection(row_refs, selected_branch),
-         pinned?: row_refs != [] and ref_menu_open?(menu, row_refs),
-         when: relative_time(row.commit.authored_at, now)
-       }}
+        %{commit: %{id: id} = commit} ->
+          row_refs = Map.get(refs, id, [])
+
+          {row,
+           %{
+             refs: row_refs,
+             head?: id == head,
+             selected?: MapSet.member?(selected_commits, id),
+             menu?: menu_open?(menu, :commit, id),
+             selected_branch: ref_selection(row_refs, selected_branch),
+             pinned?: row_refs != [] and ref_menu_open?(menu, row_refs),
+             when: relative_time(commit.authored_at, now)
+           }}
+      end
     end
   end
 
@@ -1606,10 +1688,113 @@ defmodule MDTClientWeb.GitLive.Components do
   end
 
   attr :row, :map, required: true
+  attr :state, :map, required: true, doc: "what the page says about the row, from `commit_rows/7`"
+  attr :lanes, :integer, required: true
+
+  # A stash reads like a commit row, quieter: its name where the branches go, a
+  # box for a node, and its message in italics.
+  defp stash_row(assigns) do
+    ~H"""
+    <div
+      id={"git-graph-stash-#{@row.stash.commit}"}
+      data-menu-kind="stash"
+      data-menu-id={@row.stash.commit}
+      class={[
+        "group relative flex select-none items-center border-b border-line-soft/40 pl-2 transition-colors [content-visibility:auto]",
+        if(@state.selected?,
+          do: "bg-accent-soft/50 shadow-[inset_2px_0_0_0_var(--color-accent)]",
+          else: "hover:bg-hover/70"
+        )
+      ]}
+      style={"height: #{row_height()}px; contain-intrinsic-size: 0 #{row_height()}px;"}
+    >
+      <div
+        phx-click="select_stash"
+        phx-value-id={@row.stash.commit}
+        class="hidden h-full shrink-0 cursor-pointer items-center justify-end @[44rem]:flex"
+        style={ref_column_style()}
+      >
+        <.stash_chip stash={@row.stash} />
+      </div>
+
+      <button
+        type="button"
+        id={"git-select-stash-#{@row.stash.commit}"}
+        role="option"
+        aria-selected={to_string(@state.selected?)}
+        phx-click="select_stash"
+        phx-value-id={@row.stash.commit}
+        class="flex h-full min-w-0 flex-1 cursor-pointer items-center gap-2 pr-1 text-left focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
+      >
+        <.graph_cell row={@row} lanes={@lanes} />
+
+        <span class="flex min-w-0 flex-1 items-center gap-1.5">
+          <span class="flex min-w-0 max-w-40 shrink-0 @[44rem]:hidden">
+            <.stash_chip stash={@row.stash} />
+          </span>
+          <span class="min-w-0 truncate text-[13px] italic text-muted">{@row.stash.summary}</span>
+        </span>
+
+        <span class="w-20 shrink-0"></span>
+        <span
+          class="w-16 shrink-0 text-right text-[11px] text-faint"
+          title={absolute_time(@row.stash.created_at)}
+        >
+          {@state.when}
+        </span>
+        <span class="w-14 shrink-0 text-right font-mono text-[11px] text-faint">
+          {short_id(@row.stash.commit)}
+        </span>
+      </button>
+
+      <button
+        type="button"
+        id={"git-stash-menu-button-#{@row.stash.commit}"}
+        phx-click="open_menu"
+        phx-value-kind="stash"
+        phx-value-id={@row.stash.commit}
+        aria-haspopup="menu"
+        aria-expanded={to_string(@state.menu?)}
+        title="Stash actions"
+        aria-label={"Actions for #{@row.stash.reference}"}
+        class={[
+          "mr-1 flex size-5 shrink-0 cursor-pointer items-center justify-center rounded transition-all",
+          "hover:bg-panel hover:text-ink focus:opacity-100 focus-visible:outline-2 focus-visible:outline-accent",
+          "group-hover:opacity-100",
+          if(@state.selected?,
+            do: "text-ink opacity-100",
+            else: "text-faint opacity-0"
+          )
+        ]}
+      >
+        <.icon name="hero-ellipsis-vertical" class="size-3.5" />
+      </button>
+    </div>
+    """
+  end
+
+  attr :stash, :map, required: true
+
+  defp stash_chip(assigns) do
+    ~H"""
+    <span
+      title={"Stash #{@stash.reference}"}
+      class={[chip_base(), "border-line bg-deep text-muted"]}
+    >
+      <.icon name="hero-archive-box-micro" class="size-2.5 shrink-0" />
+      <span class="truncate">{@stash.reference}</span>
+    </span>
+    """
+  end
+
+  attr :row, :map, required: true
   attr :lanes, :integer, required: true
   attr :head?, :boolean, default: false
   attr :pending, :boolean, default: false
 
+  # A commit is a dot. A stash is a hollow box whose link to the commit it was
+  # made on is dashed, since it is not history; a dirty worktree is a dashed
+  # ring.
   defp graph_cell(assigns) do
     ~H"""
     <span
@@ -1643,8 +1828,22 @@ defmodule MDTClientWeb.GitLive.Components do
           class={lane_color(color)}
           stroke="currentColor"
           stroke-width="2"
+          stroke-dasharray={if @row.stash, do: "3 2"}
+        />
+        <rect
+          :if={@row.stash}
+          x={lane_center(@row.lane) - 4.5}
+          y={div(row_height(), 2) - 4.5}
+          width="9"
+          height="9"
+          rx="2"
+          class={lane_color(@row.color)}
+          fill="var(--color-app)"
+          stroke="currentColor"
+          stroke-width="2"
         />
         <circle
+          :if={is_nil(@row.stash)}
           cx={lane_center(@row.lane)}
           cy={div(row_height(), 2)}
           r={if @head? or @pending, do: 5, else: 4}
@@ -2197,6 +2396,66 @@ defmodule MDTClientWeb.GitLive.Components do
     """
   end
 
+  attr :stash, :map, required: true
+  attr :tab, :map, required: true
+
+  defp stash_menu(assigns) do
+    ~H"""
+    <.context_menu
+      id={"git-stash-menu-#{@stash.index}"}
+      anchor={@tab.menu[:anchor] || "git-stash-menu-button-#{@stash.commit}"}
+      at={@tab.menu[:at]}
+      label={"Actions for #{@stash.reference}"}
+    >
+      <.menu_item
+        id="git-menu-apply-stash"
+        icon="hero-arrow-up-tray"
+        title="Restore the complete stash and keep it in the list"
+        phx-click="request"
+        phx-value-action="apply_stash"
+        phx-value-reference={@stash.reference}
+      >
+        Apply stash
+      </.menu_item>
+      <.menu_item
+        id="git-menu-pop-stash"
+        icon="hero-arrow-up-on-square"
+        title="Restore the complete stash and remove it from the list"
+        phx-click="request"
+        phx-value-action="pop_stash"
+        phx-value-reference={@stash.reference}
+      >
+        Pop stash
+      </.menu_item>
+
+      <.menu_separator />
+
+      <.menu_item
+        id="git-menu-drop-stash"
+        icon="hero-trash"
+        danger
+        phx-click="request"
+        phx-value-action="drop_stash"
+        phx-value-reference={@stash.reference}
+      >
+        Drop stash…
+      </.menu_item>
+
+      <.menu_separator />
+
+      <.menu_item
+        id="git-menu-copy-stash-sha"
+        icon="hero-clipboard-document"
+        phx-hook=".Copy"
+        data-copy={@stash.commit}
+        phx-click="close_menu"
+      >
+        Copy stash SHA
+      </.menu_item>
+    </.context_menu>
+    """
+  end
+
   ## Context menus
 
   @doc """
@@ -2216,6 +2475,8 @@ defmodule MDTClientWeb.GitLive.Components do
         <.commit_menu commit={commit} tab={@tab} />
       <% {:file, file} -> %>
         <.file_menu file={file} side={@tab.menu.side} tab={@tab} />
+      <% {:stash, stash} -> %>
+        <.stash_menu stash={stash} tab={@tab} />
       <% nil -> %>
     <% end %>
     """
@@ -2242,13 +2503,25 @@ defmodule MDTClientWeb.GitLive.Components do
     end
   end
 
+  defp menu_target(%{menu: %{kind: :stash, id: id}} = tab) do
+    case Enum.find(tab.stashes, &(&1.commit == id)) do
+      nil -> nil
+      stash -> {:stash, stash}
+    end
+  end
+
   defp menu_target(_tab), do: nil
 
   ## Inspector
 
   attr :tab, :map, required: true
   attr :commit, :map, default: nil, doc: "the commit on show"
-  attr :loaded, :map, default: nil, doc: "the files and signature read for `commit`"
+
+  attr :stash, :map,
+    default: nil,
+    doc: "the stash on show, when one is picked instead of a commit"
+
+  attr :loaded, :map, default: nil, doc: "the files and signature read for `commit` or `stash`"
   attr :diff, :map, default: nil, doc: "the diff open over the graph"
 
   # The commit, what was read about it and the open diff come as assigns of
@@ -2281,6 +2554,8 @@ defmodule MDTClientWeb.GitLive.Components do
             <span class="sr-only">An action is being prepared.</span>
           <% @tab.panel == "changes" -> %>
             <.working_tree tab={@tab} />
+          <% @stash -> %>
+            <.stash_details tab={@tab} stash={@stash} loaded={@loaded} diff={@diff} />
           <% @commit -> %>
             <.commit_details tab={@tab} commit={@commit} loaded={@loaded} diff={@diff} />
           <% true -> %>
@@ -2474,6 +2749,126 @@ defmodule MDTClientWeb.GitLive.Components do
     """
   end
 
+  attr :tab, :map, required: true
+  attr :stash, :map, required: true
+  attr :loaded, :map, default: nil
+  attr :diff, :map, default: nil
+
+  # Git keeps a stash as a commit on top of the one it was made on, so its files
+  # and their diffs are read the way a commit's are.
+  defp stash_details(assigns) do
+    ~H"""
+    <div id="git-stash-details" class="flex flex-col gap-3 p-2.5">
+      <div>
+        <div class="flex items-start gap-2">
+          <p class="min-w-0 flex-1 text-[13px] font-semibold leading-snug text-ink">
+            {@stash.summary}
+          </p>
+          <button
+            type="button"
+            id="git-stash-actions"
+            phx-click="open_menu"
+            phx-value-kind="stash"
+            phx-value-id={@stash.commit}
+            phx-value-anchor="git-stash-actions"
+            aria-haspopup="menu"
+            aria-expanded={to_string(menu_open?(@tab, :stash, @stash.commit))}
+            class="flex shrink-0 cursor-pointer items-center gap-1 rounded border border-line px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink focus-visible:outline-2 focus-visible:outline-accent"
+          >
+            Actions <.icon name="hero-chevron-down-micro" class="size-3" />
+          </button>
+        </div>
+        <p class="mt-1 flex items-center gap-1.5 font-mono text-[11px] text-faint">
+          <.icon name="hero-hashtag-micro" class="size-3" />
+          <span class="select-all">{@stash.commit}</span>
+        </p>
+      </div>
+
+      <div class="flex flex-wrap items-center gap-1">
+        <.stash_chip stash={@stash} />
+        <span
+          :if={@stash.untracked?}
+          class={[chip_base(), "border-teal/40 bg-teal/10 text-teal"]}
+          title="The stash also holds files Git did not track yet"
+        >
+          <.icon name="hero-document-plus-micro" class="size-2.5 shrink-0" /> untracked files
+        </span>
+      </div>
+
+      <div class="flex flex-col gap-2 rounded-md border border-line-soft p-2">
+        <div class="flex min-w-0 items-baseline gap-2">
+          <span class="w-16 shrink-0 text-[10px] uppercase tracking-wide text-faint">Stashed</span>
+          <span class="min-w-0 flex-1">
+            <span class="block font-mono text-[11px] text-ink">
+              {absolute_time(@stash.created_at)}
+            </span>
+            <span class="block text-[10px] text-faint">{relative_time(@stash.created_at)}</span>
+          </span>
+        </div>
+        <div class="flex min-w-0 items-center gap-2">
+          <span class="w-16 shrink-0 text-[10px] uppercase tracking-wide text-faint">Made on</span>
+          <button
+            type="button"
+            id={"git-stash-parent-#{@stash.commit}"}
+            phx-click="select_commit"
+            phx-value-id={@stash.parent}
+            disabled={not Map.has_key?(@tab.commits_by_id, @stash.parent)}
+            title={@stash.parent}
+            class="cursor-pointer rounded border border-line bg-deep px-1.5 py-0.5 font-mono text-[10px] text-accent transition-colors hover:border-accent/60 hover:bg-hover disabled:cursor-not-allowed disabled:text-faint focus-visible:outline-2 focus-visible:outline-accent"
+          >
+            {short_id(@stash.parent)}
+          </button>
+        </div>
+      </div>
+
+      <div class="grid grid-cols-3 gap-1.5">
+        <button
+          type="button"
+          id="git-stash-details-apply"
+          phx-click="request"
+          phx-value-action="apply_stash"
+          phx-value-reference={@stash.reference}
+          disabled={not is_nil(@tab.pending)}
+          title="Restore the complete stash and keep it in the list"
+          class={stash_detail_action()}
+        >
+          <.icon name="hero-arrow-up-tray" class="size-3.5" /> Apply
+        </button>
+        <button
+          type="button"
+          id="git-stash-details-pop"
+          phx-click="request"
+          phx-value-action="pop_stash"
+          phx-value-reference={@stash.reference}
+          disabled={not is_nil(@tab.pending)}
+          title="Restore the complete stash and remove it from the list"
+          class={stash_detail_action()}
+        >
+          <.icon name="hero-arrow-up-on-square" class="size-3.5" /> Pop
+        </button>
+        <button
+          type="button"
+          id="git-stash-details-drop"
+          phx-click="request"
+          phx-value-action="drop_stash"
+          phx-value-reference={@stash.reference}
+          disabled={not is_nil(@tab.pending)}
+          title="Delete the stash without restoring it"
+          class={[stash_detail_action(), "hover:border-bad/50 hover:bg-bad-soft/30 hover:text-bad"]}
+        >
+          <.icon name="hero-trash" class="size-3.5" /> Drop
+        </button>
+      </div>
+
+      <.commit_changes commit={@stash.commit} loaded={@loaded} diff={@diff} noun="stash" />
+
+      <p :if={@stash.untracked?} class="-mt-1 text-[10px] leading-relaxed text-faint">
+        The untracked files it holds are not listed; applying the stash restores them too.
+      </p>
+    </div>
+    """
+  end
+
   ## Operation in progress
 
   attr :tab, :map, required: true
@@ -2636,6 +3031,7 @@ defmodule MDTClientWeb.GitLive.Components do
   attr :commit, :string, required: true
   attr :loaded, :map, default: nil
   attr :diff, :map, default: nil
+  attr :noun, :string, default: "commit", doc: "what `commit` is to the reader"
 
   def commit_changes(assigns) do
     ~H"""
@@ -2653,13 +3049,13 @@ defmodule MDTClientWeb.GitLive.Components do
         <% is_nil(@loaded) -> %>
           <p id="git-commit-changes-loading" class="flex items-center gap-2 text-[11px] text-muted">
             <.icon name="hero-arrow-path" class="size-3.5 text-accent motion-safe:animate-spin" />
-            Reading the commit…
+            Reading the {@noun}…
           </p>
         <% @loaded.error -> %>
           <.error_notice id="git-commit-changes-error" error={@loaded.error} class="" />
         <% @loaded.files == [] -> %>
           <p id="git-commit-changes-empty" class="text-[11px] text-faint">
-            This commit changed no files.
+            This {@noun} changed no files.
           </p>
         <% true -> %>
           <div id="git-commit-files" role="listbox" aria-label="Files changed">
@@ -3138,14 +3534,32 @@ defmodule MDTClientWeb.GitLive.Components do
           <div
             :for={stash <- @tab.stashes}
             id={"git-stash-#{stash.index}"}
-            class="group rounded-md border border-line-soft p-1.5 transition-colors hover:border-line"
+            class={[
+              "group rounded-md border p-1.5 transition-colors",
+              if(@tab.selected_commit == stash.commit,
+                do: "border-accent/50 bg-accent-soft/30",
+                else: "border-line-soft hover:border-line"
+              )
+            ]}
           >
-            <p class="truncate text-[11px] text-ink" title={stash.summary}>{stash.summary}</p>
-            <p class="flex items-center gap-1.5 font-mono text-[10px] text-faint">
-              <span>{stash.reference}</span>
-              <span>·</span>
-              <span title={absolute_time(stash.created_at)}>{relative_time(stash.created_at)}</span>
-            </p>
+            <%!-- Picking it shows it in the inspector, as its box in the graph does. --%>
+            <button
+              type="button"
+              id={"git-stash-select-#{stash.index}"}
+              phx-click="select_stash"
+              phx-value-id={stash.commit}
+              aria-pressed={to_string(@tab.selected_commit == stash.commit)}
+              class="block w-full min-w-0 cursor-pointer rounded text-left focus-visible:outline-2 focus-visible:outline-accent"
+            >
+              <span class="block truncate text-[11px] text-ink" title={stash.summary}>
+                {stash.summary}
+              </span>
+              <span class="flex items-center gap-1.5 font-mono text-[10px] text-faint">
+                <span>{stash.reference}</span>
+                <span>·</span>
+                <span title={absolute_time(stash.created_at)}>{relative_time(stash.created_at)}</span>
+              </span>
+            </button>
             <div class="mt-1 flex items-center gap-1">
               <button
                 type="button"
@@ -3241,6 +3655,14 @@ defmodule MDTClientWeb.GitLive.Components do
     """
   end
 
+  @doc """
+  Asks before a command runs.
+
+  A confirmation holds one `action` accepted with its `label`, or, when there
+  is more than one way to go ahead, `choices`: each an `id`, `label`, `hint`,
+  `icon` and `action`, with `danger: true` on the ones that lose work. The
+  first choice takes the focus, so it should be the safest.
+  """
   attr :confirm, :map, required: true
 
   def confirm_dialog(assigns) do
@@ -3253,10 +3675,22 @@ defmodule MDTClientWeb.GitLive.Components do
       aria-labelledby="git-confirm-title"
     >
       <div class="absolute inset-0 bg-black/50" phx-click="cancel_confirm"></div>
-      <div class="relative w-full max-w-sm rounded-xl border border-line bg-panel p-4 shadow-2xl shadow-black/30 dark:shadow-black/60">
+      <div class={[
+        "relative w-full rounded-xl border border-line bg-panel p-4 shadow-2xl shadow-black/30 dark:shadow-black/60",
+        if(@confirm[:choices], do: "max-w-md", else: "max-w-sm")
+      ]}>
         <div class="flex items-start gap-2.5">
-          <span class="flex size-8 shrink-0 items-center justify-center rounded-lg border border-bad/40 bg-bad-soft/40">
-            <.icon name="hero-exclamation-triangle" class="size-4 text-bad" />
+          <span class={[
+            "flex size-8 shrink-0 items-center justify-center rounded-lg border",
+            if(@confirm[:choices],
+              do: "border-accent/40 bg-accent-soft/40",
+              else: "border-bad/40 bg-bad-soft/40"
+            )
+          ]}>
+            <.icon
+              name={@confirm[:icon] || "hero-exclamation-triangle"}
+              class={["size-4", if(@confirm[:choices], do: "text-accent", else: "text-bad")]}
+            />
           </span>
           <div class="min-w-0">
             <p id="git-confirm-title" class="break-words text-[13px] font-semibold text-ink">
@@ -3265,7 +3699,54 @@ defmodule MDTClientWeb.GitLive.Components do
             <p class="mt-1 text-[11px] leading-relaxed text-muted">{@confirm.message}</p>
           </div>
         </div>
-        <div class="mt-4 flex items-center justify-end gap-2">
+
+        <div :if={@confirm[:choices]} id="git-confirm-choices" class="mt-4 flex flex-col gap-1.5">
+          <button
+            :for={{choice, index} <- Enum.with_index(@confirm.choices)}
+            type="button"
+            id={"git-confirm-#{choice.id}"}
+            phx-click="confirm_action"
+            phx-value-choice={choice.id}
+            phx-mounted={index == 0 && JS.focus()}
+            class={[
+              "group flex w-full cursor-pointer items-start gap-2.5 rounded-lg border p-2.5 text-left",
+              "transition-all duration-150 hover:-translate-y-px active:translate-y-0",
+              "focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent",
+              if(choice[:danger],
+                do: "border-bad/25 hover:border-bad/60 hover:bg-bad-soft/30",
+                else: "border-line hover:border-accent/50 hover:bg-accent-soft/30"
+              )
+            ]}
+          >
+            <span class={[
+              "flex size-6 shrink-0 items-center justify-center rounded-md border transition-colors",
+              if(choice[:danger],
+                do: "border-bad/30 bg-bad-soft/30 text-bad",
+                else:
+                  "border-line bg-deep text-muted group-hover:border-accent/40 group-hover:text-accent"
+              )
+            ]}>
+              <.icon name={choice.icon} class="size-3.5" />
+            </span>
+            <span class="min-w-0 flex-1">
+              <span class={[
+                "block text-xs font-semibold",
+                if(choice[:danger], do: "text-bad", else: "text-ink")
+              ]}>
+                {choice.label}
+              </span>
+              <span class="mt-0.5 block text-[11px] leading-relaxed text-muted">{choice.hint}</span>
+            </span>
+          </button>
+        </div>
+
+        <div :if={@confirm[:choices]} class="mt-3 flex items-center justify-end">
+          <.button type="button" id="git-confirm-cancel" phx-click="cancel_confirm" variant="ghost">
+            Cancel
+          </.button>
+        </div>
+
+        <div :if={is_nil(@confirm[:choices])} class="mt-4 flex items-center justify-end gap-2">
           <.button
             type="button"
             id="git-confirm-cancel"
@@ -3510,6 +3991,14 @@ defmodule MDTClientWeb.GitLive.Components do
       "flex cursor-pointer items-center gap-1 rounded px-1.5 py-1 text-[11px] text-muted",
       "transition-colors hover:bg-hover hover:text-ink disabled:cursor-not-allowed disabled:opacity-40",
       "focus-visible:outline-2 focus-visible:outline-accent"
+    ]
+  end
+
+  defp stash_detail_action do
+    [
+      "flex cursor-pointer items-center justify-center gap-1.5 rounded-md border border-line-soft",
+      "px-2 py-1 text-[11px] text-muted transition-colors hover:border-line hover:bg-hover hover:text-ink",
+      "disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline-2 focus-visible:outline-accent"
     ]
   end
 

@@ -2,86 +2,78 @@ defmodule MDTClientWeb.CodeComponents do
   @moduledoc """
   Read-only code viewer.
 
-  Highlighting is done on the server by a small tokenizer: it only knows JSON,
-  which covers the payloads the HTTP client shows, and falls back to plain text
-  for anything else. Colors come from the Zed theme tokens in `app.css`.
+  The content is rendered once, as plain text, and the `CodeView` hook in
+  `assets/js/code_view.js` takes it from there. JSON is formatted and coloured
+  in the browser and only the lines in view are drawn, so a body of many
+  megabytes scrolls like a short one. Anything else, and the raw view of JSON,
+  is the text as received. Colors come from the Zed theme tokens in `app.css`.
   """
   use Phoenix.Component
 
-  @token ~r/("(?:[^"\\]|\\.)*"\s*:)|("(?:[^"\\]|\\.)*")|(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)|(\btrue\b|\bfalse\b|\bnull\b)|([\{\}\[\]])|([,:])/
-  @highlight_limit 100_000
-
-  @doc "Whether content is large enough to skip per-token server rendering."
-  def large_content?(content) when is_binary(content), do: byte_size(content) > @highlight_limit
-
   @doc """
-  Renders `content` with highlighting and line numbers. Large content uses a
-  compact plain-text node to keep rendering responsive.
+  Renders `content` in a viewer that fills the element it is given.
+
+  `format` picks between formatted JSON and the text as received. Changing it
+  only updates an attribute, so the content is not sent again; new content
+  mounts a new viewer.
 
   ## Examples
 
-      <.code_block id="response-body" content={@body} language="json" />
+      <.code_block id="response-body" content={@body} language="json" class="flex-1" />
   """
   attr :id, :string, required: true
   attr :content, :string, required: true
   attr :language, :string, default: "json", values: ~w(json text)
+  attr :format, :string, default: "pretty", values: ~w(pretty raw)
   attr :class, :any, default: nil
 
   def code_block(assigns) do
-    assigns =
-      if large_content?(assigns.content) do
-        assign(assigns, large?: true, lines: [])
-      else
-        assign(assigns, large?: false, lines: String.split(assigns.content, "\n"))
-      end
+    # The viewer ignores patches to what it drew, so it is keyed by content:
+    # another body is another element, and the hook mounts again for it.
+    assigns = assign(assigns, :key, :erlang.phash2(assigns.content))
 
     ~H"""
-    <%= if @large? do %>
-      <pre
-        id={@id}
-        data-renderer="plain"
-        class={[
-          "overflow-auto whitespace-pre bg-deep p-2.5 font-mono text-xs leading-[1.45rem] text-ink",
-          @class
-        ]}
-      >{@content}</pre>
-    <% else %>
+    <div id={@id} class={["relative overflow-hidden bg-deep", @class]}>
       <div
-        id={@id}
-        data-renderer="highlighted"
-        class={["overflow-auto bg-deep font-mono text-xs leading-[1.45rem]", @class]}
+        id={"#{@id}-#{@key}"}
+        phx-hook="CodeView"
+        phx-update="ignore"
+        data-code-view
+        data-language={@language}
+        data-format={@format}
+        class="absolute inset-0"
       >
-        <div class="min-w-max py-1.5">
-          <div :for={{line, number} <- Enum.with_index(@lines, 1)} class="flex hover:bg-panel/60">
-            <span class="w-10 shrink-0 select-none pr-3 text-right text-ink/40 dark:text-ink/25">{number}</span>
-            <code class="whitespace-pre pr-4" phx-no-format><span :for={{class, text} <- tokenize(line, @language)} class={class}>{text}</span></code>
-          </div>
-        </div>
+        <%!-- Hidden while JSON is formatted, so the browser never lays it out. --%>
+        <pre
+          data-source
+          hidden={@language == "json" and @format == "pretty"}
+          class="absolute inset-0 overflow-auto whitespace-pre-wrap break-all px-2.5 py-1.5 font-mono text-xs leading-5 text-ink"
+        >{@content}</pre>
       </div>
-    <% end %>
+    </div>
     """
   end
 
-  defp tokenize(line, "text"), do: [{"text-ink", line}]
+  @doc """
+  The language to show a body in: JSON when the content type says so or the
+  body opens like a JSON document, text otherwise.
 
-  defp tokenize(line, "json") do
-    @token
-    |> Regex.split(line, include_captures: true)
-    |> Enum.reject(&(&1 == ""))
-    |> Enum.map(&{token_class(&1), &1})
-  end
+  ## Examples
 
-  defp token_class(chunk) do
-    trimmed = String.trim(chunk)
+      iex> MDTClientWeb.CodeComponents.language("application/problem+json", "")
+      "json"
 
+      iex> MDTClientWeb.CodeComponents.language(nil, ~s(\\n  [1, 2]))
+      "json"
+
+      iex> MDTClientWeb.CodeComponents.language("text/html", "<html>")
+      "text"
+  """
+  def language(content_type, content) do
     cond do
-      String.starts_with?(trimmed, "\"") and String.ends_with?(trimmed, ":") -> "text-syn-key"
-      String.starts_with?(trimmed, "\"") -> "text-syn-string"
-      trimmed in ~w({ } [ ]) -> "text-syn-brace"
-      trimmed in ~w(true false null) -> "text-syn-const"
-      trimmed in [",", ":"] -> "text-syn-punct"
-      Regex.match?(~r/^-?\d/, trimmed) -> "text-syn-number"
-      true -> "text-ink"
+      is_binary(content_type) and String.contains?(content_type, "json") -> "json"
+      is_binary(content) and Regex.match?(~r/\A\s*[\[{]/, content) -> "json"
+      true -> "text"
     end
   end
 end

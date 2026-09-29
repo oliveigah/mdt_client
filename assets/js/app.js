@@ -26,12 +26,13 @@ import {hooks as colocatedHooks} from "phoenix-colocated/mdt_client"
 import topbar from "../vendor/topbar"
 import {initZoom} from "./zoom"
 import {NoticeTimer} from "./notice_timer"
+import {CodeView} from "./code_view"
 
 const csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute("content")
 const liveSocket = new LiveSocket("/live", Socket, {
   longPollFallbackMs: 2500,
   params: {_csrf_token: csrfToken},
-  hooks: {...colocatedHooks, NoticeTimer},
+  hooks: {...colocatedHooks, NoticeTimer, CodeView},
   // Modifier keys are not sent by default, but shortcuts like Ctrl+Enter need
   // them, and so do lists where Shift and Ctrl/Cmd clicks extend a selection.
   metadata: {
