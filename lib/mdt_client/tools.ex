@@ -27,6 +27,17 @@ defmodule MDTClient.Tools do
       path: "/tools/git",
       shortcut: "2",
       status: :ready
+    },
+    %{
+      id: :diagrams,
+      name: "Diagrams",
+      tagline: "Sketch boxes, tables, arrows and notes",
+      description:
+        "Draw shapes and tables, connect them with arrows, down to the row, and write on any of them. Every diagram is kept, and search finds a word wherever it was written.",
+      icon: "diagram",
+      path: "/tools/diagrams",
+      shortcut: "3",
+      status: :ready
     }
   ]
 

@@ -459,7 +459,8 @@ defmodule MDTClientWeb.CoreComponents do
   end
 
   @doc """
-  Renders a [Heroicon](https://heroicons.com) or the Git branch icon.
+  Renders a [Heroicon](https://heroicons.com), or one of the tool icons
+  heroicons lacks: `"git-branch"` and `"diagram"`.
 
   Heroicons come in three styles – outline, solid, and mini.
   By default, the outline style is used, but solid and mini may
@@ -495,6 +496,27 @@ defmodule MDTClientWeb.CoreComponents do
       <path d="M6 3v12m12-6a9 9 0 0 1-9 9" />
       <circle cx="6" cy="18" r="3" />
       <circle cx="18" cy="6" r="3" />
+    </svg>
+    """
+  end
+
+  def icon(%{name: "diagram"} = assigns) do
+    ~H"""
+    <svg
+      class={@class}
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="1.8"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      aria-hidden="true"
+    >
+      <rect x="3" y="3.5" width="9" height="6.5" rx="1.5" />
+      <rect x="13" y="14" width="8" height="6.5" rx="1.5" />
+      <path d="M7.5 10v5.25a2 2 0 0 0 2 2H12" />
+      <path d="m10 15 2.25 2.25L10 19.5" />
     </svg>
     """
   end

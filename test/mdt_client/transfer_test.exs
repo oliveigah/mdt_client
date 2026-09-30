@@ -4,6 +4,8 @@ defmodule MDTClient.TransferTest do
   import MDTClient.VaultHelpers
 
   alias MDTClient.Accounts
+  alias MDTClient.Diagrams.Diagram
+  alias MDTClient.Diagrams.Library
   alias MDTClient.HttpClient.Core
   alias MDTClient.HttpClient.HistoryMetadata
   alias MDTClient.HttpClient.Resources
@@ -28,8 +30,11 @@ defmodule MDTClient.TransferTest do
     record(username, "https://api.example.test/one")
     assert :ok = Transfer.export(username, path)
 
-    assert {:ok, %Plan{username: ^username, sections: [%{summary: "1 request"}]}} =
-             Transfer.read(username, path)
+    assert {:ok,
+            %Plan{
+              username: ^username,
+              sections: [%{summary: "1 request"}, %{summary: "No diagrams"}]
+            }} = Transfer.read(username, path)
   end
 
   test "another identity needs the password the file was exported with", %{
@@ -61,7 +66,12 @@ defmodule MDTClient.TransferTest do
     record(other, "https://api.example.test/theirs")
 
     {:ok, plan} = Transfer.read(other, path, password: password)
-    assert [%{label: "HTTP request history", summary: "2 requests"}] = plan.sections
+
+    assert [
+             %{label: "HTTP request history", summary: "2 requests"},
+             %{label: "Diagrams", summary: "No diagrams"}
+           ] = plan.sections
+
     assert :ok = Transfer.import(other, plan, :merge)
 
     assert paths(other) == ["/theirs", "/two", "/one"]
@@ -112,7 +122,27 @@ defmodule MDTClient.TransferTest do
   test "an empty history round trips", %{username: username, path: path} do
     :ok = Transfer.export(username, path)
 
-    assert {:ok, %Plan{sections: [%{summary: "No requests"}]}} = Transfer.read(username, path)
+    assert {:ok, %Plan{sections: [%{summary: "No requests"}, %{summary: "No diagrams"}]}} =
+             Transfer.read(username, path)
+  end
+
+  test "diagrams travel in the same file", %{username: username, password: password, path: path} do
+    {:ok, diagram} =
+      Library.save(username, Diagram.new_id(), %{
+        title: "Checkout",
+        elements: [%{"id" => "a", "type" => "rectangle", "text" => "Payment gateway"}]
+      })
+
+    :ok = Transfer.export(username, path)
+
+    other = also_unlock("someone-else")
+    {:ok, plan} = Transfer.read(other, path, password: password)
+    assert [_requests, %{label: "Diagrams", summary: "1 diagram"}] = plan.sections
+    assert :ok = Transfer.import(other, plan, :merge)
+
+    assert {:ok, %{title: "Checkout"}} = Library.get(other, diagram.id)
+    assert [%{id: id}] = Library.list(other, "gateway")
+    assert id == diagram.id
   end
 
   test "reports a missing file, a file that is not an export and a blank password", %{

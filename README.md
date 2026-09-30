@@ -11,6 +11,10 @@ account.
   commands, and search saved request history.
 - **Git GUI:** Browse commits and diffs, manage branches and stashes, and work
   with the staging area across multiple repositories.
+- **Diagrams:** Sketch boxes, ellipses, diamonds and arrows, and write on any of
+  them or anywhere on the canvas. Tables of typed rows can be related row to
+  row, for data models. Every diagram is kept, and search finds a word wherever
+  it was written.
 - **Backup and restore:** Export a local identity's saved data to one encrypted
   `.mdtexport` file, then import it on another installation.
 
@@ -23,9 +27,10 @@ account.
   Tailwind CSS and JavaScript provide the desktop UI.
 - **Tool logic:** Elixir modules execute HTTP requests with Req and Git
   operations through the installed Git executable.
-- **Local data:** HTTP history is encrypted under a password-protected local
-  identity in `~/.mdt_client/`. Git repositories remain in their own folders.
-  The transfer system packages identity data for encrypted export and import.
+- **Local data:** HTTP history and diagrams are encrypted under a
+  password-protected local identity in `~/.mdt_client/`. Git repositories
+  remain in their own folders. The transfer system packages identity data for
+  encrypted export and import.
 
 ## Development
 

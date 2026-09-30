@@ -54,7 +54,9 @@ defmodule MDTClientWeb.TransferLiveTest do
     render_async(view, @derive_timeout)
 
     assert has_element?(view, "#exported")
-    assert {:ok, %{sections: [%{summary: "1 request"}]}} = Transfer.read(username, path)
+
+    assert {:ok, %{sections: [%{summary: "1 request"}, %{summary: "No diagrams"}]}} =
+             Transfer.read(username, path)
   end
 
   test "gives a path without an extension the export extension", %{conn: conn, folder: folder} do
