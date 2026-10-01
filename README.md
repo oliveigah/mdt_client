@@ -15,6 +15,8 @@ account.
   them or anywhere on the canvas. Tables of typed rows can be related row to
   row, for data models. Every diagram is kept, and search finds a word wherever
   it was written.
+- **Notes:** Keep tasks and ideas as a title and a Markdown body, and mark
+  them done as you go. Search finds a word in any note, open or done.
 - **Backup and restore:** Export a local identity's saved data to one encrypted
   `.mdtexport` file, then import it on another installation.
 
@@ -27,7 +29,7 @@ account.
   Tailwind CSS and JavaScript provide the desktop UI.
 - **Tool logic:** Elixir modules execute HTTP requests with Req and Git
   operations through the installed Git executable.
-- **Local data:** HTTP history and diagrams are encrypted under a
+- **Local data:** HTTP history, diagrams and notes are encrypted under a
   password-protected local identity in `~/.mdt_client/`. Git repositories
   remain in their own folders. The transfer system packages identity data for
   encrypted export and import.

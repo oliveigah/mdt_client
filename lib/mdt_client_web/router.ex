@@ -40,6 +40,7 @@ defmodule MDTClientWeb.Router do
       live "/tools/http", HttpClientLive
       live "/tools/git", GitLive
       live "/tools/diagrams", DiagramsLive
+      live "/tools/notes", NotesLive
       live "/transfer", TransferLive
     end
   end

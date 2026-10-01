@@ -9,6 +9,7 @@ defmodule MDTClient.TransferTest do
   alias MDTClient.HttpClient.Core
   alias MDTClient.HttpClient.HistoryMetadata
   alias MDTClient.HttpClient.Resources
+  alias MDTClient.Notes
   alias MDTClient.Transfer
   alias MDTClient.Transfer.Archive
   alias MDTClient.Transfer.FailingParticipant
@@ -33,7 +34,11 @@ defmodule MDTClient.TransferTest do
     assert {:ok,
             %Plan{
               username: ^username,
-              sections: [%{summary: "1 request"}, %{summary: "No diagrams"}]
+              sections: [
+                %{summary: "1 request"},
+                %{summary: "No diagrams"},
+                %{summary: "No notes"}
+              ]
             }} = Transfer.read(username, path)
   end
 
@@ -69,7 +74,8 @@ defmodule MDTClient.TransferTest do
 
     assert [
              %{label: "HTTP request history", summary: "2 requests"},
-             %{label: "Diagrams", summary: "No diagrams"}
+             %{label: "Diagrams", summary: "No diagrams"},
+             %{label: "Notes", summary: "No notes"}
            ] = plan.sections
 
     assert :ok = Transfer.import(other, plan, :merge)
@@ -122,8 +128,14 @@ defmodule MDTClient.TransferTest do
   test "an empty history round trips", %{username: username, path: path} do
     :ok = Transfer.export(username, path)
 
-    assert {:ok, %Plan{sections: [%{summary: "No requests"}, %{summary: "No diagrams"}]}} =
-             Transfer.read(username, path)
+    assert {:ok,
+            %Plan{
+              sections: [
+                %{summary: "No requests"},
+                %{summary: "No diagrams"},
+                %{summary: "No notes"}
+              ]
+            }} = Transfer.read(username, path)
   end
 
   test "diagrams travel in the same file", %{username: username, password: password, path: path} do
@@ -137,12 +149,32 @@ defmodule MDTClient.TransferTest do
 
     other = also_unlock("someone-else")
     {:ok, plan} = Transfer.read(other, path, password: password)
-    assert [_requests, %{label: "Diagrams", summary: "1 diagram"}] = plan.sections
+    assert [_requests, %{label: "Diagrams", summary: "1 diagram"}, _notes] = plan.sections
     assert :ok = Transfer.import(other, plan, :merge)
 
     assert {:ok, %{title: "Checkout"}} = Library.get(other, diagram.id)
     assert [%{id: id}] = Library.list(other, "gateway")
     assert id == diagram.id
+  end
+
+  test "notes travel in the same file", %{username: username, password: password, path: path} do
+    {:ok, note} =
+      Notes.Library.save(username, Notes.Note.new_id(), %{
+        title: "Release",
+        body: "- [ ] Tag the build"
+      })
+
+    {:ok, note} = Notes.Library.set_done(username, note.id, true)
+    :ok = Transfer.export(username, path)
+
+    other = also_unlock("someone-else")
+    {:ok, plan} = Transfer.read(other, path, password: password)
+    assert [_requests, _diagrams, %{label: "Notes", summary: "1 note"}] = plan.sections
+    assert :ok = Transfer.import(other, plan, :merge)
+
+    assert {:ok, ^note} = Notes.Library.get(other, note.id)
+    assert [%{id: id}] = Notes.Library.list(other, "tag build")
+    assert id == note.id
   end
 
   test "reports a missing file, a file that is not an export and a blank password", %{

@@ -31,6 +31,8 @@ defmodule MDTClient.Diagrams.Diagram do
   normalized once when it changes so searching does not walk the elements.
   """
 
+  alias MDTClient.Search
+
   @types ~w(rectangle ellipse diamond text table arrow)
   @colors ~w(ink accent ok warn bad violet)
   @fills ~w(none tint)
@@ -46,8 +48,6 @@ defmodule MDTClient.Diagrams.Diagram do
   @max_cell 200
   @max_id 64
   @coordinate_limit 10_000_000
-  @snippet_before 24
-  @snippet_after 60
 
   @type element :: %{String.t() => term()}
 
@@ -187,7 +187,10 @@ defmodule MDTClient.Diagrams.Diagram do
   @doc "Rebuilds the text searches run against."
   @spec with_search_text(t()) :: t()
   def with_search_text(%__MODULE__{} = diagram) do
-    %{diagram | search_text: [diagram.title | texts(diagram)] |> Enum.join("\n") |> normalize()}
+    %{
+      diagram
+      | search_text: [diagram.title | texts(diagram)] |> Enum.join("\n") |> Search.normalize()
+    }
   end
 
   @doc """
@@ -197,13 +200,11 @@ defmodule MDTClient.Diagrams.Diagram do
   words of one idea are often spread over several boxes.
   """
   @spec terms(String.t()) :: [String.t()]
-  def terms(term) when is_binary(term), do: term |> normalize() |> String.split(" ", trim: true)
+  def terms(term), do: Search.terms(term)
 
   @doc "Whether the diagram holds every one of `terms`."
   @spec matches?(t(), [String.t()]) :: boolean()
-  def matches?(%__MODULE__{search_text: text}, terms) do
-    Enum.all?(terms, &String.contains?(text, &1))
-  end
+  def matches?(%__MODULE__{search_text: text}, terms), do: Search.matches?(text, terms)
 
   @doc """
   The first piece of text in the diagram holding one of `terms`, cut down to
@@ -213,47 +214,7 @@ defmodule MDTClient.Diagrams.Diagram do
   on screen already.
   """
   @spec snippet(t(), [String.t()]) :: {String.t(), String.t(), String.t()} | nil
-  def snippet(_diagram, []), do: nil
-
-  def snippet(%__MODULE__{} = diagram, terms) do
-    patterns = Enum.map(terms, &Regex.compile!(Regex.escape(&1), "iu"))
-
-    Enum.find_value(texts(diagram), fn text ->
-      line = String.replace(text, ~r/\s+/u, " ")
-
-      Enum.find_value(patterns, fn pattern ->
-        case Regex.run(pattern, line, return: :index) do
-          [{at, length}] -> cut(line, at, length)
-          nil -> nil
-        end
-      end)
-    end)
-  end
-
-  @doc false
-  def normalize(text) when is_binary(text) do
-    text
-    |> String.downcase()
-    |> String.replace(~r/\s+/u, " ")
-    |> String.trim()
-  end
-
-  defp cut(line, at, length) do
-    before = binary_part(line, 0, at)
-    after_match = binary_part(line, at + length, byte_size(line) - at - length)
-
-    before =
-      if String.length(before) > @snippet_before,
-        do: "…" <> String.slice(before, -@snippet_before, @snippet_before),
-        else: before
-
-    after_match =
-      if String.length(after_match) > @snippet_after,
-        do: String.slice(after_match, 0, @snippet_after) <> "…",
-        else: after_match
-
-    {before, binary_part(line, at, length), after_match}
-  end
+  def snippet(%__MODULE__{} = diagram, terms), do: Search.snippet(texts(diagram), terms)
 
   defp element(%{"id" => id, "type" => type} = attrs) when type in @types do
     if id?(id), do: [build(type, id, attrs)], else: []

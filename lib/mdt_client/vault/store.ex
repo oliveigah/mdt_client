@@ -18,6 +18,7 @@ defmodule MDTClient.Vault.Store do
   # Started in reverse and closed in order, so the keyring comes up first and
   # goes down last.
   @stores [
+    MDTClient.Notes.Library,
     MDTClient.Diagrams.Library,
     MDTClient.HttpClient.Resources,
     MDTClient.HttpClient.Requests,

@@ -68,7 +68,8 @@ defmodule MDTClient.MixProject do
       {:dns_cluster, "~> 0.2.0"},
       {:bandit, "~> 1.5"},
       {:elixirkit, github: "livebook-dev/elixirkit"},
-      {:req, "~> 0.7.4"}
+      {:req, "~> 0.7.4"},
+      {:mdex, "~> 0.14.1"}
     ]
   end
 

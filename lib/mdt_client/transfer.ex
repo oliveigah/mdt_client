@@ -22,7 +22,11 @@ defmodule MDTClient.Transfer do
   alias MDTClient.Transfer.Plan
   alias MDTClient.Vault.Keyring
 
-  @participants [MDTClient.HttpClient.Transfer, MDTClient.Diagrams.Transfer]
+  @participants [
+    MDTClient.HttpClient.Transfer,
+    MDTClient.Diagrams.Transfer,
+    MDTClient.Notes.Transfer
+  ]
   @extension ".mdtexport"
 
   @typedoc "How imported sections meet the data already there."

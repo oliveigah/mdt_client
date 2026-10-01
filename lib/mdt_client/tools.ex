@@ -38,6 +38,17 @@ defmodule MDTClient.Tools do
       path: "/tools/diagrams",
       shortcut: "3",
       status: :ready
+    },
+    %{
+      id: :notes,
+      name: "Notes",
+      tagline: "Keep tasks and ideas, tick them off",
+      description:
+        "Write down tasks and ideas in Markdown and mark them done as you go. Every note is kept, and search finds a word wherever it was written.",
+      icon: "hero-clipboard-document-check",
+      path: "/tools/notes",
+      shortcut: "4",
+      status: :ready
     }
   ]
 
