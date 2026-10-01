@@ -39,6 +39,9 @@ defmodule MDTClient.Diagrams.Library do
     GenServer.start_link(__MODULE__, opts, name: Store.via(__MODULE__, username))
   end
 
+  @doc "Subscribes the caller to diagram changes made by other processes."
+  def subscribe(username), do: Phoenix.PubSub.subscribe(MDTClient.PubSub, topic(username))
+
   @doc """
   Summaries of the diagrams holding every word of `term`, the most recently
   changed first. A blank term lists them all.
@@ -142,26 +145,32 @@ defmodule MDTClient.Diagrams.Library do
     {:reply, state.diagrams |> newest_first() |> Enum.reverse(), state}
   end
 
-  def handle_call({:save, id, attrs}, _from, state) do
+  def handle_call({:save, id, attrs}, from, state) do
     attrs = Map.take(attrs, [:title, :elements])
 
     case Map.fetch(state.diagrams, id) do
       {:ok, diagram} ->
         case Diagram.update(diagram, attrs) do
-          ^diagram -> {:reply, {:ok, diagram}, state}
-          updated -> {:reply, {:ok, updated}, state |> put(updated) |> changed()}
+          ^diagram ->
+            {:reply, {:ok, diagram}, state}
+
+          updated ->
+            broadcast(state, from, id)
+            {:reply, {:ok, updated}, state |> put(updated) |> changed()}
         end
 
       :error ->
         diagram = Diagram.new(Map.put(attrs, :id, id))
+        broadcast(state, from, id)
         {:reply, {:ok, diagram}, state |> put(diagram) |> changed()}
     end
   end
 
-  def handle_call({:duplicate, id}, _from, state) do
+  def handle_call({:duplicate, id}, from, state) do
     case Map.fetch(state.diagrams, id) do
       {:ok, diagram} ->
         copy = Diagram.new(%{title: "#{diagram.title} copy", elements: diagram.elements})
+        broadcast(state, from, copy.id)
         {:reply, {:ok, copy}, state |> put(copy) |> changed()}
 
       :error ->
@@ -169,15 +178,16 @@ defmodule MDTClient.Diagrams.Library do
     end
   end
 
-  def handle_call({:delete, id}, _from, state) do
+  def handle_call({:delete, id}, from, state) do
     if Map.has_key?(state.diagrams, id) do
+      broadcast(state, from, id)
       {:reply, :ok, flushed(%{state | diagrams: Map.delete(state.diagrams, id)})}
     else
       {:reply, :error, state}
     end
   end
 
-  def handle_call({:rewrite, fun}, _from, state) do
+  def handle_call({:rewrite, fun}, from, state) do
     diagrams =
       state.diagrams
       |> newest_first()
@@ -185,6 +195,7 @@ defmodule MDTClient.Diagrams.Library do
       |> fun.()
       |> Map.new(&{&1.id, &1})
 
+    broadcast(state, from, :all)
     {:reply, :ok, flushed(%{state | diagrams: diagrams})}
   end
 
@@ -201,6 +212,17 @@ defmodule MDTClient.Diagrams.Library do
   end
 
   defp put(state, diagram), do: %{state | diagrams: Map.put(state.diagrams, diagram.id, diagram)}
+
+  defp topic(username), do: "diagrams:" <> Accounts.id(username)
+
+  defp broadcast(state, {caller, _tag}, id) do
+    Phoenix.PubSub.broadcast_from(
+      MDTClient.PubSub,
+      caller,
+      topic(state.username),
+      {:diagrams_changed, id}
+    )
+  end
 
   # Coalesced rather than written straight away: dragging a shape around saves
   # on every drop, and that becomes one write, while nothing waits longer than

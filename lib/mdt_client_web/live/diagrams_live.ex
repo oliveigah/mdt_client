@@ -31,6 +31,8 @@ defmodule MDTClientWeb.DiagramsLive do
   def mount(_params, _session, socket) do
     username = socket.assigns.current_scope.user.username
 
+    if connected?(socket), do: Library.subscribe(username)
+
     current =
       case Library.latest(username) do
         {:ok, diagram} -> current(diagram)
@@ -49,6 +51,16 @@ defmodule MDTClientWeb.DiagramsLive do
      |> assign(:term, "")
      |> assign_list()}
   end
+
+  @impl true
+  def handle_params(%{"id" => id}, _uri, socket) do
+    case Library.get(socket.assigns.username, id) do
+      {:ok, diagram} -> {:noreply, open(socket, current(diagram), diagram.elements)}
+      :error -> {:noreply, put_flash(socket, :error, "Diagram not found")}
+    end
+  end
+
+  def handle_params(_params, _uri, socket), do: {:noreply, socket}
 
   @impl true
   def render(assigns) do
@@ -952,6 +964,20 @@ defmodule MDTClientWeb.DiagramsLive do
   end
 
   ## Helpers
+
+  @impl true
+  def handle_info({:diagrams_changed, id}, socket) do
+    socket = assign_list(socket)
+
+    if socket.assigns.current.saved? and id in [:all, socket.assigns.current.id] do
+      case Library.get(socket.assigns.username, socket.assigns.current.id) do
+        {:ok, diagram} -> {:noreply, open(socket, current(diagram), diagram.elements)}
+        :error -> {:noreply, open(socket, current(Diagram.new(), false), [])}
+      end
+    else
+      {:noreply, socket}
+    end
+  end
 
   # Only what the page shows; the elements go to the canvas and stay there.
   defp current(%Diagram{} = diagram, saved? \\ true) do

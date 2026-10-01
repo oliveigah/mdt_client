@@ -18,6 +18,9 @@ defmodule MDTClient.HttpClient.Resources do
   alias MDTClient.Vault
   alias MDTClient.Vault.Store
 
+  @doc "Subscribes to changes made to saved requests by other processes."
+  def subscribe(username), do: Phoenix.PubSub.subscribe(MDTClient.PubSub, topic(username))
+
   @history_file "http_history.bin"
   @end_of_table :"$end_of_table"
   @default_sync_interval :timer.seconds(30)
@@ -25,13 +28,16 @@ defmodule MDTClient.HttpClient.Resources do
 
   @type history_id :: pos_integer()
   @type metadata :: HistoryMetadata.t()
-  @type response :: Req.Response.t() | Exception.t()
+  @typedoc "Nil marks a saved request sample that has never been sent."
+  @type response :: Req.Response.t() | Exception.t() | nil
   @type entry :: {history_id(), metadata(), Req.Request.t(), response()}
   @typedoc "An entry without the identifier this table gave it."
   @type history_data :: {metadata(), Req.Request.t(), response()}
   @type outline ::
           {history_id(), metadata(), Req.Request.t(),
-           {:response, non_neg_integer(), map(), non_neg_integer()} | {:error, Exception.t()}}
+           {:response, non_neg_integer(), map(), non_neg_integer()}
+           | {:error, Exception.t()}
+           | :sample}
   @type summary ::
           {history_id(), String.t() | nil, [String.t()], DateTime.t(), non_neg_integer(), atom(),
            URI.t(), non_neg_integer()}
@@ -50,7 +56,7 @@ defmodule MDTClient.HttpClient.Resources do
   @spec counter(String.t()) :: :atomics.atomics_ref()
   def counter(username), do: handles(username).counter
 
-  @doc "Stores a completed request and returns its durable unique identifier."
+  @doc "Stores a completed request or an unsent sample and returns its unique identifier."
   @spec record(String.t(), metadata(), Req.Request.t(), response()) :: history_id()
   def record(username, %HistoryMetadata{} = metadata, %Req.Request{} = request, response) do
     %{table: table, outlines: outlines, counter: counter} = handles(username)
@@ -73,6 +79,13 @@ defmodule MDTClient.HttpClient.Resources do
   @spec touch(String.t()) :: :ok
   def touch(username) do
     GenServer.cast(Store.via(__MODULE__, username), :changed)
+
+    Phoenix.PubSub.broadcast_from(
+      MDTClient.PubSub,
+      self(),
+      topic(username),
+      :http_history_changed
+    )
   end
 
   @doc "Returns all recorded request history entries, newest first."
@@ -210,11 +223,12 @@ defmodule MDTClient.HttpClient.Resources do
   end
 
   @impl true
-  def handle_call({:delete, identifier}, _from, state) do
+  def handle_call({:delete, identifier}, from, state) do
     case :ets.lookup(state.table, identifier) do
       [_entry] ->
         true = :ets.delete(state.table, identifier)
         true = :ets.delete(state.outlines, identifier)
+        broadcast(state, from)
         {:reply, :ok, flushed(state)}
 
       [] ->
@@ -223,15 +237,16 @@ defmodule MDTClient.HttpClient.Resources do
   end
 
   @impl true
-  def handle_call(:clear, _from, state) do
+  def handle_call(:clear, from, state) do
     true = :ets.delete_all_objects(state.table)
     true = :ets.delete_all_objects(state.outlines)
     :ok = :atomics.put(counter(state.username), 1, 0)
+    broadcast(state, from)
     {:reply, :ok, flushed(state)}
   end
 
   @impl true
-  def handle_call({:rewrite, fun}, _from, state) do
+  def handle_call({:rewrite, fun}, from, state) do
     before = :ets.tab2list(state.table)
 
     entries =
@@ -258,6 +273,7 @@ defmodule MDTClient.HttpClient.Resources do
       true = :ets.delete(state.outlines, identifier)
     end)
 
+    broadcast(state, from)
     {:reply, :ok, flushed(state)}
   end
 
@@ -401,6 +417,19 @@ defmodule MDTClient.HttpClient.Resources do
     )
   end
 
+  defp topic(username), do: "http_history:" <> Accounts.id(username)
+
+  defp broadcast(state, {caller, _tag}) do
+    Phoenix.PubSub.broadcast_from(
+      MDTClient.PubSub,
+      caller,
+      topic(state.username),
+      :http_history_changed
+    )
+  end
+
+  defp response_outline(nil), do: :sample
+
   defp response_outline(%Req.Response{} = response) do
     {:response, response.status, response.headers, Utils.response_body_size(response)}
   end
@@ -428,6 +457,8 @@ defmodule MDTClient.HttpClient.Resources do
   end
 
   defp summary_match_spec(result) do
+    sample_summary = result.(:"$1", :"$2", :"$3", :"$4", :"$5", :"$7", :"$8", 0, :"$6")
+
     response_summary =
       result.(
         :"$1",
@@ -455,6 +486,18 @@ defmodule MDTClient.HttpClient.Resources do
       )
 
     [
+      {
+        {:"$1",
+         %{
+           description: :"$2",
+           tags: :"$3",
+           completed_at: :"$4",
+           duration_ms: :"$5",
+           search_text: :"$6"
+         }, %{method: :"$7", url: :"$8"}, nil},
+        [],
+        [{sample_summary}]
+      },
       {
         {:"$1",
          %{

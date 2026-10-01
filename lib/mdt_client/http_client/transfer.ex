@@ -113,7 +113,7 @@ defmodule MDTClient.HttpClient.Transfer do
          {%HistoryMetadata{started_at: %DateTime{}, completed_at: %DateTime{}} = metadata,
           %Req.Request{} = request, response}
        )
-       when is_struct(response, Req.Response) or is_exception(response) do
+       when is_struct(response, Req.Response) or is_exception(response) or is_nil(response) do
     metadata =
       HistoryMetadata
       |> struct(Map.from_struct(metadata))

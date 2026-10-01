@@ -49,6 +49,16 @@ defmodule MDTClientWeb.NotesLive do
   end
 
   @impl true
+  def handle_params(%{"id" => id}, _uri, socket) do
+    case Library.get(socket.assigns.username, id) do
+      {:ok, note} -> {:noreply, assign_current(socket, current(note))}
+      :error -> {:noreply, put_flash(socket, :error, "Note not found")}
+    end
+  end
+
+  def handle_params(_params, _uri, socket), do: {:noreply, socket}
+
+  @impl true
   def render(assigns) do
     ~H"""
     <Layouts.app

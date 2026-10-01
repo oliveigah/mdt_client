@@ -4,6 +4,7 @@ defmodule MDTClient.HttpClient.Translation do
   """
 
   alias MDTClient.HttpClient.HistoryMetadata
+  alias MDTClient.HttpClient.Resources
   alias MDTClient.HttpClient.Utils
 
   @method_atoms %{
@@ -34,12 +35,7 @@ defmodule MDTClient.HttpClient.Translation do
   end
 
   @doc "Builds a history-panel entry from a stored request tuple."
-  @spec history_entry(
-          {pos_integer(), HistoryMetadata.t(), Req.Request.t(), Req.Response.t() | Exception.t()}
-          | {pos_integer(), String.t() | nil, [String.t()], DateTime.t(), non_neg_integer(),
-             atom(), URI.t(), non_neg_integer()}
-        ) ::
-          map()
+  @spec history_entry(Resources.entry() | Resources.summary()) :: map()
   def history_entry(
         {identifier, %HistoryMetadata{} = metadata, %Req.Request{} = request, response}
       ) do
@@ -75,10 +71,7 @@ defmodule MDTClient.HttpClient.Translation do
   end
 
   @doc "Builds an editor tab from a stored request tuple."
-  @spec request_from_history(
-          {pos_integer(), HistoryMetadata.t(), Req.Request.t(), Req.Response.t() | Exception.t()}
-        ) ::
-          map()
+  @spec request_from_history(Resources.entry()) :: map()
   def request_from_history(
         {identifier, %HistoryMetadata{} = metadata, %Req.Request{} = request, response}
       ) do
@@ -94,11 +87,7 @@ defmodule MDTClient.HttpClient.Translation do
   end
 
   @doc "Builds an editor tab without formatting or retaining its response body."
-  @spec request_outline_from_history(
-          {pos_integer(), HistoryMetadata.t(), Req.Request.t(), Req.Response.t() | Exception.t()}
-          | {pos_integer(), HistoryMetadata.t(), Req.Request.t(),
-             {:response, non_neg_integer(), map(), non_neg_integer()} | {:error, Exception.t()}}
-        ) :: map()
+  @spec request_outline_from_history(Resources.entry() | Resources.outline()) :: map()
   def request_outline_from_history(
         {identifier, %HistoryMetadata{} = metadata, %Req.Request{} = request,
          {:response, status, headers, size_bytes}}
@@ -120,6 +109,10 @@ defmodule MDTClient.HttpClient.Translation do
     request_outline_from_history({identifier, metadata, request, error})
   end
 
+  def request_outline_from_history({identifier, metadata, request, :sample}) do
+    request_outline_from_history({identifier, metadata, request, nil})
+  end
+
   def request_outline_from_history(
         {identifier, %HistoryMetadata{} = metadata, %Req.Request{} = request, response}
       ) do
@@ -136,11 +129,12 @@ defmodule MDTClient.HttpClient.Translation do
 
   @doc "Builds response metadata without formatting or copying the body into UI state."
   @spec response_summary(
-          Req.Response.t() | {:ok, Req.Response.t()} | {:error, Exception.t()} | Exception.t(),
+          Resources.response() | {:ok, Req.Response.t()} | {:error, Exception.t()},
           non_neg_integer()
-        ) :: map()
+        ) :: map() | nil
   def response_summary({:ok, response}, duration_ms), do: response_summary(response, duration_ms)
   def response_summary({:error, error}, duration_ms), do: response_summary(error, duration_ms)
+  def response_summary(nil, _duration_ms), do: nil
 
   def response_summary(%Req.Response{} = response, duration_ms) do
     size_bytes = Utils.response_body_size(response)
@@ -171,12 +165,13 @@ defmodule MDTClient.HttpClient.Translation do
 
   @doc "Builds the response-panel state from a Req result or response."
   @spec response_view(
-          Req.Response.t() | {:ok, Req.Response.t()} | {:error, Exception.t()} | Exception.t(),
+          Resources.response() | {:ok, Req.Response.t()} | {:error, Exception.t()},
           non_neg_integer()
         ) ::
-          map()
+          map() | nil
   def response_view({:ok, response}, duration_ms), do: response_view(response, duration_ms)
   def response_view({:error, error}, duration_ms), do: response_view(error, duration_ms)
+  def response_view(nil, _duration_ms), do: nil
 
   def response_view(%Req.Response{} = response, duration_ms) do
     body = response_body_text(response.body)
@@ -274,6 +269,7 @@ defmodule MDTClient.HttpClient.Translation do
     |> Utils.timeout_value()
   end
 
+  defp response_status(nil), do: 0
   defp response_status(%Req.Response{status: status}), do: status
   defp response_status(_error), do: 599
 

@@ -74,6 +74,14 @@ defmodule MDTClientWeb.Layouts do
           </span>
           <span class="hidden text-xs text-muted sm:inline">{@current_scope.user.username}</span>
           <.link
+            navigate={~p"/agents"}
+            id="agent-access-link"
+            title="Connect an agent"
+            class="flex size-7 items-center justify-center rounded text-muted transition-colors hover:bg-hover hover:text-accent"
+          >
+            <.icon name="hero-command-line" class="size-4" />
+          </.link>
+          <.link
             navigate={~p"/transfer"}
             id="transfer-link"
             title="Export and import"

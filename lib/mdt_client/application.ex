@@ -21,6 +21,7 @@ defmodule MDTClient.Application do
       {Task.Supervisor, name: MDTClient.HttpClient.TaskSupervisor},
       MDTClient.Updates,
       MDTClient.Preferences,
+      {Registry, keys: :unique, name: MDTClient.MCP.Registry},
       MDTClient.Vault.Store,
       MDTClientWeb.Session,
       # Start a worker by calling: MDTClient.Worker.start_link(arg)

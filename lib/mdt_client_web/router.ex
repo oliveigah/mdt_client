@@ -42,6 +42,7 @@ defmodule MDTClientWeb.Router do
       live "/tools/diagrams", DiagramsLive
       live "/tools/notes", NotesLive
       live "/transfer", TransferLive
+      live "/agents", AgentAccessLive
     end
   end
 

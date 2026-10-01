@@ -43,6 +43,29 @@ mix setup
 cargo tauri dev
 ```
 
+## Connect an agent through MCP
+
+Open **Connect an agent** from the tools page or the title bar, then choose
+**Enable agent access**. Copy the generated server URL and Bearer token into
+your agent's MCP settings using the **Streamable HTTP** transport. The screen
+also provides a client configuration you can copy.
+
+With MDT open and its vault unlocked, you can ask your connected agent to:
+
+- "Make a diagram of our checkout flow on MDT."
+- "Store this HTTP request sample in MDT."
+- "Store this idea in a note in MDT."
+
+The agent can create, search, and read these items in the identity that issued
+the token. HTTP samples are saved without sending a request. New items appear
+in open tool pages, and tool results include links to open them in MDT.
+
+Agent access is local to this machine. Configure your agent once: its token
+persists across locks and restarts and works whenever the vault is unlocked.
+Generating a new token replaces the previous one; **Disable access** revokes
+it immediately. See [the MCP integration guide](docs/mcp.md) for the
+tool catalogue, native diagram examples, and protocol details.
+
 ## Linux packages
 
 With Docker and Docker Compose, build Debian and RPM packages into `dist/`:

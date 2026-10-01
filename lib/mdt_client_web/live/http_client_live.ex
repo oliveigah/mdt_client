@@ -27,7 +27,10 @@ defmodule MDTClientWeb.HttpClientLive do
     tabs = [Utils.new_request()]
     username = socket.assigns.current_scope.user.username
 
-    if connected?(socket), do: Requests.subscribe(username)
+    if connected?(socket) do
+      Requests.subscribe(username)
+      Resources.subscribe(username)
+    end
 
     {:ok,
      socket
@@ -51,6 +54,12 @@ defmodule MDTClientWeb.HttpClientLive do
      |> assign_history()
      |> sync_tab()}
   end
+
+  @impl true
+  def handle_params(%{"id" => id}, _uri, socket) when is_binary(id),
+    do: {:noreply, open_entry(socket, id)}
+
+  def handle_params(_params, _uri, socket), do: {:noreply, socket}
 
   @impl true
   def render(assigns) do
@@ -542,10 +551,12 @@ defmodule MDTClientWeb.HttpClientLive do
           {host(@entry.url)}
         </span>
         <span class="flex w-full items-center gap-1.5 font-mono text-[10px] text-muted">
-          <span class={status_color(@entry.status)}>{@entry.status}</span>
+          <span class={status_color(@entry.status)}>
+            {if(@entry.status == 0, do: "Saved sample", else: @entry.status)}
+          </span>
           <span class="text-faint">·</span>
-          <span>{@entry.duration_ms}ms</span>
-          <span class="text-faint">·</span>
+          <span :if={@entry.status != 0}>{@entry.duration_ms}ms</span>
+          <span :if={@entry.status != 0} class="text-faint">·</span>
           <span class="min-w-0 truncate">{path(@entry.url)}</span>
         </span>
         <span :if={@entry.tags != []} class="flex w-full flex-wrap items-center gap-1 pt-0.5">
@@ -1984,6 +1995,9 @@ defmodule MDTClientWeb.HttpClientLive do
 
   ## Assign helpers
 
+  @impl true
+  def handle_info(:http_history_changed, socket), do: {:noreply, assign_history(socket)}
+
   defp send_request(socket) do
     # A tag typed but never submitted would otherwise be dropped on send.
     socket = update_active(socket, &commit_tag_draft/1)
@@ -2129,7 +2143,7 @@ defmodule MDTClientWeb.HttpClientLive do
 
       true ->
         case Integer.parse(id) do
-          {identifier, ""} ->
+          {identifier, ""} when identifier > 0 ->
             username = socket.assigns.username
 
             start_async(socket, {:open_history, identifier}, fn ->
@@ -2139,7 +2153,7 @@ defmodule MDTClientWeb.HttpClientLive do
               end
             end)
 
-          :error ->
+          _invalid ->
             socket
         end
     end
@@ -2335,6 +2349,7 @@ defmodule MDTClientWeb.HttpClientLive do
   defp method_color("DELETE"), do: "text-bad"
   defp method_color(_other), do: "text-teal"
 
+  defp status_color(0), do: "text-muted"
   defp status_color(status) when status < 300, do: "text-ok"
   defp status_color(status) when status < 400, do: "text-accent"
   defp status_color(status) when status < 500, do: "text-warn"
