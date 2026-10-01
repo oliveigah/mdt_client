@@ -80,6 +80,14 @@ export function containsRect(outer, inner) {
     inner.y + inner.height <= outer.y + outer.height
 }
 
+// How far `point` is from the box: nothing inside it, and straight to the
+// nearest side or corner outside it.
+export function distanceToBox(box, point) {
+  const dx = Math.max(box.x - point.x, 0, point.x - (box.x + box.width))
+  const dy = Math.max(box.y - point.y, 0, point.y - (box.y + box.height))
+  return Math.hypot(dx, dy)
+}
+
 export function distanceToSegment(point, a, b) {
   const dx = b.x - a.x
   const dy = b.y - a.y
@@ -212,6 +220,28 @@ export function rowAnchor(table, index, toward, gap = 0) {
   const box = rowBox(table, index)
   const right = toward.x >= table.x + table.width / 2
   return {x: right ? box.x + box.width + gap : box.x - gap, y: box.y + box.height / 2}
+}
+
+// Ports: the spots just outside an element that an arrow can be drawn out
+// of, already attached to it. Each side offers one off its middle; a table
+// only its left and right, level with the row `point` is beside, which the
+// arrow is then attached to, or with the title for the table as a whole.
+export function ports(element, point) {
+  if (!isTable(element)) return ["n", "e", "s", "w"].map((side) => ({id: element.id, row: null, side}))
+
+  const index = rowAt(element, {x: element.x, y: point.y})
+  const row = index >= 0 ? element.rows[index].id : null
+  return ["e", "w"].map((side) => ({id: element.id, row, side}))
+}
+
+// Where a port sits, `gap` out from the element.
+export function portPoint(element, {side, row}, gap) {
+  const spot = handlePoints(inflate(bounds(element), gap))[side]
+  if (!isTable(element)) return spot
+
+  const index = rowIndex(element, row)
+  const line = index >= 0 ? rowBox(element, index) : headerBox(element)
+  return {x: spot.x, y: line.y + line.height / 2}
 }
 
 // The ends of an arrow, following the elements it is attached to. An end

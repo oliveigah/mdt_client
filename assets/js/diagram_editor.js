@@ -11,6 +11,11 @@
 // describes, drawn in order, so the last one is on top. Undo keeps whole
 // snapshots of them, which for diagrams this size is simpler than diffing and
 // still cheap.
+//
+// Nothing drawn takes pointer events: every press lands on the svg, and what
+// is under it is worked out here, buttons drawn on the canvas included. In
+// WebKit, a press on a node that the press itself redraws lands nowhere, and
+// takes focus off the canvas.
 
 import {
   FONT_SIZES,
@@ -22,6 +27,7 @@ import {
   center,
   containsPoint,
   containsRect,
+  distanceToBox,
   fontSize,
   handlePoints,
   headerBox,
@@ -37,6 +43,8 @@ import {
   normalizeRect,
   pointAlong,
   polylineDistance,
+  portPoint,
+  ports,
   resizeBox,
   resolveArrow,
   rowAt,
@@ -86,6 +94,11 @@ const HANDLE_CURSORS = {
   nw: "nwse-resize", se: "nwse-resize", ne: "nesw-resize", sw: "nesw-resize",
   n: "ns-resize", s: "ns-resize", e: "ew-resize", w: "ew-resize",
 }
+// Ports, in screen pixels: how far out from an element they sit, how close a
+// press must land to take one, and how near the pointer comes to show them.
+const PORT_GAP = 16
+const PORT_REACH = 9
+const PORT_NEAR = 32
 
 // Kept outside the hook so they outlive switching diagrams, and the editor
 // being mounted again after visiting another tool.
@@ -122,6 +135,12 @@ const typeSize = (table) => tableFont(table) - 1
 
 const blankRow = (row) => row.type.trim() === "" && row.name.trim() === ""
 
+const samePort = (a, b) => !!a && !!b && a.id === b.id && a.row === b.row && a.side === b.side
+
+// Fields with an undo of their own, which Ctrl+Z is left to.
+const ownsUndo = (target) => target instanceof Element &&
+  (target.isContentEditable || target.matches("input, textarea, select"))
+
 export const DiagramEditor = {
   mounted() {
     const role = (name) => this.el.querySelector(`[data-role=${name}]`)
@@ -129,6 +148,7 @@ export const DiagramEditor = {
     this.viewport = role("viewport")
     this.scene = role("scene")
     this.overlay = role("overlay")
+    this.portLayer = role("ports")
     this.grid = role("grid")
     this.textEditor = role("text-editor")
     this.stylePanel = role("style-panel")
@@ -162,6 +182,10 @@ export const DiagramEditor = {
     this.hoverHandle = null
     this.hoverRow = null
     this.hoverControl = null
+    // The ports offered by the element near the pointer, and the one it is on.
+    this.ports = []
+    this.hoverPort = null
+    this.hoverKey = null
     this.pointer = null
     this.spaceHeld = false
     this.terms = []
@@ -190,6 +214,9 @@ export const DiagramEditor = {
     this.on(this.el, "wheel", (event) => this.wheel(event), {passive: false})
     this.on(this.el, "keydown", (event) => this.keyDown(event))
     this.on(this.el, "keyup", (event) => event.key === " " && this.holdSpace(false))
+    // Undo and redo answer anywhere on the page, not only on the canvas.
+    this.on(document, "keydown", (event) => !event.defaultPrevented && !ownsUndo(event.target) &&
+      this.historyKey(event) && event.preventDefault())
     this.on(this.el, "click", (event) => this.chromeClick(event))
     // The webview's own menu only offers to reload the page.
     this.on(this.el, "contextmenu", (event) => event.preventDefault())
@@ -266,7 +293,7 @@ export const DiagramEditor = {
     this.selected = new Set()
     this.undoStack = []
     this.redoStack = []
-    this.hovered = null
+    this.forgetHover()
     this.scene.replaceChildren()
     this.nodes.clear()
     this.labelBoxes.clear()
@@ -579,7 +606,16 @@ export const DiagramEditor = {
   // Pointer gestures
 
   pointerDown(event) {
-    if (event.button === 2) return
+    // Dragging with the right or the middle button moves around the canvas,
+    // whatever the tool, and leaves anything being written open.
+    if (event.button === 1 || event.button === 2) {
+      this.gesture = this.panGesture(event)
+      this.svg.setPointerCapture(event.pointerId)
+      this.updateCursor()
+      this.renderOverlay()
+      return
+    }
+    if (event.button !== 0) return
 
     const wasEditing = this.editing !== null
     this.el.focus({preventScroll: true})
@@ -587,15 +623,14 @@ export const DiagramEditor = {
     this.settleNudge()
     // The press that ends writing does nothing else, the way it would in a
     // text field.
-    if (wasEditing && event.button === 0 && this.tool === "select") return
+    if (wasEditing && this.tool === "select") return
 
-    const local = this.local(event)
-    const point = this.world(local)
+    const point = this.world(this.local(event))
     const snapshot = this.snapshot()
     this.pointer = point
 
-    if (event.button === 1 || this.tool === "hand" || this.spaceHeld) {
-      this.gesture = {kind: "pan", from: local, view: {...this.view}}
+    if (this.tool === "hand" || this.spaceHeld) {
+      this.gesture = this.panGesture(event)
     } else if (this.tool === "select") {
       const control = this.controlAt(point)
       if (control) {
@@ -610,12 +645,7 @@ export const DiagramEditor = {
       return
     } else if (this.tool === "arrow") {
       const target = this.attachableAt(point)
-      const arrow = this.add({
-        type: "arrow", x1: point.x, y1: point.y, x2: point.x, y2: point.y,
-        start: target?.element.id ?? null, startRow: target?.row ?? null, end: null, endRow: null,
-      })
-      this.selected = new Set()
-      this.gesture = {kind: "arrow", id: arrow.id, end: "end", origin: point, created: true}
+      this.gesture = this.arrowGesture(point, target && {id: target.element.id, row: target.row})
     } else if (this.tool === "table") {
       const table = this.add({type: "table", x: point.x, y: point.y, width: 0, height: 0, rows: [], split: 0})
       this.layout(table)
@@ -647,6 +677,9 @@ export const DiagramEditor = {
     }
     if (grip?.end) return {kind: "arrow", id: grip.element.id, end: grip.end}
 
+    const port = this.portAt(point)
+    if (port) return this.arrowGesture(point, port)
+
     const element = this.elementAt(point)
     if (element) {
       if (event.shiftKey && this.selected.has(element.id)) {
@@ -665,6 +698,21 @@ export const DiagramEditor = {
     return {kind: "marquee", origin: point, current: point, base: new Set(this.selected)}
   },
 
+  panGesture(event) {
+    return {kind: "pan", from: this.local(event), view: {...this.view}}
+  },
+
+  // Draws a new arrow out from `point`, its start attached to `from`, an
+  // element and maybe one of its rows, when given.
+  arrowGesture(point, from) {
+    const arrow = this.add({
+      type: "arrow", x1: point.x, y1: point.y, x2: point.x, y2: point.y,
+      start: from?.id ?? null, startRow: from?.row ?? null, end: null, endRow: null,
+    })
+    this.selected = new Set()
+    return {kind: "arrow", id: arrow.id, end: "end", origin: point, created: true}
+  },
+
   pointerMove(event) {
     const local = this.local(event)
     const point = this.world(local)
@@ -675,6 +723,8 @@ export const DiagramEditor = {
 
     switch (gesture.kind) {
       case "pan":
+        // A release the page never heard of, such as one over a menu, ends it.
+        if (event.buttons === 0) return this.pointerUp(event)
         this.view = {
           ...gesture.view,
           x: gesture.view.x + local.x - gesture.from.x,
@@ -816,8 +866,9 @@ export const DiagramEditor = {
         break
     }
 
-    this.updateCursor()
     this.render()
+    // What is under the pointer now, such as ports, shows again.
+    this.hover(this.world(this.local(event)))
   },
 
   // Escape, or a lost pointer, puts back whatever the gesture changed.
@@ -839,6 +890,9 @@ export const DiagramEditor = {
     if (this.tool !== "select") return
 
     const point = this.world(this.local(event))
+    // Two clicks on a port only draw nothing twice.
+    if (this.portAt(point)) return
+
     const element = this.elementAt(point)
     if (element && isTable(element)) {
       this.startEditing(element.id, undefined, this.cellAt(element, point))
@@ -853,19 +907,36 @@ export const DiagramEditor = {
     const selecting = point && this.tool === "select" && !this.spaceHeld
     this.hoverControl = selecting ? this.controlAt(point) : null
     this.hoverHandle = selecting && !this.hoverControl ? this.handleAt(point) : null
-    const element = selecting && !this.hoverHandle ? this.elementAt(point) : null
+    this.hoverPort = selecting && !this.hoverControl && !this.hoverHandle ? this.portAt(point) : null
+    // While the pointer is on a port, its element keeps offering them, even
+    // should another be nearer.
+    if (!selecting || this.editing) this.ports = []
+    else if (!this.hoverPort) this.ports = this.portsNear(point)
+
+    const element = !selecting || this.hoverHandle ? null
+      : this.hoverPort ? this.find(this.hoverPort.id) : this.elementAt(point)
     const hovered = element?.id ?? null
 
     // The row under the pointer on the selected table offers to be removed.
     const table = selecting && this.singleSelected()
     const hoverRow = table && isTable(table) ? (table.rows[rowAt(table, point)]?.id ?? null) : null
 
-    if (hovered !== this.hovered || hoverRow !== this.hoverRow) {
+    const key = JSON.stringify([hovered, hoverRow, this.hoverControl?.name, this.ports, this.hoverPort])
+    if (key !== this.hoverKey) {
+      this.hoverKey = key
       this.hovered = hovered
       this.hoverRow = hoverRow
       this.renderOverlay()
     }
     this.updateCursor()
+  },
+
+  // Until the pointer next moves, nothing is under it.
+  forgetHover() {
+    this.hovered = null
+    this.ports = []
+    this.hoverPort = null
+    this.hoverKey = null
   },
 
   updateCursor() {
@@ -876,8 +947,45 @@ export const DiagramEditor = {
     else if (this.tool !== "select") cursor = "crosshair"
     else if (this.hoverControl) cursor = "pointer"
     else if (this.hoverHandle?.handle) cursor = HANDLE_CURSORS[this.hoverHandle.handle]
+    else if (this.hoverPort) cursor = "crosshair"
     else if (this.hoverHandle?.end || this.hovered) cursor = "move"
     this.svg.style.cursor = cursor
+  },
+
+  // Ports
+
+  // The ports of the element under the pointer, or failing that of the
+  // nearest one close enough. One drawn inside the element under the
+  // pointer, as in a box around several, offers its own while the pointer is
+  // near it. Arrows have none.
+  portsNear(point) {
+    const candidates = this.elements.filter((element) => !isArrow(element))
+    const under = candidates.findLast((element) => hitTest(element, point, this.tolerance()))
+    let host = under
+    let nearest = PORT_NEAR / this.view.zoom
+
+    for (const element of candidates) {
+      if (element === under || (under && !containsRect(bounds(under), bounds(element)))) continue
+      const distance = distanceToBox(bounds(element), point)
+      if (distance <= nearest) {
+        host = element
+        nearest = distance
+      }
+    }
+    return host ? ports(host, point) : []
+  },
+
+  portAt(point) {
+    const reach = PORT_REACH / this.view.zoom
+    return this.ports.find((port) => {
+      const spot = this.portSpot(port)
+      return spot && Math.hypot(point.x - spot.x, point.y - spot.y) <= reach
+    }) ?? null
+  },
+
+  portSpot(port) {
+    const element = this.find(port.id)
+    return element ? portPoint(element, port, PORT_GAP / this.view.zoom) : null
   },
 
   // Panning and zooming. The wheel pans and Ctrl or Cmd with it zooms, as a
@@ -1040,6 +1148,7 @@ export const DiagramEditor = {
     const cell = isTable(element) && row ? element.rows.find((candidate) => candidate.id === row) : null
 
     this.textEditor.value = cell ? cell[field] : element.text
+    this.editing.initial = this.textEditor.value
     this.textEditor.placeholder = !isTable(element) ? "" : cell ? PLACEHOLDERS[field] : PLACEHOLDERS.title
     this.placeEditor()
   },
@@ -1145,6 +1254,17 @@ export const DiagramEditor = {
   },
 
   editorKeyDown(event) {
+    // Ctrl+Z undoes typing in the box as usual. With nothing typed there
+    // yet, it closes the box the way Escape does, so the next one undoes on
+    // the canvas; a row or text just added and left empty goes with it.
+    const untouched = this.editing && this.textEditor.value === this.editing.initial
+    const undoing = (event.ctrlKey || event.metaKey) && !event.shiftKey && !event.altKey &&
+      event.key.toLowerCase() === "z"
+    if (untouched && undoing) {
+      event.preventDefault()
+      return this.finishEditing()
+    }
+
     const element = this.editing && this.find(this.editing.id)
     if (element && isTable(element)) return this.tableKeyDown(event, element)
 
@@ -1298,11 +1418,9 @@ export const DiagramEditor = {
     if (event.target !== this.el) return
 
     const key = event.key.toLowerCase()
+    // Undo and redo are left to the page's own listener, historyKey.
     if (event.ctrlKey || event.metaKey) {
-      if (key === "z" && event.shiftKey) this.redo()
-      else if (key === "z") this.undo()
-      else if (key === "y") this.redo()
-      else if (key === "d") this.duplicate()
+      if (key === "d") this.duplicate()
       else if (key === "a") this.selectAll()
       else if (key === "x") this.cut()
       // Copying and pasting also go through the clipboard events, which carry
@@ -1348,6 +1466,19 @@ export const DiagramEditor = {
     event.preventDefault()
   },
 
+  // Ctrl+Z undoes, and Ctrl+Y or Ctrl+Shift+Z redo, with Cmd for Ctrl on a
+  // Mac. Says whether the key was one of them.
+  historyKey(event) {
+    if (!(event.ctrlKey || event.metaKey) || event.altKey) return false
+
+    const key = event.key.toLowerCase()
+    if (key === "z" && event.shiftKey) this.redo()
+    else if (key === "z") this.undo()
+    else if (key === "y") this.redo()
+    else return false
+    return true
+  },
+
   escape() {
     if (this.gesture) return this.cancelGesture()
     if (this.selected.size) {
@@ -1377,7 +1508,7 @@ export const DiagramEditor = {
     this.stopEditing()
     this.tool = tool
     if (tool !== "select") this.selected = new Set()
-    this.hovered = null
+    this.forgetHover()
     this.updateCursor()
     this.render()
   },
@@ -1855,6 +1986,7 @@ export const DiagramEditor = {
     if (table) parts.push(...this.tableControls(table))
 
     this.overlay.replaceChildren(...parts)
+    this.renderPorts()
   },
 
   // Buttons drawn by the selected table: one under it to add a row, and one
@@ -1863,6 +1995,7 @@ export const DiagramEditor = {
   tableControls(table) {
     const zoom = this.view.zoom
     const unscaled = {"vector-effect": "non-scaling-stroke"}
+    const lit = (name) => this.hoverControl?.name === name
     const parts = []
 
     const width = 28 / zoom
@@ -1871,13 +2004,16 @@ export const DiagramEditor = {
     const arm = 4 / zoom
     const middle = {x: add.x + width / 2, y: add.y + height / 2}
     parts.push(
-      svg("rect", {...add, rx: height / 2, class: "fill-panel stroke-accent/70 hover:fill-accent-soft", ...unscaled}),
+      svg("rect", {
+        ...add, rx: height / 2, ...unscaled,
+        class: lit("add-row") ? "fill-accent-soft stroke-accent" : "fill-panel stroke-accent/70",
+      }),
       svg("path", {
         d: `M${middle.x - arm} ${middle.y}H${middle.x + arm}M${middle.x} ${middle.y - arm}V${middle.y + arm}`,
         class: "fill-none stroke-accent stroke-2", "stroke-linecap": "round", ...unscaled,
       })
     )
-    this.controls.push({box: add, run: () => this.addRow(table)})
+    this.controls.push({name: "add-row", box: add, run: () => this.addRow(table)})
 
     const index = rowIndex(table, this.hoverRow)
     if (index >= 0) {
@@ -1886,7 +2022,10 @@ export const DiagramEditor = {
       const spot = {x: line.x + line.width - 13 / zoom, y: line.y + line.height / 2}
       const cross = 2.5 / zoom
       parts.push(
-        svg("circle", {cx: spot.x, cy: spot.y, r: radius, class: "fill-panel stroke-bad/60", ...unscaled}),
+        svg("circle", {
+          cx: spot.x, cy: spot.y, r: radius, ...unscaled,
+          class: lit("remove-row") ? "fill-bad-soft stroke-bad" : "fill-panel stroke-bad/60",
+        }),
         svg("path", {
           d: `M${spot.x - cross} ${spot.y - cross}L${spot.x + cross} ${spot.y + cross}` +
             `M${spot.x + cross} ${spot.y - cross}L${spot.x - cross} ${spot.y + cross}`,
@@ -1895,12 +2034,43 @@ export const DiagramEditor = {
       )
       const rowId = table.rows[index].id
       this.controls.push({
+        name: "remove-row",
         box: {x: spot.x - radius, y: spot.y - radius, width: radius * 2, height: radius * 2},
         run: () => this.removeRow(table, rowId),
       })
     }
 
     return parts
+  },
+
+  // Ports have a layer of their own, where they stay put while the pointer
+  // moves around them, so they fade in once as it comes near, and light up
+  // smoothly as it lands on one.
+  renderPorts() {
+    const offered = this.tool === "select" && !this.gesture && !this.editing && !this.spaceHeld
+    const shown = offered ? this.ports.filter((port) => this.find(port.id)) : []
+    const layer = this.portLayer
+    const host = shown[0]?.id ?? ""
+
+    if (layer.dataset.host !== host || layer.childElementCount !== shown.length) {
+      layer.dataset.host = host
+      layer.replaceChildren(...shown.map(() => svg("circle", {
+        class: "fill-panel stroke-accent/70 stroke-[1.5] transition-[opacity,fill,stroke,stroke-width] " +
+          "duration-150 ease-out starting:opacity-0 data-[active]:fill-accent data-[active]:stroke-accent/25 " +
+          "data-[active]:stroke-[7]",
+        "vector-effect": "non-scaling-stroke",
+      })))
+    }
+
+    shown.forEach((port, index) => {
+      const spot = this.portSpot(port)
+      const active = samePort(port, this.hoverPort)
+      const node = layer.children[index]
+      node.setAttribute("cx", spot.x)
+      node.setAttribute("cy", spot.y)
+      node.setAttribute("r", (active ? 5.5 : 4) / this.view.zoom)
+      node.toggleAttribute("data-active", active)
+    })
   },
 
   updateChrome() {

@@ -25,6 +25,8 @@ defmodule MDTClientWeb.DiagramsLiveTest do
     } do
       assert has_element?(view, "#diagram-canvas[phx-hook=DiagramEditor]")
       assert has_element?(view, "#diagram-toolbar #diagram-tool-rectangle")
+      # The hook draws ports in a layer of their own.
+      assert has_element?(view, "#diagram-svg [data-role=ports]")
       assert has_element?(view, "#diagram-status", "Draft")
       refute has_element?(view, "[phx-click=open_diagram]")
 

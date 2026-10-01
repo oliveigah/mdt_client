@@ -5,12 +5,15 @@ import {
   arrowHead,
   arrowRoute,
   borderPoint,
+  distanceToBox,
   heightToFit,
   hitTest,
   innerBox,
   matchingIds,
   pointAlong,
   polylineDistance,
+  portPoint,
+  ports,
   resizeBox,
   resolveArrow,
   rowAnchor,
@@ -210,6 +213,43 @@ test("an end on a row that is gone attaches to the whole table", () => {
 
   assert.deepEqual(resolveArrow(arrow, () => users), {x1: 600, y1: 46, x2: 206, y2: 46})
   assert.equal(arrowRoute({...arrow, x2: 206, y2: 46}, () => users).length, 2)
+})
+
+test("ports sit off the middle of each side, pushed out by the gap", () => {
+  const rectangle = box("rectangle", 0, 0, 100, 50)
+  const offered = ports(rectangle, {x: 50, y: 25})
+
+  assert.deepEqual(offered.map((port) => [port.side, port.row]), [["n", null], ["e", null], ["s", null], ["w", null]])
+  assert.deepEqual(offered.map((port) => portPoint(rectangle, port, 10)), [
+    {x: 50, y: -10}, {x: 110, y: 25}, {x: 50, y: 60}, {x: -10, y: 25},
+  ])
+})
+
+test("a table offers ports on its sides, level with the row beside the pointer", () => {
+  const users = table()
+
+  // Beside the second row, even from outside the table.
+  const beside = ports(users, {x: 230, y: 70})
+  assert.deepEqual(beside.map((port) => [port.side, port.row]), [["e", "r2"], ["w", "r2"]])
+  assert.deepEqual(beside.map((port) => portPoint(users, port, 10)), [{x: 210, y: 78}, {x: -10, y: 78}])
+
+  // Level with the title, or past the rows, for the table as a whole.
+  for (const point of [{x: 100, y: 10}, {x: 100, y: 120}]) {
+    const whole = ports(users, point)
+    assert.deepEqual(whole.map((port) => port.row), [null, null])
+    assert.deepEqual(portPoint(users, whole[0], 10), {x: 210, y: 18})
+  }
+
+  // A row gone since falls back to the title.
+  assert.deepEqual(portPoint(users, {side: "w", row: "gone"}, 10), {x: -10, y: 18})
+})
+
+test("distance to a box is nothing inside it and straight to the nearest side or corner", () => {
+  const area = {x: 0, y: 0, width: 100, height: 50}
+  assert.equal(distanceToBox(area, {x: 40, y: 20}), 0)
+  assert.equal(distanceToBox(area, {x: 112, y: 20}), 12)
+  assert.equal(distanceToBox(area, {x: 50, y: -7}), 7)
+  assert.equal(distanceToBox(area, {x: -3, y: 54}), 5)
 })
 
 test("polylines measure distance and halfway points along every stretch", () => {

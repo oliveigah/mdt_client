@@ -413,10 +413,14 @@ defmodule MDTClientWeb.DiagramsLive do
       >
       </div>
 
+      <%!-- The hook finds what is under the pointer itself, so every press
+            lands on the svg. A press on a drawn node replaced as the press
+            redraws it would land nowhere and take focus off the canvas. --%>
       <svg id="diagram-svg" data-role="svg" class="absolute inset-0 size-full touch-none">
-        <g data-role="viewport">
+        <g data-role="viewport" class="pointer-events-none">
           <g data-role="scene"></g>
           <g data-role="overlay"></g>
+          <g data-role="ports"></g>
         </g>
       </svg>
 
@@ -656,7 +660,7 @@ defmodule MDTClientWeb.DiagramsLive do
           <button
             type="button"
             data-action="redo"
-            title="Redo (Ctrl+Shift+Z)"
+            title="Redo (Ctrl+Y)"
             aria-label="Redo"
             disabled
             class={control_class()}
@@ -667,7 +671,7 @@ defmodule MDTClientWeb.DiagramsLive do
       </div>
 
       <p class="pointer-events-none absolute bottom-4 right-4 z-10 hidden text-[11px] text-faint lg:block">
-        Scroll to pan · Ctrl + scroll to zoom · Double click to write
+        Scroll or right drag to pan · Ctrl + scroll to zoom · Double click to write
       </p>
     </div>
     """
