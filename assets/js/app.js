@@ -29,12 +29,14 @@ import {NoticeTimer} from "./notice_timer"
 import {CodeView} from "./code_view"
 import {DiagramEditor} from "./diagram_editor"
 import {CopyText} from "./copy_text"
+import {MarkdownEditor} from "./markdown_editor"
+import {installTextHistory} from "./text_history"
 
 const csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute("content")
 const liveSocket = new LiveSocket("/live", Socket, {
   longPollFallbackMs: 2500,
   params: {_csrf_token: csrfToken},
-  hooks: {...colocatedHooks, NoticeTimer, CodeView, DiagramEditor, CopyText},
+  hooks: {...colocatedHooks, NoticeTimer, CodeView, DiagramEditor, CopyText, MarkdownEditor},
   // Modifier keys are not sent by default, but shortcuts like Ctrl+Enter need
   // them, and so do lists where Shift and Ctrl/Cmd clicks extend a selection.
   metadata: {
@@ -57,6 +59,9 @@ window.addEventListener("phx:page-loading-stop", _info => topbar.hide())
 
 // Ctrl/Cmd +, - , 0 and Ctrl/Cmd + wheel resize the whole interface
 initZoom()
+
+// Ctrl/Cmd+Z, Ctrl/Cmd+Y and Ctrl/Cmd+Shift+Z in every text field
+installTextHistory()
 
 // The desktop bar follows LiveView's page title and the theme resolved by the
 // pre-paint script in root.html.heex.

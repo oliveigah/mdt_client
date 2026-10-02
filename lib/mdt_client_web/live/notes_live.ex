@@ -500,16 +500,36 @@ defmodule MDTClientWeb.NotesLive do
               end
             ]}
           >
-            <textarea
-              id={"note-body-#{@current.id}"}
-              name="body"
-              phx-debounce="400"
-              maxlength={@max_body}
-              spellcheck="false"
-              aria-label="Note body, in Markdown"
-              placeholder="Write in Markdown. Use - [ ] for a checklist, **bold**, `code`, # headings…"
-              class="min-h-0 flex-1 resize-none bg-transparent px-6 py-5 font-mono text-[13px] leading-relaxed text-ink caret-accent outline-none placeholder:text-faint"
-            >{@current.body}</textarea>
+            <%!-- The Markdown is coloured on a layer behind the textarea, which
+                  stays what is typed into; its own text turns transparent
+                  once the layer is painted. --%>
+            <div class="group relative min-h-0 flex-1">
+              <div
+                id={"note-body-layer-#{@current.id}"}
+                phx-update="ignore"
+                aria-hidden="true"
+                class="pointer-events-none absolute left-0 top-0 overflow-hidden"
+              >
+                <div data-paint class={["whitespace-pre-wrap break-words text-ink", body_text()]}>
+                </div>
+              </div>
+              <textarea
+                id={"note-body-#{@current.id}"}
+                name="body"
+                phx-hook="MarkdownEditor"
+                data-layer={"note-body-layer-#{@current.id}"}
+                phx-debounce="400"
+                maxlength={@max_body}
+                spellcheck="false"
+                aria-label="Note body, in Markdown"
+                placeholder="Write in Markdown. Use - [ ] for a checklist, **bold**, `code`, # headings…"
+                class={[
+                  "absolute inset-0 size-full resize-none bg-transparent text-ink caret-accent outline-none placeholder:text-faint",
+                  "group-has-[[data-painted]]:text-transparent",
+                  body_text()
+                ]}
+              >{@current.body}</textarea>
+            </div>
           </div>
 
           <.resizer
@@ -568,6 +588,10 @@ defmodule MDTClientWeb.NotesLive do
     </section>
     """
   end
+
+  # Shared by the body and the layer its colours are painted on, which have
+  # to wrap and line up alike.
+  defp body_text, do: "px-6 py-5 font-mono text-[13px] leading-relaxed"
 
   ## Events
 

@@ -74,6 +74,17 @@ defmodule MDTClientWeb.NotesLiveTest do
       assert has_element?(view, "#note-#{newer.id}", "Milk")
     end
 
+    test "the body is typed over a layer its Markdown is coloured on", %{view: view, newer: newer} do
+      layer = "note-body-layer-#{newer.id}"
+
+      assert has_element?(view, "##{layer}[phx-update=ignore] [data-paint]")
+
+      assert has_element?(
+               view,
+               "#note-body-#{newer.id}[phx-hook=MarkdownEditor][data-layer=#{layer}]"
+             )
+    end
+
     test "opening a note from the list", %{view: view, older: older} do
       view |> element("#note-#{older.id}") |> render_click()
 
@@ -240,6 +251,7 @@ defmodule MDTClientWeb.NotesLiveTest do
       end)
 
       assert has_element?(view, "#note-preview h1", "Bread")
+      assert has_element?(view, "#note-body-#{newer.id}", "# Bread")
 
       from_elsewhere.(fn -> Library.set_done(username, older.id, true) end)
       assert has_element?(view, "#note-group-done #note-row-#{older.id}")

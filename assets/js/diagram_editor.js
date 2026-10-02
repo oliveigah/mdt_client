@@ -58,6 +58,7 @@ import {
   unionBounds,
   wrapText,
 } from "./diagram_geometry"
+import {forgetHistory} from "./text_history"
 
 const SVG = "http://www.w3.org/2000/svg"
 const SAVE_DELAY = 250
@@ -1149,6 +1150,9 @@ export const DiagramEditor = {
 
     this.textEditor.value = cell ? cell[field] : element.text
     this.editing.initial = this.textEditor.value
+    // The one text box writes every label and cell; Ctrl+Z in it undoes
+    // only what was typed into this one.
+    forgetHistory(this.textEditor)
     this.textEditor.placeholder = !isTable(element) ? "" : cell ? PLACEHOLDERS[field] : PLACEHOLDERS.title
     this.placeEditor()
   },
