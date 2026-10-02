@@ -1,10 +1,11 @@
 defmodule MDTClient.HttpClient.RequestsTest do
-  use ExUnit.Case, async: false
+  use ExUnit.Case, async: true
 
   import MDTClient.VaultHelpers
 
   alias MDTClient.HttpClient.Requests
   alias MDTClient.HttpClient.Resources
+  alias MDTClient.Vault.Store
 
   setup {Req.Test, :verify_on_exit!}
 
@@ -23,8 +24,7 @@ defmodule MDTClient.HttpClient.RequestsTest do
       end
     end)
 
-    Req.Test.set_req_test_to_shared()
-    on_exit(&Req.Test.set_req_test_to_private/0)
+    Req.Test.allow(__MODULE__, self(), Store.whereis(Requests, username))
 
     :ok = Requests.subscribe(username)
 
@@ -39,7 +39,7 @@ defmodule MDTClient.HttpClient.RequestsTest do
           )
       end)
 
-    assert_receive {:request_started, request_process}
+    assert_receive {:request_started, request_process}, 1_000
     assert_receive {:DOWN, ^monitor, :process, ^initiator, :normal}
 
     send(request_process, :finish_request)
@@ -68,8 +68,7 @@ defmodule MDTClient.HttpClient.RequestsTest do
       end
     end)
 
-    Req.Test.set_req_test_to_shared()
-    on_exit(&Req.Test.set_req_test_to_private/0)
+    Req.Test.allow(__MODULE__, self(), Store.whereis(Requests, username))
 
     :ok = Requests.subscribe(username)
 
@@ -82,7 +81,7 @@ defmodule MDTClient.HttpClient.RequestsTest do
       )
 
     :ok = Requests.start(username, "infinite-request", request, %{})
-    assert_receive {:infinite_request_started, request_process}
+    assert_receive {:infinite_request_started, request_process}, 1_000
     monitor = Process.monitor(request_process)
     assert Requests.running(username) == ["infinite-request"]
 

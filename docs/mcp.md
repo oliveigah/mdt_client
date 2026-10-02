@@ -31,9 +31,10 @@ and token, and clients with a settings UI can use those two values directly.
 }
 ```
 
-The token grants creation, search, and reading in one identity. It is separate
-from the browser session and never contains the vault password or encryption
-key. MDT saves only its hash, encrypted inside the local identity's directory.
+The token grants creation, search, reading, and note/diagram updates in one
+identity. It is separate from the browser session and never contains the vault
+password or encryption key. MDT saves only its hash, encrypted inside the local
+identity's directory.
 The token has no expiry and persists across restarts. Locking or closing MDT
 pauses tool access; the same token works again after unlocking that identity,
 so the agent's configuration does not need to change. Only rotating the token
@@ -47,9 +48,11 @@ if you need to copy a credential again.
 | Tool | Purpose | Required arguments |
 | --- | --- | --- |
 | `create_note` | Save a Markdown idea or task | `title`, `body` |
+| `update_note` | Update an existing note's title or full body | String `id`, plus `title` and/or `body` |
 | `list_notes` | Search titles and bodies | None |
 | `get_note` | Read the full note | String `id` |
 | `create_diagram` | Save editable native canvas elements | `title`, `elements` |
+| `update_diagram` | Update an existing diagram's title or full canvas | String `id`, plus `title` and/or `elements` |
 | `list_diagrams` | Search text anywhere in diagrams | None |
 | `get_diagram` | Read its elements and layout | String `id` |
 | `create_http_request` | Save an HTTP sample without sending it | `url` |
@@ -63,15 +66,26 @@ All list tools accept `query`, `limit` (1–100, default 20), and `offset`
 tool's existing search behavior. Note and diagram search match every word;
 HTTP search matches a normalized substring.
 
-Create/get results include the persisted item and an absolute `url` that
+Create/update/get results include the persisted item and an absolute `url` that
 opens it in MDT. Each tool publishes a JSON Schema through `tools/list`;
 inputs are validated before saving. Domain errors return `isError: true`
 with a useful message so an agent can correct its call. Unknown methods and
 tools return JSON-RPC errors.
 
-The initial tools create new items with generated IDs. Repeating a create
-call creates another item. Agents can read and search existing work; editing,
-deletion, Git operations, and HTTP execution are not exposed by this catalogue.
+Create/import tools always generate new IDs. Repeating a successful call
+creates another item. Agents can update diagrams and notes by their existing
+IDs. HTTP requests are append-only through MCP: create or import a new sample
+to revise a request; existing samples and sent history cannot be overwritten.
+Deletion, completing notes, Git operations, and HTTP execution are not exposed
+by this catalogue.
+
+Update tools require an existing `id` and at least one editable field. Omitted
+fields stay unchanged. A note's `body` replaces its full Markdown source, and
+a diagram's `elements` replaces the entire canvas. Read the item first and
+include any content you want to keep. Empty bodies and element arrays clear
+that content. IDs, creation times, and note completion state are preserved;
+repeating the same update does not change the modification time. Unknown IDs
+and invalid input return a tool error without creating or changing an item.
 
 ## Agent discovery without source access
 
@@ -131,6 +145,16 @@ These are `arguments` for `tools/call`, not complete JSON-RPC envelopes.
 {
   "title": "Keep API examples close to the code",
   "body": "## Idea\nSave a sample request for every endpoint.\n\n- [ ] Add authentication examples\n- [ ] Add error cases"
+}
+```
+
+To edit that note, pass its returned ID to `update_note`. This body-only update
+keeps its title and completion state:
+
+```json
+{
+  "id": "the_returned_note_id",
+  "body": "## Idea\nSave a sample request for every endpoint.\n\n- [x] Add authentication examples\n- [ ] Add error cases"
 }
 ```
 
@@ -214,6 +238,11 @@ zero-based row index `i`, its center is `y + header + (i + 0.5) * row_height`.
 An attached arrow endpoint faces the other element from the left or right
 table edge. See the built-in diagram guide for a complete row-linked schema.
 
+To rename an existing diagram, call `update_diagram` with its returned `id`
+and a `title`. To revise its layout, fetch `get_diagram`, edit the returned
+elements and pass the complete array to `update_diagram` with that `id`.
+The same coordinate, ID and attachment validation applies to updates.
+
 ### HTTP samples
 
 ```json
@@ -269,7 +298,9 @@ No additional runtime dependencies are required.
 Run `mix precommit` to compile with warnings as errors, format, and execute the
 suite. MCP tests cover credential lifetime, identity isolation, transport
 errors, native diagram validation, unsent HTTP persistence and transfer, and
-the connection screen and live refresh. Discovery tests create and read items
+the connection screen and live refresh. Update tests cover partial changes,
+identity isolation, missing IDs, invalid layouts, repeated updates, encryption,
+and append-only HTTP samples. Discovery tests create, update and read items
 using examples fetched through `tools/list`, validate returned data against
 the advertised output schemas, follow pagination and read bundled guides
 through the authenticated endpoint.

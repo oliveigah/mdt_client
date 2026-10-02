@@ -1,15 +1,12 @@
 defmodule MDTClientWeb.DiagramsLiveTest do
-  use MDTClientWeb.ConnCase
+  use MDTClientWeb.ConnCase, async: true
 
   import Phoenix.LiveViewTest
 
   alias MDTClient.Diagrams.Diagram
   alias MDTClient.Diagrams.Library
-  alias MDTClient.VaultHelpers
 
   setup %{conn: conn} do
-    VaultHelpers.reset_data_dir!()
-    on_exit(&VaultHelpers.reset_data_dir!/0)
     sign_in(conn)
   end
 

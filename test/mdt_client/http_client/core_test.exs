@@ -1,5 +1,5 @@
 defmodule MDTClient.HttpClient.CoreTest do
-  use ExUnit.Case, async: false
+  use ExUnit.Case, async: true
 
   import MDTClient.VaultHelpers
 

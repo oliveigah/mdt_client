@@ -1,5 +1,5 @@
 defmodule MDTClientWeb.TransferLiveTest do
-  use MDTClientWeb.ConnCase
+  use MDTClientWeb.ConnCase, async: true
 
   import Phoenix.LiveViewTest
 
@@ -14,13 +14,12 @@ defmodule MDTClientWeb.TransferLiveTest do
   @derive_timeout 5_000
 
   setup %{conn: conn} do
-    VaultHelpers.reset_data_dir!()
-    on_exit(&VaultHelpers.reset_data_dir!/0)
+    %{username: username} = identity = sign_in(conn)
 
-    folder = Path.join(Accounts.root(), "exports")
+    folder = Path.join(Accounts.dir(username), "exports")
     File.mkdir_p!(folder)
 
-    conn |> sign_in() |> Map.put(:folder, folder)
+    Map.put(identity, :folder, folder)
   end
 
   test "the title bar leads here", %{conn: conn} do
@@ -37,11 +36,12 @@ defmodule MDTClientWeb.TransferLiveTest do
   end
 
   test "offers a file name that names the signed in user, and asks for no password", %{
-    conn: conn
+    conn: conn,
+    username: username
   } do
     {:ok, view, _html} = live(conn, ~p"/transfer")
 
-    assert has_element?(view, "#export_path[value*='mdt-export-tester-']")
+    assert has_element?(view, "#export_path[value*='mdt-export-#{username}-']")
     refute has_element?(view, "#export-form input[type=password]")
   end
 

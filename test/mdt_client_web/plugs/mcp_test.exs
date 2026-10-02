@@ -1,5 +1,5 @@
 defmodule MDTClientWeb.Plugs.MCPTest do
-  use MDTClientWeb.ConnCase, async: false
+  use MDTClientWeb.ConnCase, async: true
 
   import MDTClient.VaultHelpers
   alias MDTClient.MCP.Access
@@ -32,10 +32,13 @@ defmodule MDTClientWeb.Plugs.MCPTest do
     tools = rpc(token, request("tools/list")) |> json_response(200)
     names = Enum.map(tools["result"]["tools"], & &1["name"])
     assert "create_note" in names
+    assert "update_note" in names
     assert "create_diagram" in names
+    assert "update_diagram" in names
     assert "create_http_request" in names
     assert "import_http_request" in names
-    assert length(names) == 10
+    refute "update_http_request" in names
+    assert length(names) == 12
   end
 
   test "accepts notifications without a body and never executes a notification as a tool", %{

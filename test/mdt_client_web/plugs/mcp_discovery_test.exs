@@ -1,5 +1,5 @@
 defmodule MDTClientWeb.Plugs.MCPDiscoveryTest do
-  use MDTClientWeb.ConnCase, async: false
+  use MDTClientWeb.ConnCase, async: true
 
   import MDTClient.VaultHelpers
 
@@ -13,9 +13,10 @@ defmodule MDTClientWeb.Plugs.MCPDiscoveryTest do
     %{token: token, username: username}
   end
 
-  test "creates, reads and paginates using only the advertised examples and contracts", %{
-    token: token
-  } do
+  test "creates, updates, reads and paginates using only the advertised examples and contracts",
+       %{
+         token: token
+       } do
     tools = rpc(token, "tools/list")["result"]["tools"]
 
     for tool <- tools, example <- tool["inputSchema"]["examples"] do
@@ -45,6 +46,33 @@ defmodule MDTClientWeb.Plugs.MCPDiscoveryTest do
         read = call(token, find_tool(tools, get), %{"id" => saved["id"]})
         assert read == saved
         assert saved["url"] =~ saved["path"]
+
+        update =
+          case create do
+            "create_note" -> "update_note"
+            "create_diagram" -> "update_diagram"
+            _http -> nil
+          end
+
+        if update do
+          updating = find_tool(tools, update)
+
+          assert updating["annotations"] == %{
+                   "readOnlyHint" => false,
+                   "destructiveHint" => true,
+                   "idempotentHint" => true,
+                   "openWorldHint" => false
+                 }
+
+          for update_example <- updating["inputSchema"]["examples"] do
+            args = Map.put(update_example, "id", saved["id"])
+            updated = call(token, updating, args)
+            assert updated["id"] == saved["id"]
+            assert updated["created_at"] == saved["created_at"]
+            assert call(token, find_tool(tools, get), %{"id" => saved["id"]}) == updated
+            assert call(token, updating, args) == updated
+          end
+        end
 
         if create in ["create_http_request", "import_http_request"] do
           assert saved["sent"] == false

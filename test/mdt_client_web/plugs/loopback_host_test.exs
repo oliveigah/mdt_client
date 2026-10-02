@@ -1,5 +1,6 @@
 defmodule MDTClientWeb.Plugs.LoopbackHostTest do
-  use MDTClientWeb.ConnCase
+  # Changes the application-wide host validation setting.
+  use MDTClientWeb.ConnCase, async: false
 
   alias MDTClient.Accounts
   alias MDTClient.VaultHelpers

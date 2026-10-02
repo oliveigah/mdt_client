@@ -1,5 +1,5 @@
 defmodule MDTClient.Diagrams.TransferTest do
-  use ExUnit.Case, async: false
+  use ExUnit.Case, async: true
 
   import MDTClient.VaultHelpers
 

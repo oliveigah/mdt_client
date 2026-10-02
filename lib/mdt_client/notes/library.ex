@@ -85,6 +85,10 @@ defmodule MDTClient.Notes.Library do
     if Note.id?(id), do: call(username, {:save, id, attrs}), else: {:error, :invalid_id}
   end
 
+  @doc "Updates an existing note's title or body without creating a missing note."
+  @spec update(String.t(), String.t(), map()) :: {:ok, Note.t()} | :error
+  def update(username, id, attrs) when is_map(attrs), do: call(username, {:update, id, attrs})
+
   @doc """
   Marks a note done, or open again. Asking for the state it is already in
   changes nothing, so it is safe to repeat.
@@ -172,6 +176,13 @@ defmodule MDTClient.Notes.Library do
         note = Note.new(Map.put(attrs, :id, id))
         broadcast(state, from, id)
         {:reply, {:ok, note}, state |> put(note) |> changed()}
+    end
+  end
+
+  def handle_call({:update, id, attrs}, from, state) do
+    case Map.fetch(state.notes, id) do
+      {:ok, note} -> change(note, Map.take(attrs, [:title, :body]), from, state)
+      :error -> {:reply, :error, state}
     end
   end
 

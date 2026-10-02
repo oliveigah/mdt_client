@@ -7,12 +7,10 @@ defmodule MDTClientWeb.ConnCase do
   import other functionality to make it easier
   to build common data structures and query the data layer.
 
-  Finally, if the test case interacts with the database,
-  we enable the SQL sandbox, so changes done to the database
-  are reverted at the end of every test. If you are using
-  PostgreSQL, you can even run database tests asynchronously
-  by setting `use MDTClientWeb.ConnCase, async: true`, although
-  this option is not recommended for other databases.
+  `sign_in/3` gives each test a unique identity and cleans up its stores,
+  files and session on exit, so identity-scoped tests can run with
+  `async: true`. Tests that change application-wide preferences,
+  configuration, update state or shared HTTP mocks must remain synchronous.
   """
 
   use ExUnit.CaseTemplate
@@ -42,21 +40,21 @@ defmodule MDTClientWeb.ConnCase do
   def build_conn, do: %{Phoenix.ConnTest.build_conn() | host: "127.0.0.1"}
 
   @doc """
-  Creates and unlocks an identity, returning a conn carrying its session.
+  Creates and unlocks a unique identity, returning a conn carrying its session.
   """
   def sign_in(conn, username \\ "tester", password \\ "correct horse") do
-    {:ok, profile, key} = MDTClient.Accounts.sign_in(username, password)
-    :ok = MDTClient.Vault.Store.open(profile.username, key)
-    ExUnit.Callbacks.on_exit(fn -> MDTClient.Vault.Store.close(profile.username) end)
+    %{username: username} = MDTClient.VaultHelpers.unlocked_identity(username, password)
+    token = MDTClientWeb.Session.create(username)
+    ExUnit.Callbacks.on_exit(fn -> MDTClientWeb.Session.delete(token) end)
 
     conn =
       conn
       |> Phoenix.ConnTest.init_test_session(%{})
       |> Plug.Conn.put_session(
         MDTClientWeb.UserAuth.session_key(),
-        MDTClientWeb.Session.create(profile.username)
+        token
       )
 
-    %{conn: conn, username: profile.username, password: password}
+    %{conn: conn, username: username, password: password}
   end
 end

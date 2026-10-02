@@ -5,9 +5,9 @@ defmodule MDTClient.MCP.Guides do
 
   @guides [
     {"notes", "Notes and search",
-     "Markdown creation, finding existing notes and following paginated results."},
+     "Markdown creation and updates, finding existing notes and following paginated results."},
     {"diagrams", "Native diagram layout",
-     "Shape sizing, table geometry, row attachments and complete native diagram examples."},
+     "Creating and updating diagrams, shape sizing, table geometry, row attachments and native examples."},
     {"http", "HTTP request samples",
      "Literal JSON/form bodies, headers, curl imports and the distinction between samples and sent history."}
   ]
@@ -38,13 +38,23 @@ defmodule MDTClient.MCP.Guides do
 
     MDT is a local encrypted toolbox. All tools operate only on the identity
     associated with the Bearer token, while that identity is unlocked. You do
-    not need repository access. Tools create, list and read; they do not edit,
-    delete or mark notes complete. Every create call generates a new ID, so
-    blindly repeating a successful call creates a duplicate.
+    not need repository access. Tools create, update, list and read notes and
+    diagrams; they do not delete or mark notes complete. HTTP requests are
+    append-only through MCP. Every create call generates a new ID, so blindly
+    repeating a successful call creates a duplicate.
 
     create_note takes title and Markdown body strings. Code fences, Unicode,
     task lists and empty bodies are supported. Returned url opens the note in
     MDT. Use get_note with its string id to read the complete saved content.
+
+    ## Updating an existing note
+
+    Use list_notes/get_note to find and read the note, then call update_note
+    with its id and title, body, or both. Omitted fields stay unchanged. body
+    replaces the complete Markdown source; pass an empty string to clear it.
+    The ID, creation time and completion state are preserved. Missing IDs
+    return isError=true and never create a note. Repeating the same update
+    leaves the note unchanged, including its updated_at timestamp.
 
     ## Search
 
@@ -68,12 +78,12 @@ defmodule MDTClient.MCP.Guides do
     ## Errors and readback
 
     A tool result with isError=true explains an invalid argument or missing
-    item. Correct the input before retrying. Successful create/get results
+    item. Correct the input before retrying. Successful create/update/get results
     include structuredContent plus equivalent JSON text. Use list/get to
-    inspect existing items and read back important creations.
+    inspect existing items and read back important creations and updates.
 
     ## Example arguments
-    """ <> examples("create_note") <> examples("list_notes")
+    """ <> examples("create_note") <> examples("update_note") <> examples("list_notes")
   end
 
   defp body("mdt://guides/diagrams") do
@@ -84,6 +94,17 @@ defmodule MDTClient.MCP.Guides do
     native shapes and arrows, not Mermaid source or raster images. Each call
     creates another diagram. Use list_diagrams/get_diagram to inspect an
     existing layout and follow returned url to open it in MDT.
+
+    ## Updating an existing diagram
+
+    Call update_diagram with an existing id and title, elements, or both.
+    Omitted fields stay unchanged. elements replaces the entire canvas rather
+    than patching individual shapes: read get_diagram first, edit its elements
+    and include every shape, arrow and attachment you want to keep. Pass an
+    empty array to clear the canvas. Updates use the same layout validation
+    as creation and invalid input leaves the saved diagram unchanged.
+    The ID and creation time are preserved. Missing IDs return isError=true
+    without creating anything. Repeating the same update changes nothing.
 
     ## Coordinates and layout
 
@@ -133,7 +154,7 @@ defmodule MDTClient.MCP.Guides do
     permanent font measurements.
 
     ## Complete example arguments
-    """ <> examples("create_diagram")
+    """ <> examples("create_diagram") <> examples("update_diagram")
   end
 
   defp body("mdt://guides/http") do
@@ -142,8 +163,11 @@ defmodule MDTClient.MCP.Guides do
 
     create_http_request saves a sample without sending any network request.
     import_http_request parses a curl command without executing curl or a
-    shell. Each call creates another item. The user can open the returned
-    MDT url and manually send it in HTTP Client.
+    shell. HTTP requests are append-only through MCP: each call creates a
+    new item. Existing samples and sent history cannot be updated or deleted.
+    To revise a request, save a new sample with the desired fields. Repeating
+    a successful create/import call creates another sample. The user can open
+    the returned MDT url and manually send it in HTTP Client.
 
     url in the creation arguments is the absolute http:// or https:// API
     destination. In results, request_url is that API destination, while url

@@ -51,6 +51,12 @@ defmodule MDTClient.MCP.Tools do
     with {:ok, note} <- Notes.get(username, args["id"]), do: {:ok, note_data(note)}
   end
 
+  defp execute("update_note", args, username) do
+    attrs = update_attrs(args, [{"title", :title}, {"body", :body}])
+
+    with {:ok, note} <- Notes.update(username, args["id"], attrs), do: {:ok, note_data(note)}
+  end
+
   defp execute("list_notes", args, username) do
     items = Notes.list(username, Map.get(args, "query", ""))
 
@@ -79,6 +85,15 @@ defmodule MDTClient.MCP.Tools do
 
   defp execute("get_diagram", args, username) do
     with {:ok, diagram} <- Diagrams.get(username, args["id"]), do: {:ok, diagram_data(diagram)}
+  end
+
+  defp execute("update_diagram", args, username) do
+    attrs = update_attrs(args, [{"title", :title}, {"elements", :elements}])
+
+    with :ok <- validate_updated_elements(args),
+         {:ok, diagram} <- Diagrams.update(username, args["id"], attrs) do
+      {:ok, diagram_data(diagram)}
+    end
   end
 
   defp execute("list_diagrams", args, username) do
@@ -151,6 +166,13 @@ defmodule MDTClient.MCP.Tools do
       {:error, "Use an absolute http:// or https:// URL and a supported HTTP method."}
     end
   end
+
+  defp update_attrs(args, fields) do
+    for {key, field} <- fields, Map.has_key?(args, key), into: %{}, do: {field, args[key]}
+  end
+
+  defp validate_updated_elements(%{"elements" => elements}), do: validate_elements(elements)
+  defp validate_updated_elements(_args), do: :ok
 
   defp note_data(note) do
     %{

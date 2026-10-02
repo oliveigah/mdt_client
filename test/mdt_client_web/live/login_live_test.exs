@@ -1,5 +1,6 @@
 defmodule MDTClientWeb.LoginLiveTest do
-  use MDTClientWeb.ConnCase
+  # Login and theme changes write application-wide preferences.
+  use MDTClientWeb.ConnCase, async: false
 
   import Phoenix.LiveViewTest
 

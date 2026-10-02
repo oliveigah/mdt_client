@@ -56,6 +56,9 @@ defmodule MDTClient.MCP.Schema do
       unknown && schema["additionalProperties"] == false ->
         {:error, "#{path}.#{unknown} is not supported"}
 
+      map_size(value) < Map.get(schema, "minProperties", 0) ->
+        {:error, "#{path} must contain at least #{schema["minProperties"]} properties"}
+
       true ->
         reduce(value, fn {key, item} ->
           property = Map.get(properties, key, additional_schema(schema))

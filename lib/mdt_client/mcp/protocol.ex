@@ -53,9 +53,12 @@ defmodule MDTClient.MCP.Protocol do
           "instructions" => """
           MDT is a local encrypted developer toolbox. Tools operate only on the identity that issued your token.
           Create native diagrams, Markdown notes, or HTTP request samples; samples are saved without sending requests.
-          Use list/get tools to find and inspect existing work. Each create/import call creates a new item;
-          repeating a successful call creates a duplicate. Editing, deletion, completing notes and HTTP execution
-          are not available through MCP. Returned url opens the saved item in MDT; request_url is an API destination.
+          Use list/get tools to find and inspect existing work. update_note and update_diagram edit existing items
+          by ID; supply only the fields you want to change. Body/elements replace their complete saved content.
+          Each create/import call creates a new item; repeating a successful call creates a duplicate.
+          HTTP requests are append-only through MCP: save a new sample instead of updating an existing request.
+          Deletion, completing notes and HTTP execution are not available through MCP.
+          Returned url opens the saved item in MDT; request_url is an API destination.
 
           Tool schemas include field descriptions, defaults, examples and response contracts. No repository access
           is needed. Built-in guides are available through resources/list and resources/read:

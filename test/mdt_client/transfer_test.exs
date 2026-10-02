@@ -1,5 +1,5 @@
 defmodule MDTClient.TransferTest do
-  use ExUnit.Case, async: false
+  use ExUnit.Case, async: true
 
   import MDTClient.VaultHelpers
 
@@ -19,7 +19,7 @@ defmodule MDTClient.TransferTest do
 
   setup do
     identity = unlocked_identity()
-    path = Path.join(Accounts.root(), "exports/test.mdtexport")
+    path = Path.join(Accounts.dir(identity.username), "exports/test.mdtexport")
     File.mkdir_p!(Path.dirname(path))
     Map.put(identity, :path, path)
   end

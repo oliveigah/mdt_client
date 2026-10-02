@@ -1,4 +1,5 @@
 defmodule MDTClient.LogFileTest do
+  # Asserts VM-wide Logger handler configuration, also used by capture_log tests.
   use ExUnit.Case, async: false
 
   require Logger

@@ -1,5 +1,5 @@
 defmodule MDTClient.MCP.ToolsTest do
-  use ExUnit.Case, async: false
+  use ExUnit.Case, async: true
 
   import MDTClient.VaultHelpers
   alias MDTClient.MCP.Tools

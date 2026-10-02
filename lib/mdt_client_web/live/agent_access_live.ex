@@ -79,8 +79,8 @@ defmodule MDTClientWeb.AgentAccessLive do
               Give your agent a place to put its work.
             </h1>
             <p class="mt-2 max-w-xl text-[13px] leading-6 text-muted">
-              Connect an MCP client to MDT. Your agent can save editable diagrams, Markdown notes,
-              and HTTP request samples in {@current_scope.user.username}'s vault.
+              Connect an MCP client to MDT. Your agent can create and update diagrams and Markdown
+              notes, and add HTTP request samples in {@current_scope.user.username}'s vault.
             </p>
           </header>
 
@@ -183,7 +183,8 @@ defmodule MDTClientWeb.AgentAccessLive do
           </section>
           <p class="mt-4 text-xs leading-6 text-muted">
             In your agent's MCP settings, add the server URL and an Authorization header with <code class="font-mono text-ink">Bearer &lt;token&gt;</code>. The connected agent can create,
-            search, and read these three tools. HTTP samples are saved for you to review and send in MDT.
+            search, and read saved items, and update diagrams and notes. HTTP requests are append-only;
+            new samples are saved for you to review and send in MDT.
           </p>
           <p id="mcp-token-lifetime" class="mt-2 text-xs leading-6 text-muted">
             Configure your agent once. Its token keeps working whenever this vault is unlocked.

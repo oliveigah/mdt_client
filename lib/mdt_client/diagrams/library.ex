@@ -75,6 +75,10 @@ defmodule MDTClient.Diagrams.Library do
     if Diagram.id?(id), do: call(username, {:save, id, attrs}), else: {:error, :invalid_id}
   end
 
+  @doc "Updates an existing diagram's title or elements without creating a missing diagram."
+  @spec update(String.t(), String.t(), map()) :: {:ok, Diagram.t()} | :error
+  def update(username, id, attrs) when is_map(attrs), do: call(username, {:update, id, attrs})
+
   @doc "Copies a diagram under a new identifier and title."
   @spec duplicate(String.t(), String.t()) :: {:ok, Diagram.t()} | :error
   def duplicate(username, id), do: call(username, {:duplicate, id})
@@ -150,19 +154,19 @@ defmodule MDTClient.Diagrams.Library do
 
     case Map.fetch(state.diagrams, id) do
       {:ok, diagram} ->
-        case Diagram.update(diagram, attrs) do
-          ^diagram ->
-            {:reply, {:ok, diagram}, state}
-
-          updated ->
-            broadcast(state, from, id)
-            {:reply, {:ok, updated}, state |> put(updated) |> changed()}
-        end
+        change(diagram, attrs, from, state)
 
       :error ->
         diagram = Diagram.new(Map.put(attrs, :id, id))
         broadcast(state, from, id)
         {:reply, {:ok, diagram}, state |> put(diagram) |> changed()}
+    end
+  end
+
+  def handle_call({:update, id, attrs}, from, state) do
+    case Map.fetch(state.diagrams, id) do
+      {:ok, diagram} -> change(diagram, Map.take(attrs, [:title, :elements]), from, state)
+      :error -> {:reply, :error, state}
     end
   end
 
@@ -209,6 +213,17 @@ defmodule MDTClient.Diagrams.Library do
   def terminate(_reason, state) do
     persist(state)
     :ok
+  end
+
+  defp change(diagram, attrs, from, state) do
+    case Diagram.update(diagram, attrs) do
+      ^diagram ->
+        {:reply, {:ok, diagram}, state}
+
+      updated ->
+        broadcast(state, from, diagram.id)
+        {:reply, {:ok, updated}, state |> put(updated) |> changed()}
+    end
   end
 
   defp put(state, diagram), do: %{state | diagrams: Map.put(state.diagrams, diagram.id, diagram)}

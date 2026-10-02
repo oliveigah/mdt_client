@@ -1,5 +1,5 @@
 defmodule MDTClient.MCP.AccessTest do
-  use ExUnit.Case, async: false
+  use ExUnit.Case, async: true
 
   import MDTClient.VaultHelpers
   import ExUnit.CaptureLog

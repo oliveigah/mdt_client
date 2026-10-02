@@ -1,14 +1,11 @@
 defmodule MDTClientWeb.AgentAccessLiveTest do
-  use MDTClientWeb.ConnCase, async: false
+  use MDTClientWeb.ConnCase, async: true
 
   import Phoenix.LiveViewTest
   alias MDTClient.MCP.{Access, Tools}
-  alias MDTClient.VaultHelpers
   alias MDTClient.Vault.Store
 
   setup %{conn: conn} do
-    VaultHelpers.reset_data_dir!()
-    on_exit(&VaultHelpers.reset_data_dir!/0)
     sign_in(conn)
   end
 
@@ -117,6 +114,55 @@ defmodule MDTClientWeb.AgentAccessLiveTest do
     {:ok, request_link, _html} = live(conn, request.path)
     render_async(request_link)
     assert has_element?(request_link, "#request-url[value='https://example.test/sample']")
+  end
+
+  test "agent updates refresh the selected note and diagram in open pages", %{
+    conn: conn,
+    username: username
+  } do
+    note = create("create_note", %{"title" => "Agent note", "body" => "Old body"}, username)
+    {:ok, notes_view, _html} = live(conn, note.path)
+
+    create(
+      "update_note",
+      %{"id" => note.id, "title" => "Updated note", "body" => "# Updated body"},
+      username
+    )
+
+    assert has_element?(notes_view, "#note-#{note.id}", "Updated note")
+    assert has_element?(notes_view, "#note-title-#{note.id}[value='Updated note']")
+    assert has_element?(notes_view, "#note-body-#{note.id}", "# Updated body")
+    assert has_element?(notes_view, "#note-preview h1", "Updated body")
+
+    diagram = create("create_diagram", %{"title" => "Agent diagram", "elements" => []}, username)
+    {:ok, diagrams_view, _html} = live(conn, diagram.path)
+    id = diagram.id
+
+    elements = [
+      %{
+        "id" => "updated",
+        "type" => "rectangle",
+        "x" => 20,
+        "y" => 40,
+        "width" => 180,
+        "height" => 80,
+        "text" => "Updated shape"
+      }
+    ]
+
+    create(
+      "update_diagram",
+      %{"id" => id, "title" => "Updated diagram", "elements" => elements},
+      username
+    )
+
+    assert has_element?(diagrams_view, "#diagram-#{id}", "Updated diagram")
+    assert has_element?(diagrams_view, "#diagram-title[value='Updated diagram']")
+
+    assert_push_event(diagrams_view, "diagram:load", %{
+      id: ^id,
+      elements: [%{"id" => "updated", "text" => "Updated shape"}]
+    })
   end
 
   defp token(view),

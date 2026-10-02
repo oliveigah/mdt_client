@@ -1,4 +1,5 @@
 defmodule MDTClient.PreferencesTest do
+  # Preferences and their backing file are shared by the whole application.
   use ExUnit.Case, async: false
 
   alias MDTClient.Accounts

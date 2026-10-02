@@ -1,5 +1,6 @@
 defmodule MDTClientWeb.GitLiveTest do
-  use MDTClientWeb.ConnCase
+  # Changes application-wide Git preferences and automatic fetch configuration.
+  use MDTClientWeb.ConnCase, async: false
 
   import MDTClient.GitHelpers
   import Phoenix.LiveViewTest

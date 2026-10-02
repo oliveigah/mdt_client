@@ -1,5 +1,6 @@
 defmodule MDTClientWeb.HttpClientLiveTest do
-  use MDTClientWeb.ConnCase
+  # Changes global Req defaults, shared mocks and layout preferences.
+  use MDTClientWeb.ConnCase, async: false
 
   import Phoenix.LiveViewTest
 

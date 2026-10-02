@@ -10,17 +10,7 @@ defmodule MDTClient.MCP.Catalogue do
         "Create note",
         "Save a new Markdown note. Returns its generated ID, full body and URL to open in MDT. " <>
           "Each call creates another note; this does not update or complete an existing note.",
-        object(
-          %{
-            "title" => title(),
-            "body" =>
-              describe(
-                string(100_000),
-                "Markdown source, including code fences and task lists. May be empty."
-              )
-          },
-          ["title", "body"]
-        )
+        note_schema()
         |> examples([
           %{
             "title" => "Release checklist",
@@ -29,6 +19,24 @@ defmodule MDTClient.MCP.Catalogue do
         ]),
         note_result(),
         false
+      ),
+      tool(
+        "update_note",
+        "Update note",
+        "Update an existing Markdown note by ID. Supply title, body, or both; omitted fields stay unchanged. " <>
+          "body replaces the full Markdown source; an empty string clears it. Read get_note before editing. " <>
+          "Preserves its ID, creation time and completion state. A missing ID is an error; it never creates a note.",
+        update_schema(note_schema(), "Note ID returned by list_notes, get_note or create_note.")
+        |> examples([
+          %{"id" => "example_item_id", "title" => "Updated release checklist"},
+          %{
+            "id" => "example_item_id",
+            "body" => "## Before release\n\n- [x] Verify checkout\n- [x] Document API"
+          }
+        ]),
+        note_result(),
+        false,
+        %{"destructiveHint" => true, "idempotentHint" => true}
       ),
       tool(
         "list_notes",
@@ -56,20 +64,30 @@ defmodule MDTClient.MCP.Catalogue do
           "IDs must be unique within the diagram. start/end attach to shapes; startRow/endRow attach to rows on those tables. " <>
           "Leave room for labels and use short multiline text. The editor fits text and table cells when opened. " <>
           "Read mdt://guides/diagrams for sizing, row anchors and examples. Each call creates a new diagram.",
-        object(
-          %{
-            "title" => title(),
-            "elements" =>
-              describe(
-                array(element(), 5_000),
-                "Native editable elements in drawing order. Empty creates a blank canvas; include shapes before their arrows for readability."
-              )
-          },
-          ["title", "elements"]
-        )
+        diagram_schema()
         |> examples(diagram_examples()),
         diagram_result(),
         false
+      ),
+      tool(
+        "update_diagram",
+        "Update diagram",
+        "Update an existing native MDT diagram by ID. Supply title, elements, or both; omitted fields stay unchanged. " <>
+          "elements replaces the entire canvas, not individual elements; an empty array clears it. " <>
+          "Read get_diagram first and include every element and attachment you want to keep. " <>
+          "Uses the same layout validation as create_diagram. Preserves its ID and creation time. " <>
+          "A missing ID is an error; it never creates a diagram. Read mdt://guides/diagrams for layout examples.",
+        update_schema(
+          diagram_schema(),
+          "Diagram ID returned by list_diagrams, get_diagram or create_diagram."
+        )
+        |> examples([
+          %{"id" => "example_item_id", "title" => "Updated checkout flow"},
+          Map.put(hd(diagram_examples()), "id", "example_item_id")
+        ]),
+        diagram_result(),
+        false,
+        %{"destructiveHint" => true, "idempotentHint" => true}
       ),
       tool(
         "list_diagrams",
@@ -97,7 +115,8 @@ defmodule MDTClient.MCP.Catalogue do
         "Save HTTP sample",
         "Save an HTTP request sample without sending it. The user can open its returned MDT URL and send it in HTTP Client. " <>
           "Returns sent=false and no response. Specify body_type for the intended Content-Type; body is always a string. " <>
-          "Each call creates another sample. Read mdt://guides/http for JSON, form and header examples.",
+          "HTTP storage through MCP is append-only: each call creates a new sample and cannot update an existing request. " <>
+          "Read mdt://guides/http for JSON, form and header examples.",
         request_schema(),
         request_result(),
         false
@@ -106,7 +125,8 @@ defmodule MDTClient.MCP.Catalogue do
         "import_http_request",
         "Import curl sample",
         "Parse a curl command and save an HTTP sample without running curl, a shell or a network request. " <>
-          "Returns the parsed method, URL, headers, body and sent=false. Each call creates another sample.",
+          "Returns the parsed method, URL, headers, body and sent=false. " <>
+          "HTTP storage through MCP is append-only: each call creates a new sample and cannot update an existing request.",
         object(
           %{
             "curl" =>
@@ -165,19 +185,23 @@ defmodule MDTClient.MCP.Catalogue do
     ]
   end
 
-  defp tool(name, title, description, input, output, read?) do
+  defp tool(name, title, description, input, output, read?, annotations \\ %{}) do
     %{
       "name" => name,
       "title" => title,
       "description" => description,
       "inputSchema" => input,
       "outputSchema" => output,
-      "annotations" => %{
-        "readOnlyHint" => read?,
-        "destructiveHint" => false,
-        "idempotentHint" => read?,
-        "openWorldHint" => false
-      }
+      "annotations" =>
+        Map.merge(
+          %{
+            "readOnlyHint" => read?,
+            "destructiveHint" => false,
+            "idempotentHint" => read?,
+            "openWorldHint" => false
+          },
+          annotations
+        )
     }
   end
 
@@ -209,6 +233,41 @@ defmodule MDTClient.MCP.Catalogue do
   defp identified(description) do
     object(%{"id" => describe(identifier(), description)}, ["id"])
     |> examples([%{"id" => "example_item_id"}])
+  end
+
+  defp note_schema do
+    object(
+      %{
+        "title" => title(),
+        "body" =>
+          describe(
+            string(100_000),
+            "Complete Markdown source, including code fences and task lists. May be empty."
+          )
+      },
+      ["title", "body"]
+    )
+  end
+
+  defp diagram_schema do
+    object(
+      %{
+        "title" => title(),
+        "elements" =>
+          describe(
+            array(element(), 5_000),
+            "Complete native editable canvas in drawing order. Empty means a blank canvas; include shapes before their arrows for readability."
+          )
+      },
+      ["title", "elements"]
+    )
+  end
+
+  defp update_schema(schema, id_description) do
+    schema["properties"]
+    |> Map.put("id", describe(identifier(), id_description))
+    |> object(["id"])
+    |> Map.put("minProperties", 2)
   end
 
   defp title,
@@ -276,12 +335,12 @@ defmodule MDTClient.MCP.Catalogue do
       "width" =>
         describe(
           extent(),
-          "Bounding-box width. Creation requires a positive value; 220 is a useful starting width for a short shape label."
+          "Bounding-box width. Saving requires a positive value; 220 is a useful starting width for a short shape label."
         ),
       "height" =>
         describe(
           extent(),
-          "Bounding-box height. Creation requires a positive value; 80 is a useful starting height. Table heights are recalculated from row count in the editor."
+          "Bounding-box height. Saving requires a positive value; 80 is a useful starting height. Table heights are recalculated from row count in the editor."
         ),
       "x1" =>
         describe(coordinate(), "Arrow start x coordinate; required even when start is attached."),
