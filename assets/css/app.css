@@ -69,6 +69,15 @@
   /* chrome */
   --color-scroll-thumb: #bfbdb64c;
   --color-selection: #5ac1fe3d;
+
+  /* the carets an editor draws itself, blinking as a text field's own */
+  --animate-caret-blink: caret-blink 1.06s step-end infinite;
+
+  @keyframes caret-blink {
+    50% {
+      opacity: 0;
+    }
+  }
 }
 
 /* Use the data attribute for dark mode, so `dark:` can adjust the few values

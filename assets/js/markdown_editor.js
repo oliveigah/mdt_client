@@ -1,4 +1,5 @@
 import {highlightMarkdown} from "./markdown_highlight.js"
+import {MultiCursor} from "./multi_cursor.js"
 
 // A textarea with its Markdown coloured. The textarea stays what is typed
 // into, so selection, IME and undo work as in any other field; its own text
@@ -9,9 +10,13 @@ import {highlightMarkdown} from "./markdown_highlight.js"
 // wrap at the same place, and follows its scrolling. It is drawn on every
 // edit, before the browser paints, so a character typed never shows late.
 //
+// The carets and selections past the textarea's own, from Ctrl+D and the
+// like, are drawn on the layer too, over the colours; see multi_cursor.js.
+//
 //     <div class="group relative">
 //       <div id="body-layer" phx-update="ignore" class="absolute left-0 top-0 overflow-hidden">
 //         <div data-paint class="…the textarea's padding and type…"></div>
+//         <div data-cursors class="absolute inset-x-0 top-0 text-transparent …the same…"></div>
 //       </div>
 //       <textarea phx-hook="MarkdownEditor" data-layer="body-layer"
 //         class="… group-has-[[data-painted]]:text-transparent"></textarea>
@@ -26,17 +31,20 @@ export const MarkdownEditor = {
     this.el.addEventListener("scroll", () => this.sync(), {passive: true})
     this.resizeObserver = new ResizeObserver(() => this.fit())
     this.resizeObserver.observe(this.el)
+    this.cursors = new MultiCursor(this.el, this.layer.querySelector("[data-cursors]"))
 
     this.draw()
   },
 
   // The body changed on the server, written from somewhere else.
   updated() {
+    this.cursors.refresh()
     this.draw()
   },
 
   destroyed() {
     this.resizeObserver.disconnect()
+    this.cursors.destroy()
   },
 
   draw() {

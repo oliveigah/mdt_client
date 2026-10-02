@@ -79,6 +79,7 @@ defmodule MDTClientWeb.NotesLiveTest do
       layer = "note-body-layer-#{newer.id}"
 
       assert has_element?(view, "##{layer}[phx-update=ignore] [data-paint]")
+      assert has_element?(view, "##{layer} [data-cursors]")
 
       assert has_element?(
                view,

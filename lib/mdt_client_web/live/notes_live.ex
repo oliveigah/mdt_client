@@ -517,7 +517,8 @@ defmodule MDTClientWeb.NotesLive do
           >
             <%!-- The Markdown is coloured on a layer behind the textarea, which
                   stays what is typed into; its own text turns transparent
-                  once the layer is painted. --%>
+                  once the layer is painted. The carets past its own are
+                  drawn there too. --%>
             <div class="group relative min-h-0 flex-1">
               <div
                 id={"note-body-layer-#{@current.id}"}
@@ -526,6 +527,14 @@ defmodule MDTClientWeb.NotesLive do
                 class="pointer-events-none absolute left-0 top-0 overflow-hidden"
               >
                 <div data-paint class={["whitespace-pre-wrap break-words text-ink", body_text()]}>
+                </div>
+                <div
+                  data-cursors
+                  class={[
+                    "absolute inset-x-0 top-0 whitespace-pre-wrap break-words text-transparent",
+                    body_text()
+                  ]}
+                >
                 </div>
               </div>
               <textarea
