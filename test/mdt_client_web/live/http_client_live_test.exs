@@ -3,6 +3,7 @@ defmodule MDTClientWeb.HttpClientLiveTest do
   use MDTClientWeb.ConnCase, async: false
 
   import Phoenix.LiveViewTest
+  import MDTClientWeb.PanelComponents, only: [page_size: 0]
 
   alias MDTClient.HttpClient.HistoryMetadata
   alias MDTClient.HttpClient.Requests
@@ -481,6 +482,37 @@ defmodule MDTClientWeb.HttpClientLiveTest do
 
     view |> element("[phx-click=clear_selection]") |> render_click()
     refute has_element?(view, "#history-selection")
+  end
+
+  test "a long history draws its first page, loads the rest, and selects it all", %{
+    conn: conn,
+    username: username
+  } do
+    for n <- 1..page_size() do
+      Resources.record(
+        username,
+        HistoryMetadata.new(%{}),
+        Req.new(url: "https://api.example.test/items/#{n}"),
+        %Req.Response{status: 200, body: "item"}
+      )
+    end
+
+    {:ok, view, _html} = live(conn, ~p"/tools/http")
+    total = page_size() + 2
+
+    assert count(view, "#history-list [role=option]") == page_size()
+    assert has_element?(view, "#history-more", "2 more")
+
+    # Every request listed is picked, drawn yet or not.
+    render_hook(view, "select_all", %{})
+    assert has_element?(view, "#history-selection", "#{total} selected")
+
+    view |> element("#history-more") |> render_click()
+    assert count(view, "#history-list [role=option]") == total
+    refute has_element?(view, "#history-more")
+
+    view |> element("#history-search") |> render_change(%{"term" => "items"})
+    assert count(view, "#history-list [role=option]") == page_size()
   end
 
   test "opening a history entry inherits its description and tags", %{

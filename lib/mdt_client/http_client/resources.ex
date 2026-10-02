@@ -6,6 +6,9 @@ defmodule MDTClient.HttpClient.Resources do
   `MDTClient.Vault`, so the history never touches the filesystem in the clear.
   One process runs per unlocked identity; every function takes the username it
   belongs to.
+
+  Writing means sealing the whole history again, which for one with large
+  responses is tens of megabytes, so it happens only after a change.
   """
 
   use GenServer
@@ -15,6 +18,7 @@ defmodule MDTClient.HttpClient.Resources do
   alias MDTClient.Accounts
   alias MDTClient.HttpClient.HistoryMetadata
   alias MDTClient.HttpClient.Utils
+  alias MDTClient.Search
   alias MDTClient.Vault
   alias MDTClient.Vault.Store
 
@@ -23,8 +27,10 @@ defmodule MDTClient.HttpClient.Resources do
 
   @history_file "http_history.bin"
   @end_of_table :"$end_of_table"
-  @default_sync_interval :timer.seconds(30)
   @flush_after 250
+  # Entries re-indexed per message, so a delete or a clear never waits on
+  # the whole history.
+  @reindex_batch 50
 
   @type history_id :: pos_integer()
   @type metadata :: HistoryMetadata.t()
@@ -73,8 +79,8 @@ defmodule MDTClient.HttpClient.Resources do
   Marks the history as changed so it reaches disk shortly.
 
   Callers that write to the table directly must call this. Without it a change
-  would only be durable at the next periodic sync or on a clean shutdown —
-  and a desktop app that is force quit gets neither.
+  would only be durable on a clean shutdown, which a desktop app that is
+  force quit does not get.
   """
   @spec touch(String.t()) :: :ok
   def touch(username) do
@@ -118,11 +124,14 @@ defmodule MDTClient.HttpClient.Resources do
         :ets.select_reverse(table, summary_match_spec())
 
       term ->
+        # Compiled once rather than by every comparison.
+        pattern = :binary.compile_pattern(term)
+
         table
         |> :ets.select_reverse(searchable_summary_match_spec())
-        |> Enum.filter(fn {_id, _description, _tags, _at, _duration, _method, _url, _status,
-                           search_text} ->
-          String.contains?(search_text, term)
+        |> Search.filter(fn {_id, _description, _tags, _at, _duration, _method, _url, _status,
+                             search_text} ->
+          String.contains?(search_text, pattern)
         end)
         |> Enum.map(fn {id, description, tags, at, duration, method, url, status, _search_text} ->
           {id, description, tags, at, duration, method, url, status}
@@ -216,10 +225,18 @@ defmodule MDTClient.HttpClient.Resources do
     :ok =
       Store.publish(__MODULE__, username, %{table: table, outlines: outlines, counter: counter})
 
-    schedule_sync()
-
     {:ok,
-     %{username: username, key: key, path: path, table: table, outlines: outlines, flush: nil}}
+     %{username: username, key: key, path: path, table: table, outlines: outlines, flush: nil},
+     {:continue, :reindex}}
+  end
+
+  # Entries kept by a build that searched the whole inspected request and
+  # response get the search text this one builds, a batch at a time and after
+  # the history is already readable, so unlocking does not wait on it.
+  @impl true
+  def handle_continue(:reindex, state) do
+    send(self(), {:reindex, :ets.first(state.table)})
+    {:noreply, state}
   end
 
   @impl true
@@ -277,15 +294,8 @@ defmodule MDTClient.HttpClient.Resources do
     {:reply, :ok, flushed(state)}
   end
 
-  # Coalesced rather than written straight away: a burst of edits becomes one
-  # write, while nothing waits longer than @flush_after to become durable.
   @impl true
-  def handle_cast(:changed, %{flush: nil} = state) do
-    {:noreply, %{state | flush: Process.send_after(self(), :flush, @flush_after)}}
-  end
-
-  @impl true
-  def handle_cast(:changed, state), do: {:noreply, state}
+  def handle_cast(:changed, state), do: {:noreply, changed(state)}
 
   @impl true
   def handle_info(:flush, state) do
@@ -293,11 +303,13 @@ defmodule MDTClient.HttpClient.Resources do
     {:noreply, %{state | flush: nil}}
   end
 
-  @impl true
-  def handle_info(:sync_history, state) do
-    :ok = persist(state)
-    schedule_sync()
-    {:noreply, state}
+  def handle_info({:reindex, @end_of_table}, state), do: {:noreply, state}
+
+  def handle_info({:reindex, identifier}, state) do
+    {next, reindexed} = reindex(state.table, identifier, @reindex_batch, 0)
+    send(self(), {:reindex, next})
+
+    {:noreply, if(reindexed > 0, do: changed(state), else: state)}
   end
 
   # Unregister before flushing so nothing can grab a handle to a table that is
@@ -318,6 +330,14 @@ defmodule MDTClient.HttpClient.Resources do
         raise "the vault for #{inspect(username)} is locked; sign in before reading its history"
     end
   end
+
+  # Coalesced rather than written straight away: a burst of edits becomes one
+  # write, while nothing waits longer than @flush_after to become durable.
+  defp changed(%{flush: nil} = state) do
+    %{state | flush: Process.send_after(self(), :flush, @flush_after)}
+  end
+
+  defp changed(state), do: state
 
   # Writes now and drops any pending timer, so a later :flush cannot fire
   # against state that has already been written.
@@ -375,11 +395,35 @@ defmodule MDTClient.HttpClient.Resources do
     :ok
   end
 
-  defp sync_interval do
-    Application.get_env(:mdt_client, :http_client_history_sync_interval, @default_sync_interval)
-  end
+  defp reindex(_table, @end_of_table, _budget, reindexed), do: {@end_of_table, reindexed}
+  defp reindex(_table, identifier, 0, reindexed), do: {identifier, reindexed}
 
-  defp schedule_sync, do: Process.send_after(self(), :sync_history, sync_interval())
+  defp reindex(table, identifier, budget, reindexed) do
+    reindexed =
+      case :ets.lookup(table, identifier) do
+        [{^identifier, metadata, request, response}] ->
+          if String.contains?(metadata.search_text, "%req.request{") do
+            updated = HistoryMetadata.with_search_text(metadata, request, response)
+
+            # Replaced only if nobody changed the entry since it was read: a tag
+            # added meanwhile already rebuilt the search text, and stays.
+            replaced =
+              :ets.select_replace(table, [
+                {{identifier, metadata, :"$1", :"$2"}, [],
+                 [{{identifier, {:const, updated}, :"$1", :"$2"}}]}
+              ])
+
+            reindexed + replaced
+          else
+            reindexed
+          end
+
+        [] ->
+          reindexed
+      end
+
+    reindex(table, :ets.next(table, identifier), budget - 1, reindexed)
+  end
 
   defp latest_identifier(table) do
     case :ets.last(table) do

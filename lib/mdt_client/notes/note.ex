@@ -6,7 +6,9 @@ defmodule MDTClient.Notes.Note do
   `done_at`; it is nil while the note is open.
 
   `search_text` is the title and the body, normalized once when they change
-  so searching does not redo it for every note on every keystroke.
+  so searching does not redo it for every note on every keystroke, and
+  `excerpt` is what `excerpt/1` finds in the body, kept for the same reason:
+  a list shows it for every note.
   """
 
   alias MDTClient.Search
@@ -24,7 +26,8 @@ defmodule MDTClient.Notes.Note do
           done_at: DateTime.t() | nil,
           created_at: DateTime.t(),
           updated_at: DateTime.t(),
-          search_text: String.t()
+          search_text: String.t(),
+          excerpt: String.t() | nil
         }
 
   defstruct [
@@ -34,7 +37,8 @@ defmodule MDTClient.Notes.Note do
     :done_at,
     title: @default_title,
     body: "",
-    search_text: ""
+    search_text: "",
+    excerpt: nil
   ]
 
   @doc "The title a note gets until it is named."
@@ -60,14 +64,16 @@ defmodule MDTClient.Notes.Note do
     now = DateTime.utc_now()
     created_at = Map.get(attrs, :created_at, now)
 
-    with_search_text(%__MODULE__{
+    note = %__MODULE__{
       id: Map.get_lazy(attrs, :id, &new_id/0),
       title: title(Map.get(attrs, :title)),
       body: body(Map.get(attrs, :body)),
       done_at: Map.get(attrs, :done_at),
       created_at: created_at,
       updated_at: Map.get(attrs, :updated_at, created_at)
-    })
+    }
+
+    with_search_text(%{note | excerpt: excerpt(note)})
   end
 
   @doc """
@@ -92,7 +98,7 @@ defmodule MDTClient.Notes.Note do
     if updated == note do
       note
     else
-      with_search_text(%{updated | updated_at: now})
+      with_search_text(%{updated | updated_at: now, excerpt: excerpt(updated)})
     end
   end
 
@@ -122,12 +128,6 @@ defmodule MDTClient.Notes.Note do
   end
 
   def body(_body), do: ""
-
-  @doc "Every line of the body with something written on it, in order."
-  @spec texts(t()) :: [String.t()]
-  def texts(%__MODULE__{body: body}) do
-    for line <- String.split(body, "\n"), String.trim(line) != "", do: line
-  end
 
   @doc """
   The first line of the body that says something, stripped of the Markdown
@@ -172,7 +172,10 @@ defmodule MDTClient.Notes.Note do
   on screen already.
   """
   @spec snippet(t(), [String.t()]) :: {String.t(), String.t(), String.t()} | nil
-  def snippet(%__MODULE__{} = note, terms), do: Search.snippet(texts(note), terms)
+  def snippet(%__MODULE__{body: body}, terms) do
+    # Line by line as they are needed: the match is usually near the top.
+    Search.snippet(String.splitter(body, "\n"), terms)
+  end
 
   defp done_at(%__MODULE__{done_at: nil}, true, now), do: now
   defp done_at(%__MODULE__{done_at: done_at}, true, _now), do: done_at

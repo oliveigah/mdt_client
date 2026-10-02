@@ -122,16 +122,21 @@ defmodule MDTClient.HttpClient.Utils do
   @doc "The number of enabled rows, shown as a badge on the editor tabs."
   def enabled_count(rows), do: Enum.count(rows, &(&1.enabled and &1.key != ""))
 
-  @doc "Groups history entries by the day they were sent, newest day first."
-  def group_history(history) do
+  @doc """
+  Groups history entries by the day they were sent, newest day first.
+
+  `at` reads when an entry was sent, as a `NaiveDateTime`; by default its
+  `:at`.
+  """
+  def group_history(history, at \\ & &1.at) do
     today = NaiveDateTime.to_date(NaiveDateTime.local_now())
 
     history
-    |> Enum.group_by(&NaiveDateTime.to_date(&1.at))
+    |> Enum.group_by(&NaiveDateTime.to_date(at.(&1)))
     |> Enum.sort_by(fn {date, _entries} -> date end, {:desc, Date})
     |> Enum.map(fn {date, entries} ->
       {day_label(date, today), Date.to_iso8601(date),
-       Enum.sort_by(entries, & &1.at, {:desc, NaiveDateTime})}
+       Enum.sort_by(entries, at, {:desc, NaiveDateTime})}
     end)
   end
 

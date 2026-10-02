@@ -43,6 +43,7 @@ defmodule MDTClientWeb.NotesLive do
      |> assign(:collapsed, MapSet.new())
      |> assign(:menu, nil)
      |> assign(:term, "")
+     |> assign(:limit, page_size())
      |> assign(:mode, "split")
      |> assign_current(current)
      |> assign_list()}
@@ -72,6 +73,7 @@ defmodule MDTClientWeb.NotesLive do
         <.note_list
           :if={@sidebar?}
           groups={@groups}
+          hidden={@hidden}
           term={@term}
           count={@count}
           collapsed={@collapsed}
@@ -99,7 +101,8 @@ defmodule MDTClientWeb.NotesLive do
 
   ## Note list
 
-  attr :groups, :list, required: true
+  attr :groups, :list, required: true, doc: "the groups `window/3` keeps"
+  attr :hidden, :integer, required: true, doc: "how many notes `window/3` left out"
   attr :term, :string, required: true
   attr :count, :integer, required: true
   attr :collapsed, :any, required: true, doc: "MapSet of collapsed group keys"
@@ -183,7 +186,12 @@ defmodule MDTClientWeb.NotesLive do
           <% end %>
         </p>
 
-        <div :for={{label, key, entries} <- @groups} id={"note-group-#{key}"} class="mb-1">
+        <div
+          :for={{label, key, count, entries} <- @groups}
+          :key={key}
+          id={"note-group-#{key}"}
+          class="mb-1"
+        >
           <button
             type="button"
             id={"note-group-toggle-#{key}"}
@@ -197,13 +205,20 @@ defmodule MDTClientWeb.NotesLive do
               class={["size-3 transition-transform", !MapSet.member?(@collapsed, key) && "rotate-90"]}
             />
             <span class="min-w-0 flex-1 truncate text-left">{label}</span>
-            <span class="font-mono normal-case">{length(entries)}</span>
+            <span class="font-mono normal-case">{count}</span>
           </button>
 
           <div :if={!MapSet.member?(@collapsed, key)} role="group" aria-label={label}>
-            <.note_entry :for={entry <- entries} entry={entry} active={entry.id == @current_id} />
+            <.note_entry
+              :for={entry <- entries}
+              :key={entry.id}
+              entry={entry}
+              active={entry.id == @current_id}
+            />
           </div>
         </div>
+
+        <.load_more id="note-more" list="note-list" hidden={@hidden} />
       </div>
     </aside>
     """
@@ -678,12 +693,17 @@ defmodule MDTClientWeb.NotesLive do
 
   @impl true
   def handle_event("search", %{"term" => term}, socket) do
-    {:noreply, socket |> assign(:term, term) |> assign_list()}
+    {:noreply, search(socket, term)}
   end
 
   @impl true
   def handle_event("clear_search", _params, socket) do
-    {:noreply, socket |> assign(:term, "") |> assign_list()}
+    {:noreply, search(socket, "")}
+  end
+
+  @impl true
+  def handle_event("load_more", _params, socket) do
+    {:noreply, socket |> update(:limit, &(&1 + page_size())) |> assign_list()}
   end
 
   @impl true
@@ -700,7 +720,7 @@ defmodule MDTClientWeb.NotesLive do
         do: MapSet.delete(collapsed, group),
         else: MapSet.put(collapsed, group)
 
-    {:noreply, assign(socket, :collapsed, collapsed)}
+    {:noreply, socket |> assign(:collapsed, collapsed) |> assign_list()}
   end
 
   @impl true
@@ -780,20 +800,44 @@ defmodule MDTClientWeb.NotesLive do
 
   defp blank?(attrs), do: Enum.all?(attrs, fn {_field, value} -> String.trim(value) == "" end)
 
-  defp assign_list(socket) do
-    entries =
-      socket.assigns.username
-      |> Library.list(socket.assigns.term)
-      |> Enum.map(&Map.put(&1, :when, when_label(&1.done_at || &1.updated_at)))
+  # A new search starts again from the first page of what it finds, and from
+  # the top of the list.
+  defp search(socket, term) do
+    socket
+    |> assign(term: term, limit: page_size())
+    |> assign_list()
+    |> push_event("scroll-top", %{id: "note-list"})
+  end
 
-    {done, open} = Enum.split_with(entries, & &1.done_at)
+  # Every note found is placed, so the groups count right, but only those that
+  # make it on screen get a time to show and the words around the search.
+  defp assign_list(socket) do
+    %{username: username, term: term, collapsed: collapsed, limit: limit} = socket.assigns
+    notes = Library.list(username, term)
+    {done, open} = Enum.split_with(notes, & &1.done_at)
+
+    {groups, hidden} =
+      [{"Open", "open", open}, {"Done", "done", done}]
+      |> Enum.reject(fn {_label, _key, entries} -> entries == [] end)
+      |> window(collapsed, limit)
+
+    shown = for {_label, _key, _count, entries} <- groups, entry <- entries, do: entry.id
+    snippets = Library.snippets(username, shown, term)
 
     groups =
-      Enum.reject([{"Open", "open", open}, {"Done", "done", done}], fn {_label, _key, entries} ->
-        entries == []
-      end)
+      for {label, key, count, entries} <- groups do
+        entries =
+          Enum.map(entries, fn entry ->
+            Map.merge(entry, %{
+              when: when_label(entry.done_at || entry.updated_at),
+              snippet: snippets[entry.id]
+            })
+          end)
 
-    assign(socket, groups: groups, count: length(entries))
+        {label, key, count, entries}
+      end
+
+    assign(socket, groups: groups, hidden: hidden, count: length(notes))
   end
 
   # Today's notes by the time, older ones by the day, read against the wall

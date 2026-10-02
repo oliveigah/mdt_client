@@ -51,6 +51,7 @@ defmodule MDTClientWeb.HttpClientLive do
      |> assign(:dialog_value, "")
      |> assign(:dialog_error, nil)
      |> assign(:term, "")
+     |> assign(:limit, page_size())
      |> assign_history()
      |> sync_tab()}
   end
@@ -79,6 +80,7 @@ defmodule MDTClientWeb.HttpClientLive do
         <.history_panel
           :if={@sidebar?}
           groups={@groups}
+          hidden={@hidden}
           term={@term}
           count={@count}
           collapsed={@collapsed}
@@ -331,7 +333,8 @@ defmodule MDTClientWeb.HttpClientLive do
 
   ## History panel
 
-  attr :groups, :list, required: true
+  attr :groups, :list, required: true, doc: "the groups `window/3` keeps"
+  attr :hidden, :integer, required: true, doc: "how many entries `window/3` left out"
   attr :term, :string, required: true
   attr :count, :integer, required: true
   attr :collapsed, :any, required: true, doc: "MapSet of collapsed group keys"
@@ -421,14 +424,18 @@ defmodule MDTClientWeb.HttpClientLive do
         </p>
 
         <.history_group
-          :for={{label, key, entries} <- @groups}
+          :for={{label, key, count, entries} <- @groups}
+          :key={key}
           label={label}
           group={key}
+          count={count}
           entries={entries}
           collapsed={MapSet.member?(@collapsed, key)}
           selected={@selected}
           active_source={@active_source}
         />
+
+        <.load_more id="history-more" list="history-list" hidden={@hidden} />
       </div>
     </aside>
     """
@@ -469,6 +476,7 @@ defmodule MDTClientWeb.HttpClientLive do
 
   attr :label, :string, required: true
   attr :group, :string, required: true
+  attr :count, :integer, required: true, doc: "every entry in the group, shown or not"
   attr :entries, :list, required: true
   attr :collapsed, :boolean, required: true
   attr :selected, :any, required: true
@@ -490,12 +498,13 @@ defmodule MDTClientWeb.HttpClientLive do
           class={["size-3 transition-transform", !@collapsed && "rotate-90"]}
         />
         <span class="min-w-0 flex-1 truncate text-left">{@label}</span>
-        <span class="font-mono normal-case">{length(@entries)}</span>
+        <span class="font-mono normal-case">{@count}</span>
       </button>
 
       <div :if={!@collapsed} role="group" aria-label={@label}>
         <.history_entry
           :for={entry <- @entries}
+          :key={entry.id}
           entry={entry}
           selected={MapSet.member?(@selected, entry.id)}
           active={@active_source == entry.id}
@@ -1613,12 +1622,17 @@ defmodule MDTClientWeb.HttpClientLive do
 
   @impl true
   def handle_event("search", %{"term" => term}, socket) do
-    {:noreply, socket |> assign(:term, term) |> assign_history()}
+    {:noreply, search(socket, term)}
   end
 
   @impl true
   def handle_event("clear_search", _params, socket) do
-    {:noreply, socket |> assign(:term, "") |> assign_history()}
+    {:noreply, search(socket, "")}
+  end
+
+  @impl true
+  def handle_event("load_more", _params, socket) do
+    {:noreply, socket |> update(:limit, &(&1 + page_size())) |> assign_history()}
   end
 
   @impl true
@@ -1655,7 +1669,7 @@ defmodule MDTClientWeb.HttpClientLive do
         do: MapSet.delete(collapsed, group),
         else: MapSet.put(collapsed, group)
 
-    {:noreply, assign(socket, :collapsed, collapsed)}
+    {:noreply, socket |> assign(:collapsed, collapsed) |> assign_history()}
   end
 
   @impl true
@@ -1681,7 +1695,11 @@ defmodule MDTClientWeb.HttpClientLive do
 
   @impl true
   def handle_event("select_all", _params, socket) do
-    ids = for {_label, _key, entries} <- socket.assigns.groups, entry <- entries, do: entry.id
+    # Every request the search lists, loaded into view yet or not.
+    ids =
+      for {id, _description, _tags, _at, _duration, _method, _url, _status} <-
+            Resources.summaries(socket.assigns.username, socket.assigns.term),
+          do: to_string(id)
 
     {:noreply, assign(socket, :selected, MapSet.new(ids))}
   end
@@ -2128,7 +2146,7 @@ defmodule MDTClientWeb.HttpClientLive do
   # selection has no single value to show.
   defp metadata_value(socket, "set_description", [id]) do
     socket.assigns.groups
-    |> Enum.flat_map(fn {_label, _key, entries} -> entries end)
+    |> Enum.flat_map(fn {_label, _key, _count, entries} -> entries end)
     |> Enum.find_value("", &(&1.id == id && (&1.description || "")))
   end
 
@@ -2191,10 +2209,7 @@ defmodule MDTClientWeb.HttpClientLive do
   # The entries on screen, in order: a collapsed group hides its entries from a
   # Shift range the same way it hides them from view.
   defp visible_entry_ids(socket) do
-    for {_label, key, entries} <- socket.assigns.groups,
-        not MapSet.member?(socket.assigns.collapsed, key),
-        entry <- entries,
-        do: entry.id
+    for {_label, _key, _count, entries} <- socket.assigns.groups, entry <- entries, do: entry.id
   end
 
   # A right click places the menu at the pointer; the keyboard anchors it to the row.
@@ -2278,14 +2293,36 @@ defmodule MDTClientWeb.HttpClientLive do
     end
   end
 
-  defp assign_history(socket) do
-    entries =
-      socket.assigns.username
-      |> Resources.summaries(socket.assigns.term)
-      |> Enum.map(&Translation.history_entry/1)
-
-    assign(socket, groups: Utils.group_history(entries), count: length(entries))
+  # A new search starts again from the first page of what it finds, and from
+  # the top of the list.
+  defp search(socket, term) do
+    socket
+    |> assign(term: term, limit: page_size())
+    |> assign_history()
+    |> push_event("scroll-top", %{id: "history-list"})
   end
+
+  # Every request found is placed, so the days count right, but only those
+  # that make it on screen are turned into the rows the list draws.
+  defp assign_history(socket) do
+    %{username: username, term: term, collapsed: collapsed, limit: limit} = socket.assigns
+    summaries = Resources.summaries(username, term)
+
+    {groups, hidden} =
+      summaries
+      |> Utils.group_history(&completed_at/1)
+      |> window(collapsed, limit)
+
+    groups =
+      for {label, key, count, summaries} <- groups,
+          do: {label, key, count, Enum.map(summaries, &Translation.history_entry/1)}
+
+    assign(socket, groups: groups, hidden: hidden, count: length(summaries))
+  end
+
+  # Read the way `Translation.history_entry/1` reads it into a row's `:at`.
+  defp completed_at({_id, _description, _tags, completed_at, _duration, _method, _url, _status}),
+    do: DateTime.to_naive(completed_at)
 
   @scalar_fields ~w(method url body body_type auth_type auth_token auth_username auth_password timeout_ms)
 

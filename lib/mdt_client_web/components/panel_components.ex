@@ -2,9 +2,10 @@ defmodule MDTClientWeb.PanelComponents do
   @moduledoc """
   Building blocks shared by the tool workspaces.
 
-  Three things live here: the drag handle used to resize a neighbouring panel,
+  Four things live here: the drag handle used to resize a neighbouring panel,
   the tab strip both tools use so their tabs can be dragged into another order,
-  and the context menu their lists open on a right click.
+  the context menu their lists open on a right click, and the windowing that
+  keeps a list of thousands as quick as one of fifty.
 
   Panel sizes are written to a CSS variable on `<html>`, outside anything
   LiveView patches, and persisted in local storage so they survive navigation
@@ -340,6 +341,113 @@ defmodule MDTClientWeb.PanelComponents do
       "data-[drop=before]:shadow-[inset_2px_0_0_0_var(--color-accent)]",
       "data-[drop=after]:shadow-[inset_-2px_0_0_0_var(--color-accent)]"
     ]
+  end
+
+  ## Long lists
+
+  @page_size 50
+
+  @doc "How many rows a list shows at first, and adds each time it is scrolled to the end."
+  def page_size, do: @page_size
+
+  @doc """
+  The part of a grouped list that is rendered: the first `limit` rows a
+  person can see, in order.
+
+  Rendering, diffing and patching a row costs the same whether or not it is
+  ever scrolled to, so a list of thousands drawn whole makes every search
+  keystroke and every save that redraws it slow. Cut to what is on screen and
+  a little beyond, it costs what a short list does, and `load_more/1` brings
+  in the rest as the list is scrolled.
+
+  `groups` are `{label, key, entries}`; `collapsed` holds the keys of the
+  groups folded away, which show their header and none of their rows, so
+  they take none of the limit. Returns each group to render as
+  `{label, key, count, entries}`, `count` being every entry in it, and how
+  many rows were left out. Once one row is left out, so are the groups after
+  it, rather than showing headers with nothing under them.
+  """
+  @spec window([{label, key, [entry]}], MapSet.t(key), non_neg_integer()) ::
+          {[{label, key, non_neg_integer(), [entry]}], non_neg_integer()}
+        when label: String.t(), key: String.t(), entry: term()
+  def window(groups, collapsed, limit) do
+    {shown, _left, hidden} =
+      Enum.reduce(groups, {[], limit, 0}, fn {label, key, entries}, {shown, left, hidden} ->
+        count = length(entries)
+
+        cond do
+          hidden > 0 ->
+            {shown, left, if(MapSet.member?(collapsed, key), do: hidden, else: hidden + count)}
+
+          MapSet.member?(collapsed, key) ->
+            {[{label, key, count, []} | shown], left, hidden}
+
+          left == 0 ->
+            {shown, left, count}
+
+          true ->
+            taken = min(count, left)
+
+            {[{label, key, count, Enum.take(entries, taken)} | shown], left - taken,
+             count - taken}
+        end
+      end)
+
+    {Enum.reverse(shown), hidden}
+  end
+
+  @doc """
+  The end of a list cut short by `window/3`: a button saying how many rows
+  are left, which pushes `event` when clicked and, on its own, when it comes
+  within a screenful of being scrolled into sight. Renders nothing once every
+  row is shown.
+  """
+  attr :id, :string, required: true
+  attr :list, :string, required: true, doc: "the DOM id of the list that scrolls"
+  attr :hidden, :integer, required: true, doc: "how many rows are left out"
+  attr :event, :string, default: "load_more"
+
+  def load_more(assigns) do
+    ~H"""
+    <button
+      :if={@hidden > 0}
+      type="button"
+      id={@id}
+      phx-click={@event}
+      phx-hook=".LoadMore"
+      data-list={@list}
+      class="mt-1 flex w-full cursor-pointer items-center justify-center gap-1.5 rounded-md px-2 py-1.5 font-mono text-[10px] text-faint transition-colors hover:bg-hover hover:text-muted"
+    >
+      <.icon name="hero-chevron-double-down" class="size-3" />
+      <span>{@hidden} more</span>
+    </button>
+    <script :type={Phoenix.LiveView.ColocatedHook} name=".LoadMore">
+      export default {
+        mounted() {
+          // Watched against the list rather than the window, so the margin
+          // reaches below what the list shows: rows load before they are
+          // scrolled to, not after.
+          this.observer = new IntersectionObserver((entries) => {
+            if (this.loading || !entries.some((entry) => entry.isIntersecting)) return
+
+            this.loading = true
+            this.pushEvent(this.el.getAttribute("phx-click"), {}, () => {
+              this.loading = false
+              if (!this.el.isConnected) return
+              // Watching afresh reports where it is now, so a page that still
+              // leaves it in reach, as in a tall window, asks for the next.
+              this.observer.unobserve(this.el)
+              this.observer.observe(this.el)
+            })
+          }, {root: document.getElementById(this.el.dataset.list), rootMargin: "0px 0px 100% 0px"})
+
+          this.observer.observe(this.el)
+        },
+
+        destroyed() { this.observer.disconnect() }
+      }
+    </script>
+    """
   end
 
   ## Context menus

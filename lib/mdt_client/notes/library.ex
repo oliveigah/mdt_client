@@ -11,8 +11,9 @@ defmodule MDTClient.Notes.Library do
   that writes notes. Every change is broadcast to the processes that
   `subscribe/1`, all but the one that made it, so a page shows what was
   written elsewhere without asking. Lists come back as summaries, built here,
-  so searching as someone types copies titles and snippets rather than every
-  body.
+  so searching as someone types copies titles and excerpts rather than every
+  body. The words around a match cost a pass over the body, so they are asked
+  for apart, with `snippets/3`, and only for the notes on screen.
   """
 
   use GenServer
@@ -21,6 +22,7 @@ defmodule MDTClient.Notes.Library do
 
   alias MDTClient.Accounts
   alias MDTClient.Notes.Note
+  alias MDTClient.Search
   alias MDTClient.Vault
   alias MDTClient.Vault.Store
 
@@ -32,9 +34,10 @@ defmodule MDTClient.Notes.Library do
           title: String.t(),
           done_at: DateTime.t() | nil,
           updated_at: DateTime.t(),
-          excerpt: String.t() | nil,
-          snippet: {String.t(), String.t(), String.t()} | nil
+          excerpt: String.t() | nil
         }
+
+  @type snippet :: {String.t(), String.t(), String.t()}
 
   @typedoc """
   Sent to subscribers when a note changes, naming it, or `:all` when every
@@ -59,6 +62,19 @@ defmodule MDTClient.Notes.Library do
   @spec list(String.t(), String.t()) :: [summary()]
   def list(username, term \\ "") when is_binary(term) do
     call(username, {:list, Note.terms(term)})
+  end
+
+  @doc """
+  The words around `term` in each of the notes `ids` that holds it in its
+  body, as `Note.snippet/2` cuts them. Notes gone, or holding the words in
+  their title alone, are left out.
+  """
+  @spec snippets(String.t(), [String.t()], String.t()) :: %{String.t() => snippet()}
+  def snippets(username, ids, term) when is_list(ids) and is_binary(term) do
+    case Note.terms(term) do
+      [] -> %{}
+      terms -> call(username, {:snippets, ids, terms})
+    end
   end
 
   @doc "The note changed last, if there is one."
@@ -135,25 +151,39 @@ defmodule MDTClient.Notes.Library do
 
   @impl true
   def handle_call({:list, terms}, _from, state) do
+    notes = Map.values(state.notes)
+    notes = if terms == [], do: notes, else: Search.filter(notes, &Note.matches?(&1, terms))
+
     summaries =
-      for note <- newest_first(state.notes), Note.matches?(note, terms) do
+      for note <- newest_first(notes) do
         %{
           id: note.id,
           title: note.title,
           done_at: note.done_at,
           updated_at: note.updated_at,
-          excerpt: Note.excerpt(note),
-          snippet: Note.snippet(note, terms)
+          excerpt: note.excerpt
         }
       end
 
     {:reply, summaries, state}
   end
 
+  def handle_call({:snippets, ids, terms}, _from, state) do
+    snippets =
+      for id <- ids,
+          {:ok, note} <- [Map.fetch(state.notes, id)],
+          snippet = Note.snippet(note, terms),
+          into: %{},
+          do: {id, snippet}
+
+    {:reply, snippets, state}
+  end
+
   def handle_call(:latest, _from, state) do
-    case newest_first(state.notes) do
-      [note | _rest] -> {:reply, {:ok, note}, state}
-      [] -> {:reply, :error, state}
+    if state.notes == %{} do
+      {:reply, :error, state}
+    else
+      {:reply, {:ok, state.notes |> Map.values() |> Enum.max_by(&changed_at/1)}, state}
     end
   end
 
@@ -162,7 +192,7 @@ defmodule MDTClient.Notes.Library do
   end
 
   def handle_call(:all, _from, state) do
-    {:reply, state.notes |> newest_first() |> Enum.reverse(), state}
+    {:reply, state.notes |> Map.values() |> newest_first() |> Enum.reverse(), state}
   end
 
   def handle_call({:save, id, attrs}, from, state) do
@@ -205,6 +235,7 @@ defmodule MDTClient.Notes.Library do
   def handle_call({:rewrite, fun}, from, state) do
     notes =
       state.notes
+      |> Map.values()
       |> newest_first()
       |> Enum.reverse()
       |> fun.()
@@ -268,9 +299,11 @@ defmodule MDTClient.Notes.Library do
     %{state | flush: nil}
   end
 
-  defp newest_first(notes) do
-    notes |> Map.values() |> Enum.sort_by(& &1.updated_at, {:desc, DateTime})
-  end
+  # Sorted on a number rather than with `DateTime.compare/2`, which is a few
+  # times slower and runs for every pair compared.
+  defp newest_first(notes), do: Enum.sort_by(notes, &changed_at/1, :desc)
+
+  defp changed_at(note), do: DateTime.to_unix(note.updated_at, :microsecond)
 
   # Written aside and renamed into place, so a crash partway through a write
   # leaves the previous file rather than half of a new one.
@@ -313,8 +346,15 @@ defmodule MDTClient.Notes.Library do
   end
 
   # Rebuilt through the struct, so a note kept by a build whose struct had
-  # fewer fields comes back with this build's defaults for the ones it lacks.
-  defp upgrade(note), do: struct(Note, Map.from_struct(note))
+  # fewer fields comes back with this build's defaults for the ones it lacks,
+  # and with an excerpt if it was kept before excerpts were.
+  defp upgrade(note) do
+    upgraded = struct(Note, Map.from_struct(note))
+
+    if Map.has_key?(note, :excerpt),
+      do: upgraded,
+      else: %{upgraded | excerpt: Note.excerpt(upgraded)}
+  end
 
   # Timestamped so a second failed start cannot overwrite the copy kept by the
   # first, which would turn a recoverable problem into data loss.

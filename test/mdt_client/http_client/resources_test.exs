@@ -189,6 +189,32 @@ defmodule MDTClient.HttpClient.ResourcesTest do
     assert_raise RuntimeError, ~r/locked/, fn -> Resources.all(username) end
   end
 
+  test "entries kept with the inspected search text are indexed afresh after unlocking", %{
+    username: username,
+    key: key
+  } do
+    request = Req.new(url: "https://api.example.test/orders")
+    response = %Req.Response{status: 201, body: ~s({"id":"ord_1"})}
+    identifier = Resources.record(username, HistoryMetadata.new(%{}), request, response)
+    {:ok, {^identifier, metadata, ^request, ^response}} = Resources.get(username, identifier)
+
+    # What an earlier build kept: the inspected structs, steps and all.
+    old = HistoryMetadata.normalize_search_text(inspect({request, response}))
+    assert old =~ "%req.request{"
+
+    true =
+      :ets.insert(
+        Resources.table(username),
+        {identifier, %{metadata | search_text: old}, request, response}
+      )
+
+    :ok = Store.close(username)
+    :ok = Store.open(username, key)
+
+    assert eventually(fn -> Resources.summaries(username, "retry") == [] end)
+    assert [{^identifier, _, _, _, _, _, _, _}] = Resources.summaries(username, ~s("id":"ord_1"))
+  end
+
   defp eventually(check, attempts \\ 40) do
     cond do
       check.() -> true

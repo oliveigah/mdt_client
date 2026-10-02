@@ -44,7 +44,8 @@ defmodule MDTClient.Diagrams.TransferTest do
 
     assert {:ok, %{elements: [%{"text" => "remote edit"}]}} = Library.get(username, mine.id)
     assert titles(username) == ["Flow", "Flow (before import)"]
-    assert [%{snippet: {_, "local", _}}] = Library.list(username, "local")
+    assert [%{id: kept}] = Library.list(username, "local")
+    assert %{^kept => {_, "local", _}} = Library.snippets(username, [kept], "local")
 
     # Merging the same file again finds the copy already kept.
     :ok = merge(username, [theirs])

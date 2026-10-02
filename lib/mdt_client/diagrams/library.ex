@@ -9,8 +9,10 @@ defmodule MDTClient.Diagrams.Library do
 
   Diagrams are small and edited by one person at a time, so everything goes
   through this process rather than a shared table. Lists come back as
-  summaries, built here, so searching as someone types copies titles and
-  snippets rather than every element of every diagram.
+  summaries, built here, so searching as someone types copies titles rather
+  than every element of every diagram. The words around a match cost a walk
+  over the elements, so they are asked for apart, with `snippets/3`, and only
+  for the diagrams on screen.
   """
 
   use GenServer
@@ -29,9 +31,10 @@ defmodule MDTClient.Diagrams.Library do
           id: String.t(),
           title: String.t(),
           updated_at: DateTime.t(),
-          count: non_neg_integer(),
-          snippet: {String.t(), String.t(), String.t()} | nil
+          count: non_neg_integer()
         }
+
+  @type snippet :: {String.t(), String.t(), String.t()}
 
   @doc "Starts the library for one unlocked identity."
   def start_link(opts) do
@@ -49,6 +52,19 @@ defmodule MDTClient.Diagrams.Library do
   @spec list(String.t(), String.t()) :: [summary()]
   def list(username, term \\ "") when is_binary(term) do
     call(username, {:list, Diagram.terms(term)})
+  end
+
+  @doc """
+  The words around `term` in each of the diagrams `ids` that holds it in its
+  elements, as `Diagram.snippet/2` cuts them. Diagrams gone, or holding the
+  words in their title alone, are left out.
+  """
+  @spec snippets(String.t(), [String.t()], String.t()) :: %{String.t() => snippet()}
+  def snippets(username, ids, term) when is_list(ids) and is_binary(term) do
+    case Diagram.terms(term) do
+      [] -> %{}
+      terms -> call(username, {:snippets, ids, terms})
+    end
   end
 
   @doc "The diagram changed last, if there is one."
@@ -121,23 +137,35 @@ defmodule MDTClient.Diagrams.Library do
   @impl true
   def handle_call({:list, terms}, _from, state) do
     summaries =
-      for diagram <- newest_first(state.diagrams), Diagram.matches?(diagram, terms) do
+      for diagram <- state.diagrams |> Map.values() |> newest_first(),
+          Diagram.matches?(diagram, terms) do
         %{
           id: diagram.id,
           title: diagram.title,
           updated_at: diagram.updated_at,
-          count: length(diagram.elements),
-          snippet: Diagram.snippet(diagram, terms)
+          count: length(diagram.elements)
         }
       end
 
     {:reply, summaries, state}
   end
 
+  def handle_call({:snippets, ids, terms}, _from, state) do
+    snippets =
+      for id <- ids,
+          {:ok, diagram} <- [Map.fetch(state.diagrams, id)],
+          snippet = Diagram.snippet(diagram, terms),
+          into: %{},
+          do: {id, snippet}
+
+    {:reply, snippets, state}
+  end
+
   def handle_call(:latest, _from, state) do
-    case newest_first(state.diagrams) do
-      [diagram | _rest] -> {:reply, {:ok, diagram}, state}
-      [] -> {:reply, :error, state}
+    if state.diagrams == %{} do
+      {:reply, :error, state}
+    else
+      {:reply, {:ok, state.diagrams |> Map.values() |> Enum.max_by(&changed_at/1)}, state}
     end
   end
 
@@ -146,7 +174,7 @@ defmodule MDTClient.Diagrams.Library do
   end
 
   def handle_call(:all, _from, state) do
-    {:reply, state.diagrams |> newest_first() |> Enum.reverse(), state}
+    {:reply, state.diagrams |> Map.values() |> newest_first() |> Enum.reverse(), state}
   end
 
   def handle_call({:save, id, attrs}, from, state) do
@@ -194,6 +222,7 @@ defmodule MDTClient.Diagrams.Library do
   def handle_call({:rewrite, fun}, from, state) do
     diagrams =
       state.diagrams
+      |> Map.values()
       |> newest_first()
       |> Enum.reverse()
       |> fun.()
@@ -256,9 +285,11 @@ defmodule MDTClient.Diagrams.Library do
     %{state | flush: nil}
   end
 
-  defp newest_first(diagrams) do
-    diagrams |> Map.values() |> Enum.sort_by(& &1.updated_at, {:desc, DateTime})
-  end
+  # Sorted on a number rather than with `DateTime.compare/2`, which is a few
+  # times slower and runs for every pair compared.
+  defp newest_first(diagrams), do: Enum.sort_by(diagrams, &changed_at/1, :desc)
+
+  defp changed_at(diagram), do: DateTime.to_unix(diagram.updated_at, :microsecond)
 
   # Written aside and renamed into place, so a crash partway through a write
   # leaves the previous file rather than half of a new one.

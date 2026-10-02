@@ -47,7 +47,8 @@ defmodule MDTClient.Notes.TransferTest do
 
     assert {:ok, %{body: "remote edit", done_at: %DateTime{}}} = Library.get(username, mine.id)
     assert titles(username) == ["Plan", "Plan (before import)"]
-    assert [%{snippet: {_, "local", _}}] = Library.list(username, "local")
+    assert [%{id: kept}] = Library.list(username, "local")
+    assert %{^kept => {_, "local", _}} = Library.snippets(username, [kept], "local")
 
     # Merging the same file again finds the copy already kept.
     :ok = merge(username, [theirs])

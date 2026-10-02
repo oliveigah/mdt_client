@@ -2,6 +2,7 @@ defmodule MDTClientWeb.NotesLiveTest do
   use MDTClientWeb.ConnCase, async: true
 
   import Phoenix.LiveViewTest
+  import MDTClientWeb.PanelComponents, only: [page_size: 0]
 
   alias MDTClient.Notes.Library
   alias MDTClient.Notes.Note
@@ -267,6 +268,56 @@ defmodule MDTClientWeb.NotesLiveTest do
     end
   end
 
+  describe "with more notes than fit on screen" do
+    setup %{conn: conn, username: username} do
+      done =
+        for n <- 1..3 do
+          {:ok, note} = Library.save(username, Note.new_id(), %{title: "Done #{n}"})
+          {:ok, note} = Library.set_done(username, note.id, true)
+          note
+        end
+
+      for n <- 1..(page_size() + 5) do
+        {:ok, _note} = Library.save(username, Note.new_id(), %{title: "Open #{n}", body: "step"})
+      end
+
+      {:ok, view, _html} = live(conn, ~p"/tools/notes")
+      %{view: view, done: done}
+    end
+
+    test "draws the first page and loads the rest on demand", %{view: view} do
+      assert count(view, "#note-list [role=option]") == page_size()
+      assert has_element?(view, "#note-group-toggle-open", "#{page_size() + 5}")
+      refute has_element?(view, "#note-group-done")
+      assert has_element?(view, "#note-more", "8 more")
+
+      view |> element("#note-more") |> render_click()
+
+      assert count(view, "#note-list [role=option]") == page_size() + 8
+      assert has_element?(view, "#note-group-done")
+      refute has_element?(view, "#note-more")
+    end
+
+    test "a group folded away gives its place to the next", %{view: view, done: done} do
+      view |> element("#note-group-toggle-open") |> render_click()
+
+      assert count(view, "#note-list [role=option]") == length(done)
+      for note <- done, do: assert(has_element?(view, "#note-group-done #note-#{note.id}"))
+      refute has_element?(view, "#note-more")
+    end
+
+    test "a search starts again from the first page, with snippets for what is drawn", %{
+      view: view
+    } do
+      view |> element("#note-more") |> render_click()
+      view |> element("#note-search") |> render_change(%{"term" => "step"})
+
+      assert count(view, "#note-list [role=option]") == page_size()
+      assert count(view, "#note-list mark") == page_size()
+      assert has_element?(view, "#note-more", "5 more")
+    end
+  end
+
   test "the tool picker and title bar offer notes", %{conn: conn} do
     {:ok, view, _html} = live(conn, ~p"/tools")
 
@@ -288,5 +339,9 @@ defmodule MDTClientWeb.NotesLiveTest do
 
   defp edit(view, id, params) do
     view |> form("#note-form-#{id}") |> render_change(params)
+  end
+
+  defp count(view, selector) do
+    view |> render() |> LazyHTML.from_fragment() |> LazyHTML.query(selector) |> Enum.count()
   end
 end

@@ -136,6 +136,12 @@ if (appWindow) {
   window.addEventListener("mdt:restart-after-update", restartForUpdate)
 }
 
+// A list searched afresh starts from the top of what was found. Left where it
+// was scrolled, it would also have its end in sight and load page after page.
+window.addEventListener("phx:scroll-top", ({detail}) => {
+  document.getElementById(detail.id)?.scrollTo({top: 0})
+})
+
 // connect if there are any LiveViews on the page
 liveSocket.connect()
 

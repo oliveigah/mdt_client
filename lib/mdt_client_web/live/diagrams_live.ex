@@ -49,6 +49,7 @@ defmodule MDTClientWeb.DiagramsLive do
      |> assign(:collapsed, MapSet.new())
      |> assign(:menu, nil)
      |> assign(:term, "")
+     |> assign(:limit, page_size())
      |> assign_list()}
   end
 
@@ -76,6 +77,7 @@ defmodule MDTClientWeb.DiagramsLive do
         <.diagram_list
           :if={@sidebar?}
           groups={@groups}
+          hidden={@hidden}
           term={@term}
           count={@count}
           collapsed={@collapsed}
@@ -106,7 +108,8 @@ defmodule MDTClientWeb.DiagramsLive do
 
   ## Diagram list
 
-  attr :groups, :list, required: true
+  attr :groups, :list, required: true, doc: "the groups `window/3` keeps"
+  attr :hidden, :integer, required: true, doc: "how many diagrams `window/3` left out"
   attr :term, :string, required: true
   attr :count, :integer, required: true
   attr :collapsed, :any, required: true, doc: "MapSet of collapsed group keys"
@@ -190,7 +193,7 @@ defmodule MDTClientWeb.DiagramsLive do
           <% end %>
         </p>
 
-        <div :for={{label, key, entries} <- @groups} class="mb-1">
+        <div :for={{label, key, count, entries} <- @groups} :key={key} class="mb-1">
           <button
             type="button"
             id={"diagram-group-#{key}"}
@@ -204,17 +207,20 @@ defmodule MDTClientWeb.DiagramsLive do
               class={["size-3 transition-transform", !MapSet.member?(@collapsed, key) && "rotate-90"]}
             />
             <span class="min-w-0 flex-1 truncate text-left">{label}</span>
-            <span class="font-mono normal-case">{length(entries)}</span>
+            <span class="font-mono normal-case">{count}</span>
           </button>
 
           <div :if={!MapSet.member?(@collapsed, key)} role="group" aria-label={label}>
             <.diagram_entry
               :for={entry <- entries}
+              :key={entry.id}
               entry={entry}
               active={entry.id == @current_id}
             />
           </div>
         </div>
+
+        <.load_more id="diagram-more" list="diagram-list" hidden={@hidden} />
       </div>
     </aside>
     """
@@ -937,6 +943,11 @@ defmodule MDTClientWeb.DiagramsLive do
   end
 
   @impl true
+  def handle_event("load_more", _params, socket) do
+    {:noreply, socket |> update(:limit, &(&1 + page_size())) |> assign_list()}
+  end
+
+  @impl true
   def handle_event("toggle_sidebar", _params, socket) do
     {:noreply, assign(socket, :sidebar?, !socket.assigns.sidebar?)}
   end
@@ -950,7 +961,7 @@ defmodule MDTClientWeb.DiagramsLive do
         do: MapSet.delete(collapsed, group),
         else: MapSet.put(collapsed, group)
 
-    {:noreply, assign(socket, :collapsed, collapsed)}
+    {:noreply, socket |> assign(:collapsed, collapsed) |> assign_list()}
   end
 
   @impl true
@@ -1008,20 +1019,36 @@ defmodule MDTClientWeb.DiagramsLive do
     %{id: current.id, elements: elements, terms: Diagram.terms(term)}
   end
 
+  # A new search starts again from the first page of what it finds, and from
+  # the top of the list.
   defp search(socket, term) do
     socket
-    |> assign(:term, term)
+    |> assign(term: term, limit: page_size())
     |> assign_list()
+    |> push_event("scroll-top", %{id: "diagram-list"})
     |> push_event("diagram:highlight", %{terms: Diagram.terms(term)})
   end
 
+  # Every diagram found is placed, so the days count right, but only those
+  # that make it on screen get the words around the search.
   defp assign_list(socket) do
+    %{username: username, term: term, collapsed: collapsed, limit: limit} = socket.assigns
+
     entries =
-      socket.assigns.username
-      |> Library.list(socket.assigns.term)
+      username
+      |> Library.list(term)
       |> Enum.map(&Map.put(&1, :at, local(&1.updated_at)))
 
-    assign(socket, groups: Utils.group_history(entries), count: length(entries))
+    {groups, hidden} = entries |> Utils.group_history() |> window(collapsed, limit)
+    shown = for {_label, _key, _count, entries} <- groups, entry <- entries, do: entry.id
+    snippets = Library.snippets(username, shown, term)
+
+    groups =
+      for {label, key, count, entries} <- groups do
+        {label, key, count, Enum.map(entries, &Map.put(&1, :snippet, snippets[&1.id]))}
+      end
+
+    assign(socket, groups: groups, hidden: hidden, count: length(entries))
   end
 
   # The wall clock time on this machine, which is what the day groups and

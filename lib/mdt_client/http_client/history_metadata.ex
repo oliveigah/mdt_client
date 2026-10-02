@@ -3,6 +3,10 @@ defmodule MDTClient.HttpClient.HistoryMetadata do
   User-facing and operational metadata for a recorded HTTP request.
   """
 
+  alias MDTClient.Search
+
+  @searchable_body 32_768
+
   @type t :: %__MODULE__{
           started_at: DateTime.t(),
           completed_at: DateTime.t(),
@@ -60,16 +64,33 @@ defmodule MDTClient.HttpClient.HistoryMetadata do
     }
   end
 
-  @doc false
-  @spec with_search_text(t(), Req.Request.t(), Req.Response.t() | Exception.t()) :: t()
+  @doc """
+  Rebuilds the text searches run against: the description, the tags, the
+  method and URL, the status, and the headers and body going each way.
+
+  A body is searchable as far as its first 32 KB, and only when it is text.
+  What Req keeps beside it — options, steps, private data — is left out, so
+  a search for a word like `retry` or `cache` finds the requests that
+  mention it rather than every request.
+  """
+  @spec with_search_text(t(), Req.Request.t(), Req.Response.t() | Exception.t() | nil) :: t()
   def with_search_text(%__MODULE__{} = metadata, %Req.Request{} = request, response) do
     search_text =
       [
-        metadata |> Map.from_struct() |> Map.delete(:search_text),
-        request,
-        response
+        metadata.description,
+        metadata.tags,
+        request.method |> to_string() |> String.upcase(),
+        to_string(request.url),
+        header_lines(request.headers),
+        body_text(request.body),
+        request.options
+        |> Map.take([:params, :json, :form])
+        |> Map.values()
+        |> Enum.map(&body_text/1),
+        response_text(response)
       ]
-      |> Enum.map(&inspect(&1, limit: 500, printable_limit: 32_000))
+      |> List.flatten()
+      |> Enum.reject(&(&1 in [nil, ""]))
       |> Enum.join("\n")
       |> normalize_search_text()
 
@@ -78,12 +99,38 @@ defmodule MDTClient.HttpClient.HistoryMetadata do
 
   @doc false
   @spec normalize_search_text(String.t()) :: String.t()
-  def normalize_search_text(text) when is_binary(text) do
-    text
-    |> String.downcase()
-    |> String.replace(~r/\s+/u, " ")
-    |> String.trim()
+  def normalize_search_text(text) when is_binary(text), do: Search.normalize(text)
+
+  defp response_text(%Req.Response{} = response) do
+    [to_string(response.status), header_lines(response.headers), body_text(response.body)]
   end
+
+  defp response_text(%{__exception__: true} = error), do: Exception.message(error)
+  defp response_text(_response), do: nil
+
+  defp header_lines(headers) do
+    for {name, values} <- headers, value <- List.wrap(values), do: "#{name}: #{value}"
+  end
+
+  defp body_text(nil), do: nil
+
+  defp body_text(body) when is_binary(body) do
+    prefix =
+      if byte_size(body) > @searchable_body,
+        do: binary_part(body, 0, @searchable_body),
+        else: body
+
+    case :unicode.characters_to_binary(prefix) do
+      text when is_binary(text) -> text
+      # The cut landed inside a character, which goes too.
+      {:incomplete, text, _rest} -> text
+      # Not text at all: an image, an archive.
+      {:error, _text, _rest} -> nil
+    end
+  end
+
+  # Decoded JSON, a form as a keyword list: whatever it is, as it reads.
+  defp body_text(body), do: inspect(body, limit: 500, printable_limit: @searchable_body)
 
   defp normalize_description(description) when is_binary(description) do
     case String.trim(description) do

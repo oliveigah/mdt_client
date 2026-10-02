@@ -44,11 +44,18 @@ defmodule MDTClient.Notes.LibraryTest do
 
     assert {second_id, first_id} == {second.id, first.id}
 
-    assert [%{id: ^second_id, snippet: {"Bump the ", "version", ""}}] =
-             Library.list(username, "VERSION release")
-
-    assert [%{id: ^first_id, snippet: nil}] = Library.list(username, "groceries")
+    assert [%{id: ^second_id}] = Library.list(username, "VERSION release")
+    assert [%{id: ^first_id}] = Library.list(username, "groceries")
     assert Library.list(username, "shipping") == []
+
+    # The snippet comes from the body, and there is none where only the title
+    # holds the words.
+    assert Library.snippets(username, [second_id, first_id], "VERSION release") ==
+             %{second_id => {"Bump the ", "version", ""}}
+
+    assert Library.snippets(username, [first_id], "groceries") == %{}
+    assert Library.snippets(username, [second_id], "") == %{}
+    assert Library.snippets(username, [Note.new_id()], "version") == %{}
 
     # Saving the older one again brings it to the top.
     {:ok, _first} = Library.save(username, first.id, %{body: "Milk"})
@@ -98,6 +105,22 @@ defmodule MDTClient.Notes.LibraryTest do
 
     :ok = Store.open(username, key)
     assert {:ok, ^note} = Library.get(username, note.id)
+  end
+
+  test "notes kept before excerpts were stored come back with one", %{
+    username: username,
+    key: key
+  } do
+    note = Note.new(%{title: "Release", body: "# Steps\nTag the build"})
+    :ok = Store.close(username)
+
+    # As an earlier build wrote it: the same struct, without the field.
+    kept = note |> Map.delete(:excerpt)
+    File.write!(Accounts.store_path(username, "notes.bin"), MDTClient.Vault.seal(key, [kept]))
+
+    :ok = Store.open(username, key)
+    assert [%{id: id, excerpt: "Steps"}] = Library.list(username)
+    assert {:ok, ^note} = Library.get(username, id)
   end
 
   test "rewrites everything in one step", %{username: username} do

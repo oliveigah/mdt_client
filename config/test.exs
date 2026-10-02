@@ -10,7 +10,6 @@ config :mdt_client, MDTClientWeb.Endpoint,
 config :mdt_client,
   data_dir: Path.join(System.tmp_dir!(), "mdt_client_test_data_#{System.pid()}"),
   log_dir: Path.join(System.tmp_dir!(), "mdt_client_test_logs_#{System.pid()}"),
-  http_client_history_sync_interval: :timer.seconds(1),
   # Tests add remotes that do not exist; the ones about fetching turn it on.
   git_auto_fetch: false
 

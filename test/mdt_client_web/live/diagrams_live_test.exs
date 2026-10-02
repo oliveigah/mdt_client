@@ -2,6 +2,7 @@ defmodule MDTClientWeb.DiagramsLiveTest do
   use MDTClientWeb.ConnCase, async: true
 
   import Phoenix.LiveViewTest
+  import MDTClientWeb.PanelComponents, only: [page_size: 0]
 
   alias MDTClient.Diagrams.Diagram
   alias MDTClient.Diagrams.Library
@@ -202,6 +203,37 @@ defmodule MDTClientWeb.DiagramsLiveTest do
 
     assert has_element?(view, "#tool-diagrams")
     assert has_element?(view, "#tool-switch-diagrams", "Diagrams")
+  end
+
+  test "draws the first page of a long list and loads the rest on demand", %{
+    conn: conn,
+    username: username
+  } do
+    for n <- 1..(page_size() + 2) do
+      {:ok, _diagram} =
+        Library.save(username, Diagram.new_id(), %{
+          title: "Flow #{n}",
+          elements: [box("a", "Payment gateway")]
+        })
+    end
+
+    {:ok, view, _html} = live(conn, ~p"/tools/diagrams")
+
+    assert count(view, "#diagram-list [role=option]") == page_size()
+    assert has_element?(view, "#diagram-more", "2 more")
+
+    view |> element("#diagram-more") |> render_click()
+    assert count(view, "#diagram-list [role=option]") == page_size() + 2
+    refute has_element?(view, "#diagram-more")
+
+    # A search starts again from the first page, marking what is drawn.
+    view |> element("#diagram-search") |> render_change(%{"term" => "gateway"})
+    assert count(view, "#diagram-list mark") == page_size()
+    assert has_element?(view, "#diagram-more", "2 more")
+  end
+
+  defp count(view, selector) do
+    view |> render() |> LazyHTML.from_fragment() |> LazyHTML.query(selector) |> Enum.count()
   end
 
   defp ready(view) do

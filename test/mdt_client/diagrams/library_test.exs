@@ -43,12 +43,18 @@ defmodule MDTClient.Diagrams.LibraryTest do
     assert [%{id: second_id}, %{id: first_id}] = Library.list(username)
     assert {second_id, first_id} == {second.id, first.id}
 
-    # The snippet comes from the first element holding any of the words.
-    assert [%{id: ^second_id, count: 2, snippet: {"Payment ", "gateway", ""}}] =
-             Library.list(username, "billing GATEWAY")
-
-    assert [%{id: ^first_id, snippet: nil}] = Library.list(username, "checkout")
+    assert [%{id: ^second_id, count: 2}] = Library.list(username, "billing GATEWAY")
+    assert [%{id: ^first_id}] = Library.list(username, "checkout")
     assert Library.list(username, "shipping") == []
+
+    # The snippet comes from the first element holding any of the words, and
+    # there is none where only the title holds them.
+    assert Library.snippets(username, [second_id, first_id], "billing GATEWAY") ==
+             %{second_id => {"Payment ", "gateway", ""}}
+
+    assert Library.snippets(username, [first_id], "checkout") == %{}
+    assert Library.snippets(username, [second_id], "") == %{}
+    assert Library.snippets(username, [Diagram.new_id()], "gateway") == %{}
 
     # Saving the older one again brings it to the top.
     {:ok, _first} = Library.save(username, first.id, %{elements: [box("c", "Cart")]})
