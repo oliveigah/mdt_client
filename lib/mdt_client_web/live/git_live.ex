@@ -28,6 +28,7 @@ defmodule MDTClientWeb.GitLive do
   alias MDTClientWeb.GitLive.Session
   alias MDTClientWeb.GitLive.Components
   alias MDTClientWeb.GitLive.Graph.Layout
+  alias MDTClientWeb.GitLive.Push
 
   @limits [500, 1_000, 2_500, 5_000]
   @default_limit 500
@@ -1174,7 +1175,13 @@ defmodule MDTClientWeb.GitLive do
   end
 
   defp dispatch(socket, tab, action) do
-    case confirmation(action) do
+    confirm =
+      case action do
+        {:push, []} -> Push.upstream_confirmation(tab)
+        _other -> confirmation(action)
+      end
+
+    case confirm do
       nil ->
         run(socket, tab, action)
 
@@ -1638,6 +1645,7 @@ defmodule MDTClientWeb.GitLive do
     cond do
       error.kind == :conflict -> %{tab | panel: "changes"}
       unmerged_branch?(error) -> %{tab | confirm: force_delete_confirmation(error)}
+      confirm = Push.recovery(tab, error) -> %{tab | confirm: confirm}
       true -> tab
     end
   end
@@ -1694,7 +1702,7 @@ defmodule MDTClientWeb.GitLive do
   defp requested(_action, _params, nil), do: nil
   defp requested("refresh", _params, _tab), do: :refresh
   defp requested("pull", _params, _tab), do: {:pull, :ff_only}
-  defp requested("push", _params, tab), do: {:push, push_options(tab)}
+  defp requested("push", _params, _tab), do: {:push, []}
   defp requested("continue", _params, _tab), do: :continue
   defp requested("skip", _params, _tab), do: :skip
   defp requested("abort", _params, _tab), do: :abort
@@ -1735,41 +1743,6 @@ defmodule MDTClientWeb.GitLive do
   defp requested("pop_stash", %{"reference" => reference}, _tab), do: {:pop_stash, reference}
   defp requested("drop_stash", %{"reference" => reference}, _tab), do: {:drop_stash, reference}
   defp requested(_action, _params, _tab), do: nil
-
-  # Pushing a branch that has never been pushed needs an explicit destination,
-  # so the first push sets the upstream instead of failing.
-  defp push_options(%{snapshot: snapshot}) do
-    current = Enum.find(snapshot.branches, & &1.current?)
-
-    cond do
-      is_nil(current) ->
-        []
-
-      current.upstream ->
-        []
-
-      remote = default_remote(snapshot) ->
-        [remote: remote, branch: current.name, set_upstream: true]
-
-      true ->
-        []
-    end
-  end
-
-  defp default_remote(snapshot) do
-    remotes =
-      snapshot.branches
-      |> Enum.filter(&(&1.kind == :remote))
-      |> Enum.map(& &1.remote)
-      |> Enum.reject(&is_nil/1)
-      |> Enum.uniq()
-
-    cond do
-      "origin" in remotes -> "origin"
-      remotes != [] -> hd(remotes)
-      true -> nil
-    end
-  end
 
   defp prepare_action(socket, params) do
     case socket.assigns.tab do

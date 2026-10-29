@@ -3742,7 +3742,7 @@ defmodule MDTClientWeb.GitLive.Components do
 
         <div :if={@confirm[:choices]} class="mt-3 flex items-center justify-end">
           <.button type="button" id="git-confirm-cancel" phx-click="cancel_confirm" variant="ghost">
-            Cancel
+            {@confirm[:cancel_label] || "Cancel"}
           </.button>
         </div>
 

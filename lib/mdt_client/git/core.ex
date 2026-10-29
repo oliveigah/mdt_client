@@ -841,19 +841,34 @@ defmodule MDTClient.Git.Core do
   def pull(%Repository{}, _strategy),
     do: {:error, Error.new(:invalid_argument, "Unknown pull strategy")}
 
-  @doc "Pushes the current branch, or a named local branch, to a remote."
+  @doc """
+  Pushes the current branch, or a named local branch, to a remote.
+
+  `:destination` names the remote branch. `:force` overwrites remote history;
+  `:force_with_lease` accepts a boolean or `{destination, expected_commit}` to
+  protect the exact remote state the caller reviewed (an empty commit means absent).
+  """
   @spec push(Repository.t(), keyword()) :: mutation_result()
   def push(%Repository{} = repository, opts \\ []) do
-    with {:ok, force?} <- boolean_option(opts, :force_with_lease, false),
+    with {:ok, force?} <- boolean_option(opts, :force, false),
+         {:ok, lease_args} <-
+           push_lease_args(repository, Keyword.get(opts, :force_with_lease, false)),
+         :ok <- validate_push_force(force?, lease_args),
          {:ok, upstream?} <- boolean_option(opts, :set_upstream, false),
-         {:ok, remote_args} <- push_remote_args(repository, Keyword.get(opts, :remote)),
-         {:ok, branch_args} <- push_branch_args(repository, Keyword.get(opts, :branch)) do
+         {:ok, branch_args} <-
+           push_branch_args(
+             repository,
+             Keyword.get(opts, :branch),
+             Keyword.get(opts, :destination)
+           ),
+         {:ok, remote_args} <- push_remote_args(repository, opts, branch_args) do
       args =
-        ["push"] ++
-          if_args(force?, "--force-with-lease") ++
+        ["push", "--porcelain"] ++
+          if_args(force?, "--force") ++
+          lease_args ++
           if_args(upstream?, "--set-upstream") ++ remote_args ++ branch_args
 
-      run_mutation(repository, :push, args)
+      run_mutation(repository, :push, args, env: [{"LC_ALL", "C"}])
     end
   end
 
@@ -1529,19 +1544,86 @@ defmodule MDTClient.Git.Core do
     end
   end
 
-  defp push_remote_args(_repository, nil), do: {:ok, []}
-
-  defp push_remote_args(repository, remote) do
-    with {:ok, remote} <- validate_remote(repository, remote) do
-      {:ok, ["--repo=#{remote}"]}
+  defp push_remote_args(repository, opts, []) do
+    case Keyword.get(opts, :remote) do
+      nil -> {:ok, []}
+      remote -> push_named_remote_args(repository, remote)
     end
   end
 
-  defp push_branch_args(_repository, nil), do: {:ok, []}
+  defp push_remote_args(repository, opts, _branch_args) do
+    case Keyword.get(opts, :remote) do
+      nil ->
+        branch = Keyword.get(opts, :branch)
 
-  defp push_branch_args(repository, branch) do
+        with {:ok, output} <-
+               Command.run(repository, [
+                 "for-each-ref",
+                 "--format=%(push:remotename)",
+                 "refs/heads/#{branch}"
+               ]),
+             {:ok, remotes} <- list_remotes(repository) do
+          remote = output_line(output)
+          fallback = Enum.find(remotes, &(&1.name == "origin")) || List.first(remotes)
+
+          cond do
+            remote != "" ->
+              push_named_remote_args(repository, remote)
+
+            fallback && (fallback.name == "origin" or length(remotes) == 1) ->
+              push_named_remote_args(repository, fallback.name)
+
+            true ->
+              {:error, Error.new(:invalid_argument, "Choose a remote for this branch")}
+          end
+        end
+
+      remote ->
+        push_named_remote_args(repository, remote)
+    end
+  end
+
+  defp push_named_remote_args(repository, remote) do
+    with {:ok, remote} <- validate_remote(repository, remote) do
+      {:ok, ["--", remote]}
+    end
+  end
+
+  defp push_lease_args(_repository, false), do: {:ok, []}
+  defp push_lease_args(_repository, true), do: {:ok, ["--force-with-lease"]}
+
+  defp push_lease_args(repository, {destination, expected}) when is_binary(expected) do
+    with {:ok, destination} <- validate_branch_name(repository, destination) do
+      if expected == "" or Regex.match?(~r/\A(?:[0-9a-f]{40}|[0-9a-f]{64})\z/, expected) do
+        {:ok, ["--force-with-lease=refs/heads/#{destination}:#{expected}"]}
+      else
+        {:error, Error.new(:invalid_argument, "Invalid expected remote commit")}
+      end
+    end
+  end
+
+  defp push_lease_args(_repository, _invalid),
+    do:
+      {:error,
+       Error.new(:invalid_argument, "force_with_lease must be a boolean or a branch/commit pair")}
+
+  defp validate_push_force(true, [_ | _]),
+    do: {:error, Error.new(:invalid_argument, "Choose force or force_with_lease, not both")}
+
+  defp validate_push_force(_force?, _lease_args), do: :ok
+
+  defp push_branch_args(_repository, nil, nil), do: {:ok, []}
+
+  defp push_branch_args(repository, branch, nil) do
     with {:ok, branch} <- find_branch(repository, branch, :local) do
       {:ok, ["refs/heads/#{branch.name}"]}
+    end
+  end
+
+  defp push_branch_args(repository, branch, destination) do
+    with {:ok, branch} <- find_branch(repository, branch, :local),
+         {:ok, destination} <- validate_branch_name(repository, destination) do
+      {:ok, ["refs/heads/#{branch.name}:refs/heads/#{destination}"]}
     end
   end
 

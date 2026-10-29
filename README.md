@@ -10,7 +10,9 @@ account.
 - **HTTP Client:** Send requests, inspect responses, import or export curl
   commands, and search saved request history.
 - **Git GUI:** Browse commits and diffs, manage branches and stashes, and work
-  with the staging area across multiple repositories.
+  with the staging area across multiple repositories. Push prompts offer upstream
+  setup, destination selection, or force retries when needed, with an option to
+  abort. Force with lease protects the remote state shown when the prompt opened.
 - **Diagrams:** Sketch boxes, ellipses, diamonds and arrows, and write on any of
   them or anywhere on the canvas. Tables of typed rows can be related row to
   row, for data models. Every diagram is kept, and search finds a word wherever

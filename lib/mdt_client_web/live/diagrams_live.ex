@@ -504,111 +504,125 @@ defmodule MDTClientWeb.DiagramsLive do
         </div>
       </div>
 
-      <div
+      <details
         id="diagram-style"
         data-role="style-panel"
         hidden
-        class={[floating_class(), "absolute right-3 top-3 z-10 w-52 space-y-2.5 p-2.5"]}
+        class={[floating_class(), "group/style absolute right-3 top-3 z-10 open:w-52"]}
       >
-        <.style_row label="Color" row="color">
-          <div class="flex flex-wrap gap-1.5">
+        <summary
+          id="diagram-style-toggle"
+          class="flex cursor-pointer list-none items-center gap-2 rounded-xl px-2.5 py-2 text-xs font-medium text-muted transition-colors hover:bg-hover hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent [&::-webkit-details-marker]:hidden"
+        >
+          <.icon name="hero-swatch" class="size-3.5" />
+          <span class="flex-1">Style</span>
+          <.icon
+            name="hero-chevron-down"
+            class="size-3 text-faint transition-transform group-open/style:rotate-180"
+          />
+        </summary>
+
+        <div id="diagram-style-content" class="space-y-2.5 border-t border-line-soft p-2.5">
+          <.style_row label="Color" row="color">
+            <div class="flex flex-wrap gap-1.5">
+              <button
+                :for={{color, name, swatch} <- @colors}
+                type="button"
+                data-style="color"
+                data-value={color}
+                title={name}
+                aria-label={name}
+                class={[
+                  "size-6 cursor-pointer rounded-md ring-offset-2 ring-offset-panel transition-transform hover:scale-110",
+                  "data-[active]:ring-2 data-[active]:ring-accent",
+                  swatch
+                ]}
+              ></button>
+            </div>
+          </.style_row>
+
+          <.style_row label="Fill" row="fill">
+            <.segment style="fill" value="none" label="No fill">
+              <.glyph name="fill-none" />
+            </.segment>
+            <.segment style="fill" value="tint" label="Tinted fill">
+              <.glyph name="fill-tint" />
+            </.segment>
+          </.style_row>
+
+          <.style_row label="Outline" row="stroke">
+            <.segment style="stroke" value="solid" label="Solid">
+              <.glyph name="stroke-solid" />
+            </.segment>
+            <.segment style="stroke" value="dashed" label="Dashed">
+              <.glyph name="stroke-dashed" />
+            </.segment>
+          </.style_row>
+
+          <.style_row label="Arrow heads" row="head">
+            <.segment style="head" value="none" label="No heads, a plain line">
+              <.glyph name="head-none" />
+            </.segment>
+            <.segment style="head" value="end" label="A head at the end">
+              <.glyph name="head-end" />
+            </.segment>
+            <.segment style="head" value="both" label="A head at each end">
+              <.glyph name="head-both" />
+            </.segment>
+          </.style_row>
+
+          <.style_row label="Text size" row="size">
+            <.segment
+              :for={{size, label} <- [{"s", "S"}, {"m", "M"}, {"l", "L"}]}
+              style="size"
+              value={size}
+              label={"Text size #{label}"}
+            >
+              <span class="text-[11px] font-semibold">{label}</span>
+            </.segment>
+          </.style_row>
+
+          <div data-row="actions" class="flex items-center gap-1 border-t border-line-soft pt-2">
             <button
-              :for={{color, name, swatch} <- @colors}
               type="button"
-              data-style="color"
-              data-value={color}
-              title={name}
-              aria-label={name}
-              class={[
-                "size-6 cursor-pointer rounded-md ring-offset-2 ring-offset-panel transition-transform hover:scale-110",
-                "data-[active]:ring-2 data-[active]:ring-accent",
-                swatch
-              ]}
-            ></button>
+              data-action="front"
+              title="Bring to front"
+              aria-label="Bring to front"
+              class={control_class()}
+            >
+              <.icon name="hero-bars-arrow-up" class="size-3.5" />
+            </button>
+            <button
+              type="button"
+              data-action="back"
+              title="Send to back"
+              aria-label="Send to back"
+              class={control_class()}
+            >
+              <.icon name="hero-bars-arrow-down" class="size-3.5" />
+            </button>
+            <div class="flex-1"></div>
+            <button
+              type="button"
+              data-action="duplicate"
+              title="Duplicate (Ctrl+D)"
+              aria-label="Duplicate"
+              class={control_class()}
+            >
+              <.icon name="hero-document-duplicate" class="size-3.5" />
+            </button>
+            <button
+              type="button"
+              data-action="delete"
+              title="Delete (Del)"
+              aria-label="Delete"
+              class={[control_class(), "hover:text-bad"]}
+            >
+              <.icon name="hero-trash" class="size-3.5" />
+            </button>
           </div>
-        </.style_row>
-
-        <.style_row label="Fill" row="fill">
-          <.segment style="fill" value="none" label="No fill">
-            <.glyph name="fill-none" />
-          </.segment>
-          <.segment style="fill" value="tint" label="Tinted fill">
-            <.glyph name="fill-tint" />
-          </.segment>
-        </.style_row>
-
-        <.style_row label="Outline" row="stroke">
-          <.segment style="stroke" value="solid" label="Solid">
-            <.glyph name="stroke-solid" />
-          </.segment>
-          <.segment style="stroke" value="dashed" label="Dashed">
-            <.glyph name="stroke-dashed" />
-          </.segment>
-        </.style_row>
-
-        <.style_row label="Arrow heads" row="head">
-          <.segment style="head" value="none" label="No heads, a plain line">
-            <.glyph name="head-none" />
-          </.segment>
-          <.segment style="head" value="end" label="A head at the end">
-            <.glyph name="head-end" />
-          </.segment>
-          <.segment style="head" value="both" label="A head at each end">
-            <.glyph name="head-both" />
-          </.segment>
-        </.style_row>
-
-        <.style_row label="Text size" row="size">
-          <.segment
-            :for={{size, label} <- [{"s", "S"}, {"m", "M"}, {"l", "L"}]}
-            style="size"
-            value={size}
-            label={"Text size #{label}"}
-          >
-            <span class="text-[11px] font-semibold">{label}</span>
-          </.segment>
-        </.style_row>
-
-        <div data-row="actions" class="flex items-center gap-1 border-t border-line-soft pt-2">
-          <button
-            type="button"
-            data-action="front"
-            title="Bring to front"
-            aria-label="Bring to front"
-            class={control_class()}
-          >
-            <.icon name="hero-bars-arrow-up" class="size-3.5" />
-          </button>
-          <button
-            type="button"
-            data-action="back"
-            title="Send to back"
-            aria-label="Send to back"
-            class={control_class()}
-          >
-            <.icon name="hero-bars-arrow-down" class="size-3.5" />
-          </button>
-          <div class="flex-1"></div>
-          <button
-            type="button"
-            data-action="duplicate"
-            title="Duplicate (Ctrl+D)"
-            aria-label="Duplicate"
-            class={control_class()}
-          >
-            <.icon name="hero-document-duplicate" class="size-3.5" />
-          </button>
-          <button
-            type="button"
-            data-action="delete"
-            title="Delete (Del)"
-            aria-label="Delete"
-            class={[control_class(), "hover:text-bad"]}
-          >
-            <.icon name="hero-trash" class="size-3.5" />
-          </button>
         </div>
-      </div>
+      </details>
 
       <button
         type="button"

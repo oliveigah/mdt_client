@@ -225,7 +225,7 @@ export const DiagramEditor = {
     // canvas takes it by hand in pointerDown, a text box opened by that press
     // keeps it, and restyling text being written does not end the writing.
     this.on(this.el, "mousedown", (event) => {
-      if (event.target.closest("button") || this.svg.contains(event.target)) event.preventDefault()
+      if (event.target.closest("button, summary") || this.svg.contains(event.target)) event.preventDefault()
     })
     this.on(this.textEditor, "input", () => this.editorInput())
     this.on(this.textEditor, "keydown", (event) => this.editorKeyDown(event))
