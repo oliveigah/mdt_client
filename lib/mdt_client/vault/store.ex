@@ -18,6 +18,7 @@ defmodule MDTClient.Vault.Store do
   # Started in reverse and closed in order, so the keyring comes up first and
   # goes down last.
   @stores [
+    MDTClient.Sandbox.Channel,
     MDTClient.Sandbox.Egress,
     MDTClient.Sandbox.Server,
     MDTClient.MCP.Access,

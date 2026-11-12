@@ -1,0 +1,143 @@
+#!/usr/bin/env bash
+# mdt: ask MDT, the user's control panel, for access. Written by MDT to
+# /mnt/mdt/bin/mdt. It reaches MDT over vsock (socat), and can only read the
+# grants and ask the user to turn one on. See MDTClient.Sandbox.Channel.
+set -u
+
+channel=${MDT_CHANNEL:-VSOCK-CONNECT:2:5000}
+
+usage() {
+  cat <<'USAGE'
+mdt - ask MDT, the user's control panel, for access
+
+  mdt grants
+      Every grant: its id, what it is for, how to use it, whether it is on.
+
+  mdt request GRANT_ID --reason "what you are about to do" [--minutes 60] [--wait 60]
+      Ask the user to turn a grant on (by id or name). Waits up to --wait
+      seconds (60 by default, 0 not at all) for their answer.
+
+  mdt request --need "the access, and the service or host" --reason "why" [--minutes 60]
+      Ask for access no grant gives yet. The user sets it up.
+
+  mdt wait ASK_ID [--wait 60]
+      Keep waiting for the answer to an earlier ask.
+
+Exit status: 0 the grant is on, 1 the ask was wrong, 2 still waiting for the
+user, 3 declined or given up, 4 MDT isn't answering (locked or closed).
+USAGE
+}
+
+# A JSON string: quotes, backslashes and control characters escaped.
+json() {
+  local s=$1
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  s=${s//$'\n'/\\n}
+  s=${s//$'\r'/\\r}
+  s=${s//$'\t'/\\t}
+  s=$(printf '%s' "$s" | LC_ALL=C tr -d '\001-\010\013\014\016-\037')
+  printf '"%s"' "$s"
+}
+
+number() {
+  case $2 in
+    '' | *[!0-9]*)
+      echo "mdt: $1 takes a whole number" >&2
+      exit 1
+      ;;
+  esac
+  printf '%s' "$2"
+}
+
+# Which agent is asking, from the processes above this one; a claim, shown
+# to the user as such. MDT_AGENT overrides it.
+agent() {
+  if [ -n "${MDT_AGENT:-}" ]; then
+    printf '%s' "$MDT_AGENT"
+    return
+  fi
+  local pid=$PPID comm _
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
+    [ "$pid" -gt 1 ] 2>/dev/null || break
+    comm=$(cat "/proc/$pid/comm" 2>/dev/null) || break
+    case $comm in
+      claude* | codex* | gemini* | aider* | opencode* | goose* | cursor* | amp* | zed*)
+        printf '%s' "$comm"
+        return
+        ;;
+    esac
+    pid=$(sed -n 's/^PPid:[[:space:]]*//p' "/proc/$pid/status" 2>/dev/null)
+  done
+  printf 'an agent'
+}
+
+send() {
+  if ! command -v socat >/dev/null 2>&1; then
+    echo "mdt: socat is missing from this VM's image, so MDT can't be reached. Tell the user." >&2
+    exit 4
+  fi
+  local reply status
+  # ignoreeof: the ask stays open until MDT answers and closes.
+  reply=$(printf '%s\n' "$1" | socat -t 1 -,ignoreeof "$channel" 2>/dev/null)
+  if [ -z "$reply" ]; then
+    echo "mdt: MDT isn't answering. It may be locked or closed: tell the user." >&2
+    exit 4
+  fi
+  status=${reply%%$'\n'*}
+  printf '%s\n' "${reply#*$'\n'}"
+  case $status in
+    0 | 1 | 2 | 3 | 4) exit "$status" ;;
+    *) exit 1 ;;
+  esac
+}
+
+command=${1:-help}
+[ $# -gt 0 ] && shift
+
+grant="" need="" reason="" minutes=60 wait=60 id=""
+while [ $# -gt 0 ]; do
+  case $1 in
+    --reason) reason=${2-}; shift 2 || shift ;;
+    --reason=*) reason=${1#*=}; shift ;;
+    --need) need=${2-}; shift 2 || shift ;;
+    --need=*) need=${1#*=}; shift ;;
+    --minutes) minutes=$(number --minutes "${2-}") || exit 1; shift 2 || shift ;;
+    --minutes=*) minutes=$(number --minutes "${1#*=}") || exit 1; shift ;;
+    --wait) wait=$(number --wait "${2-}") || exit 1; shift 2 || shift ;;
+    --wait=*) wait=$(number --wait "${1#*=}") || exit 1; shift ;;
+    -h | --help) usage; exit 0 ;;
+    -*) echo "mdt: unknown option $1" >&2; exit 1 ;;
+    *)
+      if [ "$command" = wait ]; then id=$1; else grant=$1; fi
+      shift
+      ;;
+  esac
+done
+
+case $command in
+  grants | list)
+    send '{"command":"grants"}'
+    ;;
+  request | ask)
+    if [ -z "$grant" ] && [ -z "$need" ]; then
+      echo "mdt: name a grant, or describe a --need. See: mdt help" >&2
+      exit 1
+    fi
+    send "{\"command\":\"request\",\"grant\":$(json "$grant"),\"need\":$(json "$need"),\"reason\":$(json "$reason"),\"minutes\":$minutes,\"wait\":$wait,\"agent\":$(json "$(agent)")}"
+    ;;
+  wait)
+    if [ -z "$id" ]; then
+      echo "mdt: wait needs the ask's id. See: mdt help" >&2
+      exit 1
+    fi
+    send "{\"command\":\"wait\",\"id\":$(json "$id"),\"wait\":$wait}"
+    ;;
+  help | -h | --help)
+    usage
+    ;;
+  *)
+    echo "mdt: unknown command $command. See: mdt help" >&2
+    exit 1
+    ;;
+esac

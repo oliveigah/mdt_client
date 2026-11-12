@@ -2,13 +2,18 @@
 
 Status (2026-11-12): the first slice is built and was tried live with a real
 VM: the image build, the VM's lifecycle, the egress proxy (tunnels, TLS
-interception, placeholder swaps, approvals), credential and network grants
-with values in the vault, and every screen. Not built yet: the agent channel
-(agents asking for grants), host commands, export, and the live VPN check.
-See [Built so far](#built-so-far) and [Next](#next).
+interception, placeholder swaps, approvals), grants with values in the
+vault, and every screen. Not built yet: host commands, export, and the live
+VPN check. See [Built so far](#built-so-far) and [Next](#next).
 
 Built and tried live (2026-11-12): the image and the VM's state. See
 [Image and VM state](#image-and-vm-state).
+
+Built later on 2026-11-12: generic grant types with presets, every use
+approved, agents asking through the `mdt` command, and the full request on
+approvals. See [Grants and approvals](#grants-and-approvals). The `mdt`
+command was checked over a real VM's vsock; a VM created before this needs
+recreating to get the channel.
 
 ## What it is for
 
@@ -55,6 +60,12 @@ folders with it, and sits between it and the network.
 | 2026-11-12 | The VM's OptMem can start from a copy of yours. Its new memories come back only through a list you review.                                                       |
 | 2026-11-12 | Agents in the VM are told that access comes only from MDT grants, and to name the grant they need instead of following a tool's usual login steps.               |
 | 2026-11-12 | Export is designed later.                                                                                                                                        |
+| 2026-11-12 | Grants have three generic types: token, network, file. Presets (GitHub, Hex, Google Cloud, database tunnel) only fill the form. Supersedes recipes.             |
+| 2026-11-12 | Every grant says what it is for, in your words. Agents read it to find the grant they need.                                                                      |
+| 2026-11-12 | Every use of a grant waits for your approval. Rules are gone; the shortcuts are allowances: uses like one you approved, or every use, for a while.               |
+| 2026-11-12 | Two types of approval in one queue: agents asking for a grant (activation), and uses of a grant (requests, connections).                                         |
+| 2026-11-12 | Agents ask with the `mdt` command over vsock, not MCP: any agent or script can run it with no setup. MCP can come later on the same socket.                      |
+| 2026-11-12 | A held request shows in full (headers, body) and copies as curl, as HTTP or just its body. It stays in memory only.                                              |
 
 ## Built so far
 
@@ -64,10 +75,12 @@ folders with it, and sits between it and the network.
 | Proxy                | `MDTClient.Sandbox.Egress`, `…Egress.Connection` | One listener per identity on the settings port. Tunnels, intercepts hosts a credential grant lists, one request per connection. Scrubs real values out of response headers.                               |
 | CA                   | `MDTClient.Sandbox.CertificateAuthority`         | `:public_key` only. Passes `openssl verify -x509_strict`.                                                                                                                                                 |
 | Destinations         | `MDTClient.Sandbox.Destinations`                 | Refused, private, public; network grant syntax `ADDRESS[:PORTS]`.                                                                                                                                         |
-| Describing requests  | `MDTClient.Sandbox.Describe`                     | Tags for rules (`read`, `write`, `git_fetch`, `git_push`, `graphql_query`, `graphql_mutation`), facts, the agent's claims, the "allow similar" pattern.                                                   |
-| VM                   | `MDTClient.Sandbox.Msb`                          | `msb create --replace --proxy … --net public,private`, one `--volume` per share, `/mnt/mdt` read-only, the VM's OptMem, placeholders as `--env`. Stopped when the identity locks or MDT quits gracefully. |
+| Describing requests  | `MDTClient.Sandbox.Describe`                     | Facts (git ref updates, GraphQL operation, REST endpoint), the agent's claims, the "allow similar" pattern. It decides nothing.                                                                           |
+| Showing requests     | `MDTClient.Sandbox.RequestView`                  | Headers with placeholders named, bodies decoded (JSON, GraphQL, form, git pkt-lines, text, hex), curl and raw HTTP with `$VARIABLE` for the placeholder.                                                 |
+| Agent channel        | `MDTClient.Sandbox.Channel`                      | A Unix socket per identity, joined to the VM's vsock port 5000. Speaks the `mdt` command's one-line protocol.                                                                                            |
+| VM                   | `MDTClient.Sandbox.Msb`                          | `msb create --replace --proxy … --net public,private --vsock …`, one `--volume` per share, `/mnt/mdt` read-only, the VM's OptMem, placeholders as `--env`. Stopped when the identity locks or MDT quits.   |
 | Image                | `MDTClient.Sandbox.Image`                        | See [The image](#the-image).                                                                                                                                                                              |
-| Inbox                | `MDTClient.Sandbox.Inbox`                        | `/mnt/mdt/env.sh`, `git/<host>` for the credential helper, `tokens/<grant>` for gcloud, `files/` for file grants that are on.                                                                             |
+| Inbox                | `MDTClient.Sandbox.Inbox`                        | `/mnt/mdt/env.sh`, `bin/mdt`, `git/<host>` for the credential helper, `tokens/<grant>` for every token grant, `files/` for file grants that are on.                                                       |
 
 Tried live on 2026-11-12: build, create, lock (VM stopped), unlock, start;
 inside the VM `gh api user` went out with the swapped value, git's helper
@@ -88,27 +101,23 @@ less than the VM: install scripts in your Containerfile run there.
 
 ### Setting up each kind of credential
 
-Each recipe carries a short guide, shown when adding a grant. The general
-rule: keep the long-lived credential on the host, give MDT something it can
-put on the wire, and give the VM only a placeholder.
+Each type and preset carries a short guide, shown when adding a grant. The
+general rule: keep the long-lived credential on the host, give MDT something
+it can put on the wire, and give the VM only a placeholder.
 
 | You have                                                                   | Grant                           | How                                                                                                                                                                                                                                                                      |
 | -------------------------------------------------------------------------- | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| A token or API key                                                         | stored (GitHub, Hex, API token) | Paste it once; it lives in your vault.                                                                                                                                                                                                                                   |
-| A CLI login on the host (`gcloud auth login`, `gh auth login`, `az login`) | minted                          | The grant holds a command that prints a short-lived token, run on the host when needed (`gcloud auth print-access-token`, `gh auth token`, `az account get-access-token --query accessToken -o tsv`). The login never leaves the host; tokens are cached for 10 minutes. |
+| A token or API key                                                         | token, stored                   | Paste it once; it lives in your vault.                                                                                                                                                                                                                                   |
+| A CLI login on the host (`gcloud auth login`, `gh auth login`, `az login`) | token, minted                   | The grant holds a command that prints a short-lived token, run on the host when needed (`gcloud auth print-access-token`, `gh auth token`, `az account get-access-token --query accessToken -o tsv`). The login never leaves the host; tokens are cached for 10 minutes. |
 | Something only reachable from here (VPN, a database through a tunnel)      | network                         | List the destinations; for a database, run the tunnel on the host and list its exact address.                                                                                                                                                                            |
 | Something a tool must read itself (signing keys, client certificates)      | file                            | Last resort, labelled: the VM holds the value while the grant is on.                                                                                                                                                                                                     |
 | Something none of these covers                                             | host command (next)             | Run one command on the host, with your approval each time.                                                                                                                                                                                                               |
 
-The same guides are what the agent channel will offer agents, so an agent in
-the VM can tell you which grant it needs and how to set it up.
+Agents in the VM don't see the guides. They see each grant's own words for
+what it is for (`mdt grants`), and describe what's missing in their own
+(`mdt request --need`).
 
 ## Next
-
-### Agent channel
-
-As designed above: a vsock socket, an MCP server with `list_grants`,
-`request_grant` and `list_recipes` (the guides).
 
 ### Host commands
 
@@ -125,7 +134,7 @@ secrets included, so the card says so, and long output is cut.
 
 ### Export
 
-Grants (not values, unless you ask), rules, settings and the VM's OptMem
+Grants (not values, unless you ask), settings and the VM's OptMem
 belong in `.mdtexport`. Open: whether values travel at all, and how a CA moves
 (a new CA means a rebuilt image).
 
@@ -137,12 +146,12 @@ VM ──all TCP──▶ msb ──HTTP CONNECT ip:port──▶ MDT egress pro
                                                ├─ loopback, link-local, host's own addresses → deny
                                                ├─ private ranges (VPN, LAN) → deny unless a network grant is on
                                                ├─ TLS to a host with an HTTP grant → intercept
-                                               │     read request → placeholder? → rules → approve → swap → forward
+                                               │     read request → placeholder? → allowance or approve → swap → forward
                                                └─ anything else → blind byte tunnel (log host, bytes, duration)
 
-VM ──vsock──▶ ~/.mdt_client/<id>/sandbox/agent.sock ──▶ agent channel (list_grants, request_grant)
+VM ──vsock:5000──▶ $XDG_RUNTIME_DIR/mdt/mdt-sandbox-<id>.sock ──▶ agent channel (`mdt grants`, `mdt request`, `mdt wait`)
 
-/mnt/mdt (read-only, from host): CA certificate, placeholder env file, git credential helper, file grants
+/mnt/mdt (read-only, from host): CA certificate, placeholder env file, the `mdt` command, git credential helper, file grants
 /root/.optmem (read-write, from host): the VM's own OptMem
 ```
 
@@ -154,20 +163,35 @@ proxy, microsandbox blocks UDP other than DNS, so HTTP/3 cannot go around the
 proxy. DNS goes to microsandbox's resolver, which forwards to the host's
 systemd-resolved.
 
+<a id="grants-and-approvals"></a>
+
 ## Grant kinds
 
-A grant is one credential or one piece of network access you can turn on and
-off.
+A grant is one piece of access you can turn on and off. It has one of three
+generic types, none tied to a provider, and your own words for what it is
+for, which agents read to find the grant they need.
 
-| Kind      | What the VM gets                                       | Approval       | Turning it off                                                                |
-| --------- | ------------------------------------------------------ | -------------- | ----------------------------------------------------------------------------- |
-| `http`    | A placeholder. MDT swaps in the real value.            | Per request    | Takes effect on the next request. Complete, since the VM never had the value. |
-| `network` | Reachability to listed hosts, address ranges and ports | Per connection | New connections refused, open ones closed                                     |
-| `file`    | The real value, as a file in `/mnt/mdt/files`          | None possible  | File deleted. **Copies survive.** Only expiry at the provider ends it.        |
+| Type      | What the VM gets                                                                   | Approval       | Turning it off                                                                |
+| --------- | ---------------------------------------------------------------------------------- | -------------- | ----------------------------------------------------------------------------- |
+| `token`   | A placeholder, in variables, in a token file, and as git's password if you choose. | Per request    | Takes effect on the next request. Complete, since the VM never had the value. |
+| `network` | Reachability to listed hosts, address ranges and ports                             | Per connection | New connections refused, open ones closed                                     |
+| `file`    | The real value, as a file in `/mnt/mdt/files`                                      | None possible  | File deleted. **Copies survive.** Only expiry at the provider ends it.        |
 
-Later kinds, which also keep the value on the host: `resign` (AWS SigV4: the VM
-signs with dummy keys, MDT re-signs) and `signing` (an SSH agent over vsock,
-approval per signature).
+A token grant names:
+
+- the **hosts** the value may go to. MDT swaps the placeholder in any header
+  of a request to one of them, Basic credentials included;
+- **variables** holding the placeholder (`GH_TOKEN`), and variables naming
+  the **token file** that holds it (`CLOUDSDK_AUTH_ACCESS_TOKEN_FILE`). The
+  file, `/mnt/mdt/tokens/<grant>`, is always there;
+- whether **git** over HTTPS gets it, from MDT's credential helper, for its
+  exact hosts;
+- how the placeholder **starts** (`ghp_`, `sk-`), for clients that check
+  the format.
+
+Later types, which also keep the value on the host: `resign` (AWS SigV4: the
+VM signs with dummy keys, MDT re-signs) and `signing` (an SSH agent over
+vsock, approval per signature).
 
 ### Where real values come from
 
@@ -177,61 +201,78 @@ approval per signature).
 --lifetime=1800s`. MDT caches it until shortly before it expires. Prefer
   this: the long-lived credential never leaves your host tools.
 
-### Recipes
+### Presets
 
-When you add a grant, you pick what it is. The recipe fills in the safest
-delivery and default rules. You can edit everything afterwards.
+When you add a grant, you pick its type, or a preset for a tool whose
+details are known. A preset only fills the form; what it makes is a plain
+grant you can edit, and nothing in MDT looks at the preset again except for
+its icon.
 
-| Recipe               | Kind                                                                        | VM side                                                                          | Hosts                                                | Swapped in                                                                             |
-| -------------------- | --------------------------------------------------------------------------- | -------------------------------------------------------------------------------- | ---------------------------------------------------- | -------------------------------------------------------------------------------------- |
-| GitHub token         | `http`                                                                      | `GITHUB_TOKEN`, `GH_TOKEN`, and a git credential helper for `https://github.com` | `api.github.com`, `github.com`, `uploads.github.com` | `Authorization` bearer/token (`gh` sends `token`), and the password inside Basic (git) |
-| Hex API key          | `http`                                                                      | `HEX_API_KEY`                                                                    | `hex.pm`, `repo.hex.pm`                              | `Authorization` (the whole value, no scheme)                                           |
-| Google Cloud         | `http`, minted                                                              | `CLOUDSDK_AUTH_ACCESS_TOKEN_FILE` pointing at a placeholder                      | `*.googleapis.com`                                   | `Authorization` bearer                                                                 |
-| Generic API token    | `http`                                                                      | an env var you name                                                              | hosts you list                                       | a header you name                                                                      |
-| Network access (VPN) | `network`                                                                   | nothing                                                                          | address ranges, hostnames, ports                     | —                                                                                      |
-| Database             | `network` to a tunnel on the host (e.g. `cloud-sql-proxy --auto-iam-authn`) | nothing                                                                          | the tunnel                                           | —                                                                                      |
-| File                 | `file`                                                                      | the value at a path                                                              | —                                                    | —                                                                                      |
+| Preset          | Type                                                                          | VM side                                                       | Hosts                                                |
+| --------------- | ----------------------------------------------------------------------------- | ------------------------------------------------------------- | ---------------------------------------------------- |
+| GitHub          | `token`, placeholder `ghp_…`                                                  | `GITHUB_TOKEN`, `GH_TOKEN`, git's credential helper           | `api.github.com`, `github.com`, `uploads.github.com` |
+| Hex             | `token`                                                                       | `HEX_API_KEY`                                                 | `hex.pm`, `repo.hex.pm`                              |
+| Google Cloud    | `token`, minted (`gcloud auth print-access-token`), placeholder `ya29.mdt…`   | `CLOUDSDK_AUTH_ACCESS_TOKEN_FILE` naming the token file       | `*.googleapis.com`                                   |
+| Database tunnel | `network` to a tunnel on the host (e.g. `cloud-sql-proxy --auto-iam-authn`)   | nothing                                                       | `127.0.0.1:5433`                                     |
 
-Placeholders look like the real thing (`ghp_` plus random characters for
-GitHub), because some clients check the format. Each grant's placeholder is
-created once and never changes.
+Placeholders look like the real thing where a preset says so, because some
+clients check the format. Each grant's placeholder is created once and
+never changes.
+
+Grants saved before types existed are brought up to date when MDT loads
+them: `http` becomes `token`, the recipe becomes the preset, Google's token
+file variable moves to the token file variables, GitHub's grants answer git.
+Their rules are dropped, so uses that went through silently now ask.
 
 ## Data model
 
 ```elixir
 %Grant{
-  id: "g_7f3a",
+  id: "github-personal",
   name: "GitHub (personal)",
-  recipe: :github,
-  kind: :http,                       # :http | :network | :file
+  kind: :token,                      # :token | :network | :file
+  preset: :github,                   # its icon; nothing else depends on it
+  purpose: "Push to oliveigah/klife and open PRs there",
   state: :on,                        # :on | :off
   expires_at: ~U[2026-11-11 21:30:00Z],  # nil = until turned off
 
-  # :http
-  env: ["GITHUB_TOKEN", "GH_TOKEN"],
+  # :token
   placeholder: "ghp_mdtQ9…",
   hosts: ["api.github.com", "github.com", "uploads.github.com"],
-  carriers: [{:header, "authorization", [:bearer, :token, :basic_password]}],
-  source: {:stored, "vault:grant:g_7f3a"},   # or {:minted, command, lifetime}
-  rules: [%Rule{}],
-  default_action: :ask,              # applies when no rule matches
+  env: ["GITHUB_TOKEN", "GH_TOKEN"],
+  file_env: [],                      # variables naming /mnt/mdt/tokens/<id>
+  git: true,
+  source: :stored,                   # or {:minted, command}
 
   # :network
-  destinations: [%{match: "10.20.0.0/16", ports: [443, 5432]}],
-  per_connection: :ask,              # :allow | :ask
+  destinations: ["10.20.0.0/16:443,5432"],
 
   # :file
-  path: "/mnt/mdt/files/kubeconfig"
+  path: "/mnt/mdt/files/kubeconfig",
+
+  # :token and :network
+  allowances: [%Allowance{}]
 }
 
-%Rule{
-  match: %{methods: ["GET", "HEAD"], paths: ["/**"], facts: %{}},
-  action: :allow                     # :allow | :ask | :deny
+%Allowance{
+  pattern: :all,                     # every use, or "POST github.com/o/r.git/git-receive-pack"
+  until: ~U[2026-11-11 21:00:00Z]    # nil = while the grant stays on
+}
+
+%Approval{
+  kind: :activation,                 # :activation | :request | :connection
+  grant_id: "github-personal",       # nil for an ask no grant meets yet
+  agent: "claude", minutes: 60, reason: "…", need: nil,   # activations
+  request: %{method: …, headers: …, body: …},             # requests, in memory only
+  facts: […], claims: […], pattern: "…",
+  status: :waiting,                  # :waiting | :allowed | :denied | :timed_out
+  decision: nil
 }
 ```
 
-Changing a grant's state, rules or value never restarts the VM. Adding a new
-`http` grant writes its placeholder to `/mnt/mdt/env.sh`, which new shells read.
+Changing a grant's state, allowances or value never restarts the VM. Adding
+a new token grant writes its placeholder to `/mnt/mdt/env.sh`, which new
+shells read.
 
 ## Proxy
 
@@ -246,14 +287,14 @@ itself, so MDT gets an IP, not a hostname.
    reaches anything on the host that listens on all interfaces. The check
    reached a test server on the host's LAN address through the proxy.
    A denied CONNECT reaches the VM as a plain "connection refused", with no
-   message. Agents learn why from `list_grants`.
+   message. Agents learn why from `mdt grants`.
 2. **Private ranges** (RFC 1918, ULA, `100.64.0.0/10`): allowed only when an
    `on` network grant matches the IP and port. Grant hostnames are resolved
-   with the host's DNS, which knows VPN names. With `per_connection: :ask`,
-   the connection waits for approval.
+   with the host's DNS, which knows VPN names. The connection waits for
+   approval unless an allowance covers its address and port.
 3. **Peek** at the first bytes. For a TLS ClientHello, read the hostname
    (SNI).
-4. If the hostname belongs to **any registered `http` grant, on or off**,
+4. If the hostname belongs to **any registered token grant, on or off**,
    intercept. Off grants are intercepted too, so the agent gets a clear answer
    instead of an auth failure from the provider.
 5. Otherwise, **tunnel** bytes both ways without reading them.
@@ -272,9 +313,9 @@ itself, so MDT gets an IP, not a hostname.
    host is worth knowing about.
 5. No placeholder: forward unchanged.
 6. Placeholder, grant off or expired: reply `403` with
-   `{"code": "mdt_grant_off", "grant": "...", "hint": "request_grant"}`.
-7. Placeholder, grant on: describe the request, apply the rules → allow, deny
-   or ask.
+   `{"code": "mdt_grant_off", "grant": "...", "error": "... mdt request <id> ..."}`.
+7. Placeholder, grant on: describe the request. An allowance covering it
+   lets it through; otherwise it asks.
     - **Ask** holds the request. MDT reads the head plus the first few KB of the
       body (enough to describe it), then stops reading until you decide. TCP
       flow control makes the client wait, so a large upload is not buffered.
@@ -312,17 +353,32 @@ An approval shows facts MDT worked out, not what the agent says.
 Text the agent wrote (commit messages, PR bodies, a stated reason) is shown in
 a separate, labeled area. It is a claim, never a fact.
 
-### Default rules
+### Approvals
 
-| Recipe       | Allowed and logged                              | Asks                                      |
-| ------------ | ----------------------------------------------- | ----------------------------------------- |
-| GitHub       | `GET`, `HEAD`, git fetch/clone, GraphQL queries | git push, GraphQL mutations, other writes |
-| Hex          | `GET`                                           | everything else                           |
-| Google Cloud | `GET`                                           | everything else                           |
-| Generic      | —                                               | everything                                |
+Every use of a grant waits for you: each request carrying a token grant's
+placeholder, and each connection through a network grant. There are no
+rules deciding by method or path; what a request does depends on the API,
+and guessing that per provider doesn't generalize. Shortcuts are
+allowances, which you add on purpose:
 
-Your choices on an approval card: allow once, allow requests matching this
-rule for N minutes, deny once, deny and turn the grant off.
+- **Allow similar** - uses like this one (same method and endpoint, the
+  same GraphQL operation, the same address and port), for 10 minutes, 1 hour
+  or while the grant stays on;
+- **Allow every use** - everything the grant covers, for as long. Also
+  offered when you turn a grant on for an agent, and on the grant's page.
+
+Your choices on a use: allow once, allow similar for…, allow every use
+for…, deny, deny and turn the grant off.
+
+Agents asking for a grant are approvals too (activations), in the same
+queue. You choose how long it stays on and whether each use still asks.
+See [Agent channel](#agent-channel).
+
+A held request shows in full, as MDT received it: the request line, every
+header with placeholders shown as their grant's name, and up to 64 KiB of
+body, decoded. It copies as curl (with `$GH_TOKEN` in place of the
+placeholder, so it runs with your own token), as HTTP, or just the body.
+It is kept in memory, never written to disk.
 
 ## Image and VM state
 
@@ -513,34 +569,58 @@ left alone. The same text is at `/mnt/mdt/AGENTS.md`. It says:
 
 - Access comes only from MDT grants. Agents run no login commands, ask for
   no pasted tokens, and write no tokens into files or variables. When access
-  is missing, they name the grant for you to add or turn on in MDT.
+  is missing, they find the grant with `mdt grants` and ask with
+  `mdt request`, or describe what's missing with `--need`.
+- Even with a grant on, each use waits for your approval.
 - What MDT's answers mean: the `mdt_*` error codes, and requests held for
   your approval.
-- `/mnt/mdt/grants.md`, rewritten on every change, lists the grants and
-  their state.
+- `/mnt/mdt/grants.md`, rewritten on every change, holds what `mdt grants`
+  prints: each grant's id, what it is for, how to use it, and its state.
 - The OptMem block.
 - mise: run `mise install` in a project first.
 
 ## Agent channel
 
-MDT listens on a Unix socket connected to the VM through vsock
-(`--vsock <socket>:5000`). The VM has no network route to the host. Inside the
-VM, agents use it as a stdio MCP server: `socat - VSOCK-CONNECT:2:5000`.
-Microsandbox opens the host socket for each connection. So when MDT restarts,
-the channel works again without touching the VM. While MDT is down, the VM
-gets "connection reset".
+MDT listens on a Unix socket per identity,
+`$XDG_RUNTIME_DIR/mdt/mdt-sandbox-<id>.sock` (Unix socket paths are short,
+so not the identity's folder), which `msb create --vsock <socket>:5000`
+joins to the VM's vsock port 5000. The VM has no network route to the host.
+Microsandbox opens the socket for each connection, so when MDT restarts,
+the channel works again without touching the VM. While MDT is locked or
+closed, the VM gets "connection refused".
 
-This is a separate MCP server from the existing one, built on the same
-`MDTClient.MCP.Protocol` code, with only two tools:
+Agents use it through `/mnt/mdt/bin/mdt`, a Bash script that talks with
+socat (in the default image). It is on every shell's `PATH`. No agent needs
+setting up: any agent or script that runs commands can use it.
 
-- `list_grants`: name, kind, state, expiry, env vars, hosts, a summary of the
-  rules. Never values.
-- `request_grant(name | need, minutes, reason)`: asks for an existing grant
-  to be turned on, or describes a credential that does not exist yet. It
-  waits up to 2 minutes for your answer, then returns `pending`.
+```
+mdt grants                                   every grant: id, what it is for, how to use it, state
+mdt request GRANT --reason "…" [--minutes 60] [--wait 60]
+mdt request --need "the access, and the host" --reason "…"
+mdt wait ASK_ID [--wait 60]
+```
 
-Requests are rate-limited. Any process in the VM can call these; that is
-accepted, since all they can do is ask.
+- `request` asks you to turn a grant on, by id or name. It shows as an
+  activation approval with the agent's reason, marked unverified, and who
+  asked (read from the processes above `mdt`, so also a claim).
+- It waits up to `--wait` seconds (60 by default) for your answer. Then it
+  says the ask is still waiting, with its id, and exits 2; the agent can
+  come back with `mdt wait`. The ask itself stays 30 minutes.
+- An ask for a grant that doesn't exist yet (`--need`) offers "Set it up…",
+  which opens the add dialog; the new grant answers it and turns on.
+- Asking again for the same grant joins the waiting ask. At most ten asks
+  wait at once.
+- Turning the grant on yourself answers agents waiting for it.
+- Exit statuses: 0 the grant is on, 1 the ask was wrong, 2 still waiting,
+  3 declined or given up, 4 MDT isn't answering.
+
+The protocol is one line of JSON in (`{"command": "request", ...}`), and
+the exit status on the first line back, then text, then close. Any process
+in the VM can ask; that is accepted, since all it can do is ask.
+
+Checked on 2026-11-12 with a throwaway VM from the current image: socat
+over msb's vsock held an ask for 75 s and got the answer and exit status;
+with nothing listening, or no socket, `mdt` exits 4 at once.
 
 ## VM
 
@@ -560,7 +640,7 @@ accepted, since all they can do is ask.
     - the read-only `/mnt/mdt`;
     - the OptMem folder;
     - Home at `/root` and Cache at `/cache`;
-    - `--vsock`;
+    - `--vsock` for the agent channel;
     - CPU and memory limits.
 - **Nothing in the root filesystem is kept.** `msb modify` cannot change
   mounts, the proxy, vsock or network settings. Changing any of them means
@@ -701,7 +781,7 @@ are gitignored. Upstream code:
 
 Everything belongs to the signed-in identity:
 
-- **Encrypted, like other MDT data:** grants, stored values, rules, VM
+- **Encrypted, like other MDT data:** grants, stored values, allowances, VM
   settings, MDT's CA key, the activity log.
 - **Plaintext, readable by the VM:** `/mnt/mdt` (holds no real values except
   file grants), the VM's OptMem, Home and Cache. Home holds the VM's own
@@ -722,15 +802,17 @@ The tool is an entry in `MDTClient.Tools`.
 
 - **Overview:**
     - VM status: start, stop, "recreate to apply";
-    - waiting approvals and agent requests;
+    - waiting approvals of both types;
     - grants that are on, with time left.
 - **Grants:**
-    - the list, each with a switch and duration choices (15 min, 1 h, until
-      turned off);
-    - adding a grant through a recipe;
-    - per grant: rules, last used, its own activity.
-- **Approvals:** waiting cards, with facts and the agent's claims kept apart;
-  history below.
+    - the list, each with what it is for, a switch and duration choices
+      (15 min, 1 h, 4 h, until turned off);
+    - adding a grant: a type, or a preset that fills the form;
+    - per grant: what the VM gets, "allow every use for…", its allowances,
+      its own activity.
+- **Approvals:** waiting cards of both types, with facts and the agent's
+  claims kept apart, and held requests in full with copy buttons; history
+  below.
 - **Activity:** the log, filterable by grant, host and outcome.
 - **Settings:** image, CPU and memory, shared folders, private ranges.
   Changing folders, network or vsock recreates the VM; MDT says so before
@@ -751,18 +833,19 @@ Each has one job. Proposed modules sit under `lib/mdt_client/sandbox/`.
 | `Inbox`                | Writes `/mnt/mdt` atomically: CA certificate, `env.sh`, credential helper, file grants |
 | `CertificateAuthority` | Creates the CA, makes and caches a certificate per host                                |
 | `Grants`               | Grants, their state and expiry; the source of truth                                    |
-| `Recipes`              | Defaults for each recipe                                                               |
+| `Presets`              | The three types and the presets that fill their form                                   |
 | `Credentials`          | Returns the value for a grant: stored or minted, with caching                          |
 | `Egress.Listener`      | Accepts msb's CONNECTs (Thousand Island, already a dependency through Bandit)          |
 | `Egress.Destination`   | Deny, private-range gate, intercept or tunnel                                          |
 | `Egress.Tunnel`        | Moves bytes both ways and counts them                                                  |
 | `Egress.Interceptor`   | TLS, HTTP/1.1, holding, forwarding (Mint, already a dependency)                        |
 | `Egress.Substitution`  | Finds placeholders in carriers and swaps them, including Basic auth                    |
-| `Rules`                | Matches a described request to allow, ask or deny; temporary allowances                |
-| `Describers.*`         | Turn requests into facts, one per provider                                             |
+| `Allowance`            | What goes through without asking, and until when                                       |
+| `Describe`             | Turns requests into facts                                                              |
+| `RequestView`          | Shows a held request in full, and as curl or HTTP to copy                              |
 | `Approvals`            | Waiting requests and connections, timeouts, decisions, PubSub                          |
 | `Activity`             | The append-only log                                                                    |
-| `AgentChannel`         | The vsock MCP server                                                                   |
+| `Channel`              | The vsock socket behind the `mdt` command                                              |
 | `VMMemory`             | The OptMem folder and its Transfer participant                                         |
 
 ## Guarantees to test
@@ -779,7 +862,7 @@ Each has one job. Proposed modules sit under `lib/mdt_client/sandbox/`.
    network grant off closes its open connections.
 6. A locked MDT swaps nothing. A stopped MDT leaves the VM without internet.
 7. Nothing in the VM can reach MDT's web server. The agent channel offers only
-   `list_grants` and `request_grant`.
+   reading the grants (never values) and asking for one.
 8. Nothing in the VM can approve its own requests.
 
 ## Checks (2026-11-11)
@@ -829,6 +912,9 @@ checks used openssl; `:public_key` or the `x509` package are the options).
 
 - `resign` grants (AWS) and `signing` grants (SSH agent with approval per
   signature).
+- The agent channel as an MCP server too, on the same socket.
+- Rules on top of allowances, if asking about every use proves too much:
+  per method or path, or per provider where a describer knows the API.
 - Replacing the real value with the placeholder in response bodies, not only
   headers.
 - Warnings when a picked folder contains likely secrets (`.env`, `*.pem`,

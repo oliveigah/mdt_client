@@ -7,7 +7,7 @@ defmodule MDTClientWeb.SandboxLive do
   The LiveView coordinates and the `MDTClientWeb.SandboxLive.*` modules draw.
   Everything comes from `MDTClient.Sandbox` and is redrawn from its
   broadcasts, so a decision made in one window shows in every other, and
-  timers (grants running out, requests giving up) show as they happen.
+  timers (grants running out, approvals giving up) show as they happen.
   Broadcasts arrive in bursts while the VM is busy, so redraws are coalesced
   to one every `@refresh_every` milliseconds.
   """
@@ -16,7 +16,7 @@ defmodule MDTClientWeb.SandboxLive do
   import MDTClientWeb.SandboxLive.Components
 
   alias MDTClient.Sandbox
-  alias MDTClient.Sandbox.{Event, Recipes, Shares}
+  alias MDTClient.Sandbox.{Event, Presets, RequestView, Shares}
   alias MDTClient.Tools
   alias MDTClientWeb.SandboxLive.{Activity, Approvals, Dialogs, Grants, Overview, Settings}
 
@@ -88,7 +88,7 @@ defmodule MDTClientWeb.SandboxLive do
         <.sidebar
           page={@page}
           vm={@vm}
-          waiting={length(@waiting) + length(@requests)}
+          waiting={length(@waiting)}
           grants_on={Enum.count(@grants, &(&1.state == :on))}
           proxy={@proxy}
           image={@image}
@@ -109,7 +109,6 @@ defmodule MDTClientWeb.SandboxLive do
                   grants={@grants}
                   grant_map={@grant_map}
                   waiting={@waiting}
-                  requests={@requests}
                   recent={@recent}
                   stats={@stats}
                   now={@now}
@@ -117,10 +116,9 @@ defmodule MDTClientWeb.SandboxLive do
               <% :approvals -> %>
                 <Approvals.page
                   waiting={@waiting}
-                  requests={@requests}
                   history={@history}
-                  answered={@answered}
                   grants={@grant_map}
+                  marks={@marks}
                   hold_seconds={@settings.hold_seconds}
                   now={@now}
                 />
@@ -181,7 +179,7 @@ defmodule MDTClientWeb.SandboxLive do
         </div>
       </div>
 
-      <Grants.add_dialog :if={@adding} adding={@adding} requests={@requests} />
+      <Grants.add_dialog :if={@adding} adding={@adding} waiting={@waiting} />
       <.confirm_dialog :if={@confirm} confirm={@confirm} />
       <Dialogs.create
         :if={@create_dialog}
@@ -592,19 +590,14 @@ defmodule MDTClientWeb.SandboxLive do
     {:noreply, refresh(socket)}
   end
 
-  def handle_event("set_rule", %{"id" => id, "rule" => rule, "action" => action}, socket) do
-    {:ok, _grant} = Sandbox.set_rule(socket.assigns.username, id, rule, action(action))
-    {:noreply, refresh(socket)}
-  end
+  def handle_event("allow_all", %{"id" => id, "minutes" => minutes}, socket) do
+    socket =
+      case Sandbox.allow_all(socket.assigns.username, id, allow_minutes(minutes)) do
+        {:ok, _grant} -> socket
+        {:error, :off} -> put_notice(socket, :info, "Turn the grant on first")
+        {:error, :not_found} -> socket
+      end
 
-  def handle_event("set_default", %{"id" => id, "action" => action}, socket) do
-    {:ok, _grant} = Sandbox.set_default(socket.assigns.username, id, action(action))
-    {:noreply, refresh(socket)}
-  end
-
-  def handle_event("set_per_connection", %{"id" => id, "choice" => choice}, socket) do
-    choice = if choice == "allow", do: :allow, else: :ask
-    {:ok, _grant} = Sandbox.set_per_connection(socket.assigns.username, id, choice)
     {:noreply, refresh(socket)}
   end
 
@@ -617,61 +610,60 @@ defmodule MDTClientWeb.SandboxLive do
     decision =
       case decision do
         "allow_once" -> :allow_once
+        "allow_similar" -> {:allow, :similar, allow_minutes(params["minutes"])}
+        "allow_all" -> {:allow, :all, allow_minutes(params["minutes"])}
         "deny" -> :deny
         "deny_and_turn_off" -> :deny_and_turn_off
-        "allow_for" -> {:allow_for, allow_minutes(params["minutes"])}
+        "decline" -> :decline
       end
 
-    socket =
-      case Sandbox.decide(socket.assigns.username, id, decision) do
-        :ok -> socket
-        {:error, :not_waiting} -> put_notice(socket, :info, "That request was already settled")
-      end
-
-    {:noreply, refresh(socket)}
+    {:noreply, socket |> decide(id, decision) |> refresh()}
   end
 
-  def handle_event("answer_request", %{"id" => id, "answer" => answer}, socket) do
-    answer = if answer == "grant", do: {:granted, nil}, else: :decline
-
-    socket =
-      case Sandbox.answer(socket.assigns.username, id, answer) do
-        :ok -> socket
-        {:error, :not_waiting} -> put_notice(socket, :info, "That request was already answered")
-      end
-
-    {:noreply, refresh(socket)}
+  # An agent's ask, answered from its card: for how long, and whether each
+  # use still asks.
+  def handle_event("turn_on_ask", %{"ask" => %{"id" => id} = params}, socket) do
+    minutes = params["minutes"] |> parse_duration() |> to_minutes()
+    uses = if params["uses"] == "all", do: :all, else: :ask
+    {:noreply, socket |> decide(id, {:turn_on, minutes, uses}) |> refresh()}
   end
 
   def handle_event("open_add_grant", params, socket) do
-    {:noreply, assign(socket, :adding, %{step: :recipe, request_id: params["request"]})}
+    {:noreply, assign(socket, :adding, %{step: :pick, approval_id: params["approval"]})}
   end
 
   def handle_event("close_add_grant", _params, socket),
     do: {:noreply, assign(socket, :adding, nil)}
 
   def handle_event("add_grant_back", _params, socket) do
-    {:noreply, update(socket, :adding, &%{step: :recipe, request_id: &1.request_id})}
+    {:noreply, update(socket, :adding, &%{step: :pick, approval_id: &1.approval_id})}
   end
 
-  def handle_event("pick_recipe", %{"recipe" => id}, socket) do
-    {:ok, recipe} = Recipes.find(id)
-    request = Enum.find(socket.assigns.requests, &(&1.id == socket.assigns.adding.request_id))
+  def handle_event("pick_preset", %{"preset" => id}, socket) do
+    {:ok, preset} = Presets.find(id)
 
-    params = %{
-      "name" => (request && request.need |> String.slice(0, 60)) || "",
-      "env" => Enum.join(recipe.env, ", "),
-      "hosts" => Enum.join(recipe.hosts, ", "),
-      "destinations" => Enum.join(recipe.destinations, "\n"),
-      "path" => "",
-      "mint" => if(recipe.source == :minted, do: "gcloud auth print-access-token", else: "")
-    }
+    ask =
+      Enum.find(socket.assigns.waiting, &(&1.id == socket.assigns.adding.approval_id))
+
+    params =
+      Map.merge(
+        %{
+          "name" =>
+            if(ask && ask.need, do: String.slice(ask.need, 0, 60), else: preset_name(preset))
+        },
+        preset.fields
+      )
+
+    params =
+      if ask && ask.need && params["purpose"] in [nil, ""],
+        do: Map.put(params, "purpose", ask.need),
+        else: params
 
     {:noreply,
      update(socket, :adding, fn adding ->
        Map.merge(adding, %{
          step: :details,
-         recipe: recipe,
+         preset: preset,
          form: to_form(params, as: :grant),
          errors: %{}
        })
@@ -687,16 +679,25 @@ defmodule MDTClientWeb.SandboxLive do
 
     case Sandbox.create_grant(username, params) do
       {:ok, grant} ->
-        if request_id = socket.assigns.adding.request_id do
-          :ok = Sandbox.answer(username, request_id, {:granted, grant.id})
-        end
+        socket =
+          case socket.assigns.adding.approval_id do
+            nil ->
+              put_notice(socket, :success, "#{grant.name} added",
+                body:
+                  "It starts off. Turn it on when a task needs it, or let an agent ask for it."
+              )
+
+            approval_id ->
+              socket
+              |> decide(approval_id, {:set_up, grant.id})
+              |> put_notice(:success, "#{grant.name} added and turned on",
+                body: "The agent that asked hears it is on. Each use still waits for you."
+              )
+          end
 
         {:noreply,
          socket
          |> assign(:adding, nil)
-         |> put_notice(:success, "#{grant.name} added",
-           body: "It starts off. Turn it on when a task needs it."
-         )
          |> push_patch(to: ~p"/tools/sandbox/grants/#{grant.id}")}
 
       {:error, errors} ->
@@ -712,7 +713,7 @@ defmodule MDTClientWeb.SandboxLive do
      assign(socket, :confirm, %{
        title: "Remove #{grant.name}?",
        message:
-         "Anything waiting on it is refused. Its rules and allowances go with it. The VM keeps a placeholder that no longer means anything.",
+         "Anything waiting on it is refused, agents' asks included. Its allowances go with it. The VM keeps a placeholder that no longer means anything.",
        label: "Remove",
        action: {:delete_grant, id}
      })}
@@ -900,6 +901,7 @@ defmodule MDTClientWeb.SandboxLive do
     |> assign(:now, DateTime.utc_now() |> DateTime.truncate(:second))
     |> assign(snapshot)
     |> assign(:grant_map, grant_map)
+    |> assign(:marks, RequestView.marks(snapshot.grants))
     |> assign_page_data(grant_map)
   end
 
@@ -915,7 +917,7 @@ defmodule MDTClientWeb.SandboxLive do
         socket
         |> assign(:recent, Enum.take(hour, 7))
         |> assign(:stats, %{
-          waiting: length(socket.assigns.waiting) + length(socket.assigns.requests),
+          waiting: length(socket.assigns.waiting),
           connections: Enum.count(last_hour, &(&1.outcome in [:tunnel, :swapped, :allowed])),
           credentials: Enum.count(last_hour, &(&1.outcome in [:swapped, :allowed])),
           blocked: Enum.count(last_hour, &(&1.outcome in [:blocked, :violation]))
@@ -1030,7 +1032,20 @@ defmodule MDTClientWeb.SandboxLive do
   defp allow_minutes("grant"), do: :grant
   defp allow_minutes(minutes), do: String.to_integer(minutes)
 
-  defp action("allow"), do: :allow
-  defp action("ask"), do: :ask
-  defp action("deny"), do: :deny
+  defp decide(socket, id, decision) do
+    case Sandbox.decide(socket.assigns.username, id, decision) do
+      :ok ->
+        socket
+
+      {:error, :not_waiting} ->
+        put_notice(socket, :info, "That was already settled")
+
+      {:error, :bad_decision} ->
+        put_notice(socket, :error, "That choice doesn't fit this approval")
+    end
+  end
+
+  # Types start unnamed; a preset suggests its own name.
+  defp preset_name(%{id: id}) when id in [:token, :network, :file], do: ""
+  defp preset_name(%{name: name}), do: name
 end

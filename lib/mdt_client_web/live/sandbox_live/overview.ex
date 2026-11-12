@@ -7,7 +7,7 @@ defmodule MDTClientWeb.SandboxLive.Overview do
 
   import MDTClientWeb.SandboxLive.Components
 
-  alias MDTClient.Sandbox.{Grant, Recipes}
+  alias MDTClient.Sandbox.{Grant, Presets}
   alias MDTClientWeb.SandboxLive.Approvals
 
   attr :vm, :any, required: true
@@ -19,7 +19,6 @@ defmodule MDTClientWeb.SandboxLive.Overview do
   attr :grants, :list, required: true
   attr :grant_map, :map, required: true
   attr :waiting, :list, required: true
-  attr :requests, :list, required: true
   attr :recent, :list, required: true
   attr :stats, :map, required: true
   attr :now, DateTime, required: true
@@ -171,7 +170,7 @@ defmodule MDTClientWeb.SandboxLive.Overview do
           {@stats.waiting}
         </p>
         <p class="mt-0.5 text-[11px] text-faint">
-          {length(@waiting)} held · {length(@requests)} asking
+          {waiting_words(@waiting)}
         </p>
       </.link>
       <.link
@@ -211,34 +210,25 @@ defmodule MDTClientWeb.SandboxLive.Overview do
           </h2>
           <div class="flex-1"></div>
           <.link
-            :if={@waiting != [] or @requests != []}
+            :if={@waiting != []}
             patch={~p"/tools/sandbox/approvals"}
             class="text-[11px] text-accent hover:underline"
           >
             See details
           </.link>
         </div>
-        <div
-          :if={@waiting == [] and @requests == []}
-          class="rounded-xl border border-dashed border-line"
-        >
+        <div :if={@waiting == []} class="rounded-xl border border-dashed border-line">
           <.empty icon="hero-check-badge" id="overview-nothing-waiting">
-            Nothing waits for you. Held requests and agents asking for access show up here, and in the title bar of every tool.
+            Nothing waits for you. Agents asking for a grant, and uses of a grant, show up here, and in the title bar of every tool.
           </.empty>
         </div>
-        <Approvals.approval_card
+        <Approvals.approval
           :for={approval <- Enum.take(@waiting, 3)}
           approval={approval}
-          grant={@grant_map[approval.grant_id]}
+          grant={approval.grant_id && @grant_map[approval.grant_id]}
           hold_seconds={@settings.hold_seconds}
           now={@now}
           compact
-        />
-        <Approvals.request_card
-          :for={request <- Enum.take(@requests, 2)}
-          request={request}
-          grant={request.grant_id && @grant_map[request.grant_id]}
-          now={@now}
         />
       </section>
 
@@ -260,7 +250,7 @@ defmodule MDTClientWeb.SandboxLive.Overview do
               id={"overview-grant-#{grant.id}"}
               class="flex items-center gap-3 px-4 py-2.5"
             >
-              <.grant_tile recipe={Recipes.fetch!(grant.recipe)} on class="size-7" />
+              <.grant_tile icon={Presets.icon(grant)} on class="size-7" />
               <.link
                 patch={~p"/tools/sandbox/grants/#{grant.id}"}
                 class="min-w-0 flex-1 truncate text-xs font-medium text-ink hover:text-accent"
@@ -458,5 +448,12 @@ defmodule MDTClientWeb.SandboxLive.Overview do
       </div>
     </li>
     """
+  end
+
+  defp waiting_words(waiting) do
+    asks = Enum.count(waiting, &(&1.kind == :activation))
+    uses = length(waiting) - asks
+
+    "#{uses} #{if uses == 1, do: "use", else: "uses"} · #{asks} #{if asks == 1, do: "agent", else: "agents"} asking"
   end
 end

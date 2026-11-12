@@ -14,7 +14,10 @@ config :mdt_client,
   git_auto_fetch: false
 
 # The sandbox never calls msb in tests, and its proxy takes any free port.
-config :mdt_client, MDTClient.Sandbox.Server, external: false, proxy_port: 0
+config :mdt_client, MDTClient.Sandbox.Server,
+  external: false,
+  proxy_port: 0,
+  channel_dir: Path.join(System.tmp_dir!(), "mdt-test-channels")
 
 # Print only warnings and errors during test
 config :logger, level: :warning

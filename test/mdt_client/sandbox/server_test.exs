@@ -9,11 +9,25 @@ defmodule MDTClient.Sandbox.ServerTest do
     MDTClient.VaultHelpers.unlocked_identity("sandbox")
   end
 
-  defp github(username, value \\ "ghp_real_value") do
-    {:ok, grant} =
-      Sandbox.create_grant(username, %{"recipe" => "github", "name" => "GitHub", "value" => value})
+  @github %{
+    "kind" => "token",
+    "preset" => "github",
+    "name" => "GitHub",
+    "purpose" => "Push to oliveigah/klife",
+    "hosts" => "api.github.com, github.com, uploads.github.com",
+    "env" => "GITHUB_TOKEN, GH_TOKEN",
+    "git" => "true",
+    "prefix" => "ghp_",
+    "source" => "stored"
+  }
 
-    {:ok, grant} = Sandbox.turn_on(username, grant.id, 60)
+  # On, and by default letting every use through, so tests about swapping
+  # don't wait; `uses: :ask` is the default for real grants.
+  defp github(username, uses \\ :all) do
+    {:ok, grant} =
+      Sandbox.create_grant(username, Map.put(@github, "value", "ghp_real_value"))
+
+    {:ok, grant} = Sandbox.turn_on(username, grant.id, 60, uses)
     grant
   end
 
@@ -128,37 +142,56 @@ defmodule MDTClient.Sandbox.ServerTest do
     assert Sandbox.snapshot(username).memory.reviewed == 2
   end
 
-  test "grants check what each kind needs, and values never leave the server", %{
+  test "grants check what each type needs, and values never leave the server", %{
     username: username
   } do
-    assert {:error, errors} = Sandbox.create_grant(username, %{"recipe" => "token", "name" => ""})
-    assert Map.keys(errors) |> Enum.sort() == [:env, :hosts, :name, :value]
+    assert {:error, %{kind: _}} = Sandbox.create_grant(username, %{"name" => "x"})
+
+    assert {:error, errors} = Sandbox.create_grant(username, %{"kind" => "token", "name" => ""})
+    assert Map.keys(errors) |> Enum.sort() == [:hosts, :name, :purpose, :value]
+
+    assert {:error, %{env: _, hosts: _, prefix: _}} =
+             Sandbox.create_grant(
+               username,
+               Map.merge(@github, %{
+                 "env" => "BAD-NAME",
+                 "hosts" => "https://x.com",
+                 "prefix" => "a b",
+                 "value" => "v"
+               })
+             )
 
     assert {:error, %{destinations: _}} =
              Sandbox.create_grant(username, %{
-               "recipe" => "network",
+               "kind" => "network",
                "name" => "VPN",
+               "purpose" => "Grafana",
                "destinations" => "10.0.0.0/99"
              })
 
     grant = github(username)
     assert String.starts_with?(grant.placeholder, "ghp_")
+    assert grant.preset == :github and grant.git
     refute inspect(Sandbox.snapshot(username)) =~ "ghp_real_value"
     assert Sandbox.snapshot(username).values[grant.id]
   end
 
-  test "reads go through with the real value; requests without a placeholder pass untouched",
+  test "every use waits by default; requests without a placeholder pass untouched",
        %{username: username} do
-    grant = github(username)
-
-    assert {:forward, headers, [{"ghp_real_value", placeholder}]} =
-             authorize(username, request(grant))
-
-    assert {"authorization", "token ghp_real_value"} in headers
-    assert placeholder == grant.placeholder
+    grant = github(username, :ask)
 
     plain = %{request(grant) | headers: [{"accept", "*/*"}]}
     assert {:forward, [{"accept", "*/*"}], []} = authorize(username, plain)
+
+    read = authorize_async(username, request(grant))
+    approval = wait_for_approval(username)
+    assert approval.kind == :request
+    assert approval.request.headers == request(grant).headers
+    :ok = Sandbox.decide(username, approval.id, :allow_once)
+
+    assert {:forward, headers, [{"ghp_real_value", placeholder}]} = Task.await(read)
+    assert {"authorization", "token ghp_real_value"} in headers
+    assert placeholder == grant.placeholder
   end
 
   test "Basic credentials are swapped inside, as git sends them", %{username: username} do
@@ -187,13 +220,17 @@ defmodule MDTClient.Sandbox.ServerTest do
     {:ok, _} = Sandbox.turn_off(username, grant.id)
 
     assert {:deny, 403, body} = authorize(username, request(grant))
-    assert %{"code" => "mdt_grant_off", "grant" => "GitHub"} = Jason.decode!(body)
+
+    assert %{"code" => "mdt_grant_off", "grant" => "GitHub", "error" => error} =
+             Jason.decode!(body)
+
+    assert error =~ "mdt request #{grant.id}"
   end
 
   test "a push waits for you; retries join it; allowing answers all of them", %{
     username: username
   } do
-    grant = github(username)
+    grant = github(username, :ask)
 
     push =
       request(grant, %{host: "github.com", method: "POST", path: "/o/r.git/git-receive-pack"})
@@ -218,7 +255,7 @@ defmodule MDTClient.Sandbox.ServerTest do
   end
 
   test "denying, allowing similar, and giving up", %{username: username} do
-    grant = github(username)
+    grant = github(username, :ask)
 
     push =
       request(grant, %{host: "github.com", method: "POST", path: "/o/r.git/git-receive-pack"})
@@ -229,7 +266,7 @@ defmodule MDTClient.Sandbox.ServerTest do
     assert body =~ "mdt_denied_by_user"
 
     similar = authorize_async(username, push)
-    :ok = Sandbox.decide(username, wait_for_approval(username).id, {:allow_for, 10})
+    :ok = Sandbox.decide(username, wait_for_approval(username).id, {:allow, :similar, 10})
     assert {:forward, _, _} = Task.await(similar)
     assert {:forward, _, _} = authorize(username, push)
 
@@ -243,23 +280,52 @@ defmodule MDTClient.Sandbox.ServerTest do
     assert body =~ "mdt_approval_timeout"
   end
 
-  test "a rule set to deny refuses without asking", %{username: username} do
-    grant = github(username)
-    {:ok, _} = Sandbox.set_rule(username, grant.id, "reads", :deny)
+  test "allowing every use lets the waiting ones through, and ends when the grant turns off",
+       %{username: username} do
+    grant = github(username, :ask)
+    push = request(grant, %{method: "POST", path: "/repos/o/r/pulls"})
+    read = request(grant, %{path: "/user"})
 
-    assert {:deny, 403, body} = authorize(username, request(grant))
-    assert body =~ "mdt_denied"
+    held_push = authorize_async(username, push)
+    approval = wait_for_approval(username)
+    held_read = authorize_async(username, read)
+
+    Enum.find_value(1..100, fn _ ->
+      if length(Sandbox.snapshot(username).waiting) == 2, do: true, else: Process.sleep(10) && nil
+    end)
+
+    assert Sandbox.decide(username, approval.id, {:turn_on, 10, :ask}) ==
+             {:error, :bad_decision}
+
+    :ok = Sandbox.decide(username, approval.id, {:allow, :all, :grant})
+    assert {:forward, _, _} = Task.await(held_push)
+    assert {:forward, _, _} = Task.await(held_read)
+    assert {:forward, _, _} = authorize(username, request(grant, %{path: "/anything"}))
+
+    {:ok, _} = Sandbox.turn_off(username, grant.id)
+    assert {:error, :off} = Sandbox.allow_all(username, grant.id, 10)
+    assert {:error, :not_found} = Sandbox.allow_all(username, "nope", 10)
+    {:ok, grant} = Sandbox.turn_on(username, grant.id, 60)
+    assert grant.allowances == []
+
+    {:ok, grant} = Sandbox.allow_all(username, grant.id, 10)
+    assert [%{pattern: :all, until: %DateTime{}}] = grant.allowances
+    assert {:forward, _, _} = authorize(username, push)
   end
 
   test "minted values come from the command, and are reused", %{username: username} do
     {:ok, grant} =
       Sandbox.create_grant(username, %{
-        "recipe" => "google",
+        "kind" => "token",
         "name" => "Google",
+        "purpose" => "gcloud",
+        "hosts" => "*.googleapis.com",
+        "file_env" => "CLOUDSDK_AUTH_ACCESS_TOKEN_FILE",
+        "source" => "minted",
         "mint" => "echo ya29.minted-$((40 + 2))"
       })
 
-    {:ok, grant} = Sandbox.turn_on(username, grant.id, 60)
+    {:ok, grant} = Sandbox.turn_on(username, grant.id, 60, :all)
 
     google = %{
       host: "storage.googleapis.com",
@@ -286,27 +352,183 @@ defmodule MDTClient.Sandbox.ServerTest do
 
     {:ok, tunnel} =
       Sandbox.create_grant(username, %{
-        "recipe" => "database",
+        "kind" => "network",
+        "preset" => "database",
         "name" => "Tunnel",
+        "purpose" => "The database",
         "destinations" => "127.0.0.1:5433\n10.20.0.0/16:5432"
       })
 
     {:ok, _} = Sandbox.turn_on(username, tunnel.id, 60)
-    {:ok, _} = Sandbox.set_per_connection(username, tunnel.id, :allow)
-
-    assert destination.({127, 0, 0, 1}, 5433) == :ok
-    assert {:deny, _} = destination.({127, 0, 0, 1}, 4000)
-    assert destination.({10, 20, 4, 12}, 5432) == :ok
-
-    {:ok, _} = Sandbox.set_per_connection(username, tunnel.id, :ask)
 
     held =
       Task.async(fn ->
         Server.call(username, {:destination, {10, 20, 4, 12}, 5432}, :infinity)
       end)
 
-    :ok = Sandbox.decide(username, wait_for_approval(username).id, :allow_once)
+    approval = wait_for_approval(username)
+    assert approval.kind == :connection
+    assert {"Listed as", "10.20.0.0/16:5432"} in approval.facts
+    :ok = Sandbox.decide(username, approval.id, :allow_once)
     assert Task.await(held) == :ok
+
+    {:ok, _} = Sandbox.allow_all(username, tunnel.id, :grant)
+    assert destination.({127, 0, 0, 1}, 5433) == :ok
+    assert {:deny, _} = destination.({127, 0, 0, 1}, 4000)
+    assert destination.({10, 20, 4, 12}, 5432) == :ok
+  end
+
+  ## Agents asking
+
+  defp ask(username, attrs),
+    do:
+      Server.call(
+        username,
+        {:request_access, Map.merge(%{reason: "push the fix", agent: "claude"}, attrs)}
+      )
+
+  defp await(username, id, ms \\ 5_000),
+    do: Task.async(fn -> Server.call(username, {:await, id, ms}, ms + 1_000) end)
+
+  test "an agent's ask waits as an activation; turning it on answers the agent", %{
+    username: username
+  } do
+    {:ok, grant} = Sandbox.create_grant(username, Map.put(@github, "value", "ghp_real_value"))
+
+    assert {:error, :unknown_grant} = ask(username, %{grant: "gitlab"})
+    assert {:error, :no_reason} = ask(username, %{grant: grant.id, reason: " "})
+    assert {:error, :bad_minutes} = ask(username, %{grant: grant.id, minutes: 0})
+    assert {:error, :nothing_asked} = ask(username, %{})
+
+    assert {:ok, %{kind: :activation, minutes: 30} = approval} =
+             ask(username, %{grant: "github", minutes: 30})
+
+    # By name too, and asking again joins the same card.
+    assert {:ok, %{id: same, retries: 1}} = ask(username, %{grant: "GITHUB", minutes: 30})
+    assert same == approval.id
+    assert Sandbox.waiting_count(username) == 1
+
+    waiting = await(username, approval.id)
+    Process.sleep(20)
+
+    assert Sandbox.decide(username, approval.id, :allow_once) == {:error, :bad_decision}
+    :ok = Sandbox.decide(username, approval.id, {:turn_on, 15, :ask})
+
+    assert {:ok, %{status: :allowed, decision: {:turn_on, 15, :ask}}, %{state: :on} = on} =
+             Task.await(waiting)
+
+    assert DateTime.diff(on.expires_at, DateTime.utc_now()) in 880..900
+    assert on.allowances == []
+    assert {:already_on, _} = ask(username, %{grant: grant.id})
+    assert [%{summary: summary} | _] = Sandbox.events(username)
+    assert summary =~ "asked by claude"
+  end
+
+  test "an agent that stops waiting hears pending; the ask stays; allow-all comes with it",
+       %{username: username} do
+    {:ok, grant} = Sandbox.create_grant(username, Map.put(@github, "value", "ghp_real_value"))
+    {:ok, approval} = ask(username, %{grant: grant.id})
+
+    assert Task.await(await(username, approval.id, 30)) == :pending
+    assert [%{status: :waiting}] = Sandbox.snapshot(username).waiting
+
+    waiting = await(username, approval.id)
+    Process.sleep(20)
+    :ok = Sandbox.decide(username, approval.id, {:turn_on, :until_off, :all})
+    assert {:ok, _, %{expires_at: nil, allowances: [%{pattern: :all}]}} = Task.await(waiting)
+
+    # A settled ask answers at once.
+    assert {:ok, %{status: :allowed}, _} = Task.await(await(username, approval.id))
+    assert {:error, :not_found} = Task.await(await(username, "ask-nope"))
+  end
+
+  test "declining, giving up, turning on yourself, and removing the grant answer the agent", %{
+    username: username
+  } do
+    {:ok, grant} = Sandbox.create_grant(username, Map.put(@github, "value", "ghp_real_value"))
+
+    {:ok, declined} = ask(username, %{grant: grant.id})
+    waiting = await(username, declined.id)
+    Process.sleep(20)
+    :ok = Sandbox.decide(username, declined.id, :decline)
+    assert {:ok, %{status: :denied, decision: :decline}, _} = Task.await(waiting)
+
+    {:ok, late} = ask(username, %{grant: grant.id})
+    send(Store.whereis(Server, username), {:give_up, late.id})
+    assert {:ok, %{status: :timed_out}, _} = Task.await(await(username, late.id))
+
+    {:ok, mine} = ask(username, %{grant: grant.id})
+    waiting = await(username, mine.id)
+    Process.sleep(20)
+    {:ok, _} = Sandbox.turn_on(username, grant.id, 60)
+    assert {:ok, %{status: :allowed}, %{state: :on}} = Task.await(waiting)
+
+    {:ok, _} = Sandbox.turn_off(username, grant.id)
+    {:ok, gone} = ask(username, %{grant: grant.id})
+    :ok = Sandbox.delete_grant(username, grant.id)
+
+    assert {:ok, %{status: :denied, decision: :grant_off}, nil} =
+             Task.await(await(username, gone.id))
+  end
+
+  test "an ask for something new is answered by setting a grant up", %{username: username} do
+    {:ok, approval} =
+      ask(username, %{need: "Read access to the staging Postgres at 10.1.2.3:5432", minutes: 45})
+
+    assert approval.grant_id == nil and approval.title == "Access you haven't set up"
+    assert Sandbox.decide(username, approval.id, {:set_up, "nope"}) == {:error, :bad_decision}
+
+    {:ok, grant} =
+      Sandbox.create_grant(username, %{
+        "kind" => "network",
+        "name" => "Staging DB",
+        "purpose" => "Staging Postgres",
+        "destinations" => "10.1.2.3:5432"
+      })
+
+    waiting = await(username, approval.id)
+    Process.sleep(20)
+    :ok = Sandbox.decide(username, approval.id, {:set_up, grant.id})
+    assert {:ok, %{status: :allowed}, %{id: id, state: :on} = on} = Task.await(waiting)
+    assert id == grant.id
+    assert DateTime.diff(on.expires_at, DateTime.utc_now()) in 2680..2700
+  end
+
+  test "agents can't flood you: ten asks wait at most", %{username: username} do
+    for n <- 1..10, do: assert({:ok, _} = ask(username, %{need: "thing #{n}"}))
+    assert {:error, :too_many} = ask(username, %{need: "one more"})
+    assert {:ok, %{retries: 1}} = ask(username, %{need: "thing 3"})
+  end
+
+  test "grants saved before types and presets are brought up to date" do
+    old = %{
+      __struct__: MDTClient.Sandbox.Grant,
+      id: "google",
+      name: "Google",
+      recipe: :google,
+      kind: :http,
+      placeholder: "ya29.mdtx",
+      env: ["CLOUDSDK_AUTH_ACCESS_TOKEN_FILE"],
+      hosts: ["*.googleapis.com"],
+      rules: [:whatever],
+      default_action: :ask,
+      per_connection: :allow,
+      allowances: [
+        %{__struct__: MDTClient.Sandbox.Allowance, id: "a", pattern: "GET x", until: nil}
+      ],
+      source: {:minted, "gcloud auth print-access-token"},
+      state: :on
+    }
+
+    upgraded = MDTClient.Sandbox.Grant.upgrade(old)
+    assert %MDTClient.Sandbox.Grant{kind: :token, preset: :google, env: []} = upgraded
+    assert upgraded.file_env == ["CLOUDSDK_AUTH_ACCESS_TOKEN_FILE"]
+    assert upgraded.purpose =~ "Google Cloud"
+    refute Map.has_key?(upgraded, :rules)
+    assert [%MDTClient.Sandbox.Allowance{pattern: "GET x"}] = upgraded.allowances
+
+    github = MDTClient.Sandbox.Grant.upgrade(%{old | recipe: :github, env: ["GH_TOKEN"]})
+    assert github.git and github.env == ["GH_TOKEN"] and github.preset == :github
   end
 
   test "grants and values survive locking", %{username: username, key: key} do

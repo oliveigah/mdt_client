@@ -119,16 +119,60 @@ defmodule MDTClient.Sandbox.EgressTest do
     read_all(tls, :ssl)
   end
 
-  defp github(username) do
+  defp github(username, uses \\ :all) do
     {:ok, grant} =
       Sandbox.create_grant(username, %{
-        "recipe" => "github",
+        "kind" => "token",
+        "preset" => "github",
         "name" => "GitHub",
+        "purpose" => "The GitHub API",
+        "hosts" => "api.github.com, github.com",
+        "env" => "GH_TOKEN",
+        "prefix" => "ghp_",
         "value" => "ghp_real_value"
       })
 
-    {:ok, grant} = Sandbox.turn_on(username, grant.id, 60)
+    {:ok, grant} = Sandbox.turn_on(username, grant.id, 60, uses)
     grant
+  end
+
+  test "a held request waits on the wire, and its approval carries it in full", %{
+    username: username,
+    proxy: proxy,
+    ca: ca
+  } do
+    grant = github(username, :ask)
+    body = ~s({"title":"Fix the stall","head":"fix"})
+
+    sent =
+      Task.async(fn ->
+        https(
+          proxy,
+          ca,
+          "api.github.com",
+          "POST /repos/o/r/pulls HTTP/1.1\r\nHost: api.github.com\r\n" <>
+            "Authorization: token #{grant.placeholder}\r\nContent-Type: application/json\r\n" <>
+            "Content-Length: #{byte_size(body)}\r\n\r\n" <> body
+        )
+      end)
+
+    approval =
+      Enum.find_value(1..200, fn _ ->
+        case Sandbox.snapshot(username).waiting do
+          [approval] -> approval
+          [] -> Process.sleep(10) && nil
+        end
+      end)
+
+    assert approval.request.method == "POST"
+    assert approval.request.body == body
+    assert {"authorization", "token #{grant.placeholder}"} in approval.request.headers
+    assert {"Title", "Fix the stall"} in approval.claims
+
+    :ok = Sandbox.decide(username, approval.id, :allow_once)
+    response = Task.await(sent)
+    assert response =~ "HTTP/1.1 200 OK"
+    assert response =~ "seen=token ghp_real_value"
   end
 
   test "a read request leaves with the real value, which never comes back", %{
@@ -204,13 +248,13 @@ defmodule MDTClient.Sandbox.EgressTest do
 
     {:ok, tunnel} =
       Sandbox.create_grant(username, %{
-        "recipe" => "database",
+        "kind" => "network",
         "name" => "Tunnel",
+        "purpose" => "The echo server",
         "destinations" => "127.0.0.1:#{echo_port}"
       })
 
-    {:ok, _} = Sandbox.turn_on(username, tunnel.id, 60)
-    {:ok, _} = Sandbox.set_per_connection(username, tunnel.id, :allow)
+    {:ok, _} = Sandbox.turn_on(username, tunnel.id, 60, :all)
 
     {socket, "HTTP/1.1 200" <> _} = connect(proxy, "127.0.0.1:#{echo_port}")
     :ok = :gen_tcp.send(socket, "ping")

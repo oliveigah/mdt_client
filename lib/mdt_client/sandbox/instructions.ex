@@ -10,7 +10,7 @@ defmodule MDTClient.Sandbox.Instructions do
   left alone. Agents may edit the block meanwhile; the next start undoes it.
   """
 
-  alias MDTClient.Sandbox.{Grant, Recipes}
+  alias MDTClient.Sandbox.{Grant, Presets}
 
   @begin "<!-- mdt:begin · MDT rewrites this block before every start; write below it -->"
   @finish "<!-- mdt:end -->"
@@ -76,82 +76,94 @@ defmodule MDTClient.Sandbox.Instructions do
     end
   end
 
-  @doc "`/mnt/mdt/grants.md`: every grant and its state at `now`, for agents."
+  @doc """
+  Every grant and its state at `now`, for agents: `/mnt/mdt/grants.md`, and
+  what `mdt grants` prints. Each says what it is for, in the user's words,
+  and how to use it. Never a value.
+  """
   @spec grants([Grant.t()], DateTime.t()) :: String.t()
   def grants(grants, now) do
-    kinds = Enum.map_join(Recipes.all(), ", ", & &1.name)
-
-    rows =
-      for grant <- grants do
-        "| #{cell(grant.name)} | #{kind(grant)} | #{state(grant)} | #{cell(reach(grant))} | " <>
-          "#{cell(holds(grant))} | #{cell(rules(grant))} |"
-      end
-
-    table =
-      if rows == [] do
-        "No grants yet."
-      else
-        Enum.join(
-          [
-            "| Grant | Kind | State | For | In the VM | Requests |",
-            "|---|---|---|---|---|---|" | rows
-          ],
-          "\n"
-        )
-      end
+    body =
+      if grants == [],
+        do: "No grants yet.",
+        else: Enum.map_join(grants, "\n\n", &grant_block(&1, now))
 
     """
     # Grants, as of #{Calendar.strftime(now, "%Y-%m-%d %H:%M")} UTC
 
-    Written by MDT whenever a grant changes. Ask the user to add or turn on
-    what you need in MDT, under Agent Sandbox, Grants.
+    Written by MDT whenever a grant changes. To use one that is off, ask the
+    user with: mdt request GRANT_ID --reason "what you are about to do"
+    For access no grant gives: mdt request --need "what, and for which host" --reason "why"
 
-    #{table}
-
-    Kinds the user can add: #{kinds}.
+    #{body}
     """
   end
 
-  defp kind(%Grant{recipe: recipe}) do
-    case Recipes.find(to_string(recipe)) do
-      {:ok, found} -> found.name
-      :error -> to_string(recipe)
+  defp grant_block(grant, now) do
+    Enum.join(
+      [
+        "## #{grant.name}",
+        "- id: `#{grant.id}` · #{Presets.kind_name(grant.kind)} · #{state(grant, now)}",
+        "- for: #{one_line(grant.purpose)}",
+        "- " <> usage(grant),
+        "- " <> approval(grant)
+      ],
+      "\n"
+    )
+  end
+
+  @doc "How an agent uses a grant, in one line."
+  @spec usage(Grant.t()) :: String.t()
+  def usage(%Grant{kind: :token} = grant) do
+    holders =
+      Enum.map(grant.env, &"$#{&1}") ++
+        Enum.map(grant.file_env, &"the file $#{&1} names") ++
+        ["#{Grant.token_file(grant)}"]
+
+    git =
+      case Grant.git_hosts(grant) do
+        [] ->
+          ""
+
+        hosts ->
+          " git over HTTPS to #{Enum.join(hosts, ", ")} gets it from MDT's credential helper."
+      end
+
+    "use: a placeholder is in #{Enum.join(holders, ", ")}. Send it as the tool normally sends " <>
+      "this token, only to #{Enum.join(grant.hosts, ", ")}; MDT swaps in the real value there." <>
+      git
+  end
+
+  def usage(%Grant{kind: :network} = grant),
+    do: "use: connect directly to #{Enum.join(grant.destinations, ", ")}. Nothing to hold."
+
+  def usage(%Grant{kind: :file} = grant),
+    do: "use: the real value is the file #{grant.path} while the grant is on."
+
+  defp approval(%Grant{kind: :file}), do: "uses: the file is readable while on"
+
+  defp approval(%Grant{} = grant) do
+    what = if grant.kind == :network, do: "connection", else: "request"
+
+    cond do
+      not Grant.on?(grant) ->
+        "uses: each #{what} waits for the user's approval once on"
+
+      Enum.any?(grant.allowances, &(&1.pattern == :all)) ->
+        "uses: every #{what} goes through for now"
+
+      true ->
+        "uses: each #{what} waits for the user's approval (it can hang for minutes)"
     end
   end
 
-  defp state(%Grant{state: :on, expires_at: %DateTime{} = at}),
-    do: "on until #{Calendar.strftime(at, "%H:%M")} UTC"
-
-  defp state(%Grant{state: :on}), do: "on"
-  defp state(%Grant{}), do: "off"
-
-  defp reach(%Grant{kind: :network, destinations: destinations}),
-    do: Enum.join(destinations, ", ")
-
-  defp reach(%Grant{kind: :file, path: path}), do: path || ""
-  defp reach(%Grant{hosts: hosts}), do: Enum.join(hosts, ", ")
-
-  defp holds(%Grant{kind: :http, env: env}) when env != [],
-    do: Enum.map_join(env, ", ", &"`#{&1}`") <> " (placeholders)"
-
-  defp holds(%Grant{kind: :file, state: :on}), do: "the file itself"
-  defp holds(%Grant{kind: :file}), do: "nothing while off"
-  defp holds(%Grant{}), do: "nothing"
-
-  defp rules(%Grant{kind: :network, per_connection: :ask}),
-    do: "each connection waits for the user"
-
-  defp rules(%Grant{kind: :network}), do: "connections go through"
-
-  defp rules(%Grant{rules: rules, default_action: default}) do
-    listed = Enum.map(rules, &"#{&1.label}: #{word(&1.action)}")
-    Enum.join(listed ++ ["anything else: #{word(default)}"], "; ")
+  defp state(%Grant{state: :on, expires_at: %DateTime{} = at}, now) do
+    minutes = max(div(DateTime.diff(at, now), 60), 0)
+    "on until #{Calendar.strftime(at, "%H:%M")} UTC (#{minutes} min left)"
   end
 
-  defp word(:allow), do: "go through"
-  defp word(:ask), do: "wait for the user"
-  defp word(:deny), do: "refused"
+  defp state(%Grant{state: :on}, _now), do: "on until the user turns it off"
+  defp state(%Grant{}, _now), do: "off"
 
-  defp cell(text),
-    do: text |> to_string() |> String.replace("|", "\\|") |> String.replace("\n", " ")
+  defp one_line(text), do: text |> to_string() |> String.replace(~r/\s+/, " ") |> String.trim()
 end

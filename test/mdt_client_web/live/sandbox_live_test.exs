@@ -13,13 +13,28 @@ defmodule MDTClientWeb.SandboxLiveTest do
   defp github(username, on? \\ true) do
     {:ok, grant} =
       Sandbox.create_grant(username, %{
-        "recipe" => "github",
+        "kind" => "token",
+        "preset" => "github",
         "name" => "GitHub",
+        "purpose" => "Push to oliveigah/klife",
+        "hosts" => "api.github.com, github.com",
+        "env" => "GH_TOKEN",
+        "git" => "true",
+        "prefix" => "ghp_",
         "value" => "ghp_real"
       })
 
     if on?, do: {:ok, _} = Sandbox.turn_on(username, grant.id, 60)
     grant
+  end
+
+  defp wait_for(username, kind) do
+    Enum.find_value(1..100, fn _ ->
+      case Enum.find(Sandbox.snapshot(username).waiting, &(&1.kind == kind)) do
+        nil -> Process.sleep(10) && nil
+        approval -> approval
+      end
+    end)
   end
 
   # A git push held for approval, as the proxy would hold it.
@@ -28,7 +43,11 @@ defmodule MDTClientWeb.SandboxLiveTest do
       host: "github.com",
       method: "POST",
       path: "/oliveigah/klife.git/git-receive-pack",
-      headers: [{"authorization", "token #{grant.placeholder}"}],
+      headers: [
+        {"host", "github.com"},
+        {"authorization", "token #{grant.placeholder}"},
+        {"content-type", "application/x-git-receive-pack-request"}
+      ],
       body: ""
     }
 
@@ -94,6 +113,12 @@ defmodule MDTClientWeb.SandboxLiveTest do
     {:ok, view, _html} = live(conn, ~p"/tools/sandbox/approvals")
     assert has_element?(view, "#approval-#{approval.id}", "Push to oliveigah/klife")
 
+    assert has_element?(view, "#approval-request-#{approval.id}")
+    assert has_element?(view, "#copy-curl-#{approval.id}[phx-hook=CopyText]")
+    assert has_element?(view, "#copy-curl-text-#{approval.id}", "$GH_TOKEN")
+    refute has_element?(view, "#copy-curl-text-#{approval.id}", grant.placeholder)
+    assert has_element?(view, "#approval-headers-#{approval.id}", "GitHub")
+
     view |> element("#allow-once-#{approval.id}") |> render_click()
     assert {:forward, _headers, _scrub} = Task.await(task)
     refute has_element?(view, "#approval-#{approval.id}")
@@ -105,19 +130,32 @@ defmodule MDTClientWeb.SandboxLiveTest do
     {:ok, view, _html} = live(conn, ~p"/tools/sandbox/grants")
 
     view |> element("#add-grant") |> render_click()
-    view |> element("#recipe-token") |> render_click()
-    assert has_element?(view, "#recipe-guide")
+    assert has_element?(view, "#type-network")
+    assert has_element?(view, "#preset-github")
+    view |> element("#type-token") |> render_click()
+    assert has_element?(view, "#preset-guide")
 
     view |> form("#add-grant-form", grant: %{name: "Stripe"}) |> render_submit()
     assert has_element?(view, "#grant-error-value")
+    assert has_element?(view, "#grant-error-purpose")
 
     view
     |> form("#add-grant-form",
-      grant: %{name: "Stripe", env: "STRIPE_API_KEY", hosts: "api.stripe.com", value: "sk_test_1"}
+      grant: %{
+        name: "Stripe",
+        purpose: "Test-mode charges for the checkout work",
+        env: "STRIPE_API_KEY",
+        hosts: "api.stripe.com",
+        prefix: "sk_test_",
+        value: "sk_test_1"
+      }
     )
     |> render_submit()
 
     assert_patch(view, ~p"/tools/sandbox/grants/stripe")
+    assert has_element?(view, "#grant-detail-stripe", "Test-mode charges")
+    assert has_element?(view, "#grant-uses")
+    assert [%{placeholder: "sk_test_" <> _}] = Sandbox.snapshot(username).grants
     assert has_element?(view, "#grant-value-card")
     refute has_element?(view, "#grant-no-value")
     refute render(view) =~ "sk_test_1"
@@ -153,12 +191,103 @@ defmodule MDTClientWeb.SandboxLiveTest do
     assert has_element?(view, "#grants-off #grant-row-#{grant.id}")
   end
 
-  test "rules change from the grant page", %{conn: conn, username: username} do
+  test "a preset fills the form; minted tokens need no value", %{conn: conn, username: username} do
+    {:ok, view, _html} = live(conn, ~p"/tools/sandbox/grants")
+
+    view |> element("#add-grant") |> render_click()
+    view |> element("#preset-google") |> render_click()
+    assert has_element?(view, "#grant-source-minted[checked]")
+
+    view
+    |> form("#add-grant-form", grant: %{name: "GCP", source: "minted"})
+    |> render_submit()
+
+    assert_patch(view, ~p"/tools/sandbox/grants/gcp")
+
+    assert [
+             %{
+               preset: :google,
+               file_env: ["CLOUDSDK_AUTH_ACCESS_TOKEN_FILE"],
+               source: {:minted, _}
+             }
+           ] =
+             Sandbox.snapshot(username).grants
+  end
+
+  test "every use of a grant can be let through for a while, from its page", %{
+    conn: conn,
+    username: username
+  } do
     grant = github(username)
     {:ok, view, _html} = live(conn, ~p"/tools/sandbox/grants/#{grant.id}")
 
-    view |> element("#rule-action-#{grant.id}-push-allow") |> render_click()
-    assert has_element?(view, "#rule-action-#{grant.id}-push-allow[aria-checked=true]")
+    view |> element("#allow-all-#{grant.id}-60") |> render_click()
+    assert has_element?(view, "#grant-allowances", "Every use")
+
+    [%{allowances: [allowance]}] = Sandbox.snapshot(username).grants
+    view |> element("#revoke-allowance-#{allowance.id}") |> render_click()
+    refute has_element?(view, "#grant-allowances", "Every use")
+  end
+
+  test "an agent's ask shows its reason, and is answered from its card", %{
+    conn: conn,
+    username: username
+  } do
+    grant = github(username, false)
+
+    asking =
+      Task.async(fn ->
+        {:ok, ask} =
+          Server.call(
+            username,
+            {:request_access,
+             %{grant: grant.id, reason: "push the fix", agent: "codex", minutes: 30}}
+          )
+
+        Server.call(username, {:await, ask.id, 5_000}, 6_000)
+      end)
+
+    ask = wait_for(username, :activation)
+    {:ok, view, _html} = live(conn, ~p"/tools/sandbox/approvals")
+
+    assert has_element?(view, "#approval-#{ask.id}", "Turn on GitHub for 30 min")
+    assert has_element?(view, "#approval-claims-#{ask.id}", "push the fix")
+    assert has_element?(view, "#activation-minutes-#{ask.id}-30[checked]")
+
+    view
+    |> form("#activation-form-#{ask.id}", ask: %{minutes: "60", uses: "all"})
+    |> render_submit()
+
+    assert {:ok, %{status: :allowed}, %{state: :on, allowances: [%{pattern: :all}]}} =
+             Task.await(asking)
+
+    assert has_element?(view, "#decided-#{ask.id}", "codex asked for GitHub")
+    assert has_element?(view, "#decided-#{ask.id}", "every use allowed")
+  end
+
+  test "an ask for something new is set up from its card", %{conn: conn, username: username} do
+    {:ok, ask} =
+      Server.call(
+        username,
+        {:request_access, %{need: "Grafana at 10.9.0.4:3000", reason: "read the dashboards"}}
+      )
+
+    {:ok, view, _html} = live(conn, ~p"/tools/sandbox/approvals")
+    view |> element("#setup-ask-#{ask.id}") |> render_click()
+    assert has_element?(view, "#add-grant-dialog", "Grafana at 10.9.0.4:3000")
+    view |> element("#type-network") |> render_click()
+
+    view
+    |> form("#add-grant-form", grant: %{name: "Grafana", destinations: "10.9.0.4:3000"})
+    |> render_submit()
+
+    assert_patch(view, ~p"/tools/sandbox/grants/grafana")
+
+    assert [%{state: :on, purpose: "Grafana at 10.9.0.4:3000"}] =
+             Sandbox.snapshot(username).grants
+
+    assert [%{status: :allowed, decision: {:set_up, "grafana"}}] =
+             Sandbox.snapshot(username).history
   end
 
   test "removing a grant asks first", %{conn: conn, username: username} do

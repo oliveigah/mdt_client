@@ -5,13 +5,19 @@ defmodule MDTClient.Sandbox.Server do
 
   One process per unlocked identity, started by `MDTClient.Vault.Store`. Grants,
   values, settings and the CA are sealed with the vault key into
-  `sandbox.bin`; approvals, agent requests and activity live in memory.
+  `sandbox.bin`; approvals (agents' asks included) and activity live in
+  memory.
 
   `MDTClient.Sandbox.Egress` asks three things of it for each connection and
   request: may this destination be reached (`destination/3`), should this
   host be read (`intercept?/2`), and may this request go out with the real
-  value in it (`authorize/2`). The last two may wait for you: the caller is
-  held, and answered when you decide or when the hold runs out.
+  value in it (`authorize/2`). A use of a grant waits for you unless an
+  allowance covers it: the caller is held, and answered when you decide or
+  when the hold runs out.
+
+  `MDTClient.Sandbox.Channel` brings agents' asks from the VM
+  (`request_access`), which wait for you as activation approvals, and waits
+  on your answer (`await`) for a while before telling the agent to come back.
 
   It also keeps the image's builds (the current one and the two before it),
   the snapshots of the VM's Home, and how far the VM's memory was seeded and
@@ -31,11 +37,11 @@ defmodule MDTClient.Sandbox.Server do
   alias MDTClient.Accounts
 
   alias MDTClient.Sandbox.{
-    AgentRequest,
     Allowance,
     Approval,
     Build,
     CertificateAuthority,
+    Channel,
     Describe,
     Destinations,
     Event,
@@ -46,8 +52,7 @@ defmodule MDTClient.Sandbox.Server do
     Instructions,
     Memory,
     Msb,
-    Recipes,
-    Rule,
+    Presets,
     Settings,
     Shares,
     Snapshot,
@@ -64,6 +69,10 @@ defmodule MDTClient.Sandbox.Server do
   @poll_every 10_000
   @mint_fresh_ms 10 * 60_000
   @build_log_limit 400
+  # An agent's ask waits this long for you; the agent itself waits less and
+  # comes back with `mdt wait`.
+  @activation_hold_seconds 30 * 60
+  @max_waiting_activations 10
   @tasks MDTClient.Sandbox.TaskSupervisor
 
   ## Client
@@ -139,7 +148,6 @@ defmodule MDTClient.Sandbox.Server do
       memory: saved[:memory] || %{seed_count: nil, seeded_at: nil, reviewed: 0},
       folders: folders,
       approvals: [],
-      requests: [],
       events: [],
       waiters: %{},
       minted: %{},
@@ -195,7 +203,6 @@ defmodule MDTClient.Sandbox.Server do
   @impl true
   def handle_call(:snapshot, _from, state) do
     {waiting, history} = Enum.split_with(state.approvals, &(&1.status == :waiting))
-    {requests, answered} = Enum.split_with(state.requests, &(&1.status == :waiting))
 
     {:reply,
      %{
@@ -205,8 +212,6 @@ defmodule MDTClient.Sandbox.Server do
        values: Map.new(state.grants, &{&1.id, Map.has_key?(state.values, &1.id)}),
        waiting: Enum.sort_by(waiting, & &1.requested_at, DateTime),
        history: history,
-       requests: Enum.sort_by(requests, & &1.requested_at, DateTime),
-       answered: answered,
        image: state.image,
        builds: state.builds,
        created_ref: state.created_ref,
@@ -326,15 +331,17 @@ defmodule MDTClient.Sandbox.Server do
 
   ## Grants
 
-  def handle_call({:turn_on, id, minutes}, _from, state) do
-    with_grant(state, id, fn grant ->
-      expires_at =
-        if minutes == :until_off, do: nil, else: DateTime.add(now(), minutes * 60, :second)
+  def handle_call({:turn_on, id, minutes, uses}, _from, state) when uses in [:ask, :all] do
+    case Enum.find(state.grants, &(&1.id == id)) do
+      nil ->
+        {:reply, {:error, :not_found}, state}
 
-      grant = %{grant | state: :on, expires_at: expires_at}
-      schedule_expiry(grant)
-      {grant, "#{grant.name} turned on #{duration_words(minutes)}"}
-    end)
+      grant ->
+        state =
+          state |> turn_on(grant, minutes, uses, "") |> settle_activations(id, minutes, uses)
+
+        {:reply, {:ok, Enum.find(state.grants, &(&1.id == id))}, state}
+    end
   end
 
   def handle_call({:turn_off, id}, _from, state) do
@@ -343,22 +350,26 @@ defmodule MDTClient.Sandbox.Server do
     end)
   end
 
-  def handle_call({:set_rule, id, rule_id, action}, _from, state)
-      when action in [:allow, :ask, :deny] do
-    with_grant(state, id, fn grant ->
-      rules = Enum.map(grant.rules, &if(&1.id == rule_id, do: %{&1 | action: action}, else: &1))
-      {%{grant | rules: rules}, nil}
-    end)
-  end
+  def handle_call({:allow_all, id, duration}, _from, state) do
+    case Enum.find(state.grants, &(&1.id == id)) do
+      %Grant{state: :on} = grant ->
+        state =
+          state
+          |> allow(grant, :all, duration)
+          |> log(%{
+            outcome: :grant,
+            summary: "#{grant.name}: every use allowed #{duration_words(duration)}",
+            grant_id: id
+          })
 
-  def handle_call({:set_default, id, action}, _from, state)
-      when action in [:allow, :ask, :deny] do
-    with_grant(state, id, fn grant -> {%{grant | default_action: action}, nil} end)
-  end
+        {:reply, {:ok, Enum.find(state.grants, &(&1.id == id))}, state}
 
-  def handle_call({:set_per_connection, id, choice}, _from, state)
-      when choice in [:allow, :ask] do
-    with_grant(state, id, fn grant -> {%{grant | per_connection: choice}, nil} end)
+      %Grant{} ->
+        {:reply, {:error, :off}, state}
+
+      nil ->
+        {:reply, {:error, :not_found}, state}
+    end
   end
 
   def handle_call({:revoke_allowance, id, allowance_id}, _from, state) do
@@ -415,7 +426,7 @@ defmodule MDTClient.Sandbox.Server do
       grant ->
         state =
           state
-          |> settle_waiting(id, :grant_off)
+          |> settle_waiting(id, :grant_off, [:activation, :request, :connection])
           |> Map.update!(:values, &Map.delete(&1, id))
           |> Map.update!(:minted, &Map.delete(&1, id))
           |> change(:grants, &Enum.reject(&1.grants, fn g -> g.id == id end))
@@ -432,15 +443,46 @@ defmodule MDTClient.Sandbox.Server do
 
   def handle_call({:decide, approval_id, decision}, _from, state) do
     case Enum.find(state.approvals, &(&1.id == approval_id and &1.status == :waiting)) do
-      nil -> {:reply, {:error, :not_waiting}, state}
-      approval -> {:reply, :ok, decide(state, approval, decision)}
+      nil ->
+        {:reply, {:error, :not_waiting}, state}
+
+      approval ->
+        if fits?(approval, decision, state),
+          do: {:reply, :ok, decide(state, approval, decision)},
+          else: {:reply, {:error, :bad_decision}, state}
     end
   end
 
-  def handle_call({:answer, request_id, answer}, _from, state) do
-    case Enum.find(state.requests, &(&1.id == request_id and &1.status == :waiting)) do
-      nil -> {:reply, {:error, :not_waiting}, state}
-      request -> {:reply, :ok, answer(state, request, answer)}
+  ## Agents asking, through the channel
+
+  def handle_call(:agent_grants, _from, state), do: {:reply, state.grants, state}
+
+  def handle_call({:request_access, ask}, _from, state) do
+    case activation(state, ask) do
+      {:ok, approval} ->
+        {state, held} = hold_activation(state, approval)
+        {:reply, {:ok, held}, state}
+
+      {:already_on, grant} ->
+        {:reply, {:already_on, grant}, state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call({:await, approval_id, ms}, from, state) do
+    case Enum.find(state.approvals, &(&1.id == approval_id)) do
+      nil ->
+        {:reply, {:error, :not_found}, state}
+
+      %Approval{status: :waiting} ->
+        ref = make_ref()
+        Process.send_after(self(), {:stop_waiting, approval_id, ref}, ms)
+        {:noreply, add_waiter(state, approval_id, {from, {:await, ref}})}
+
+      approval ->
+        {:reply, {:ok, approval, grant_of(state, approval)}, state}
     end
   end
 
@@ -503,6 +545,7 @@ defmodule MDTClient.Sandbox.Server do
           end)
 
         address = "#{:inet.ntoa(ip)}"
+        pattern = "#{address}:#{port}"
 
         case covering do
           nil ->
@@ -514,29 +557,35 @@ defmodule MDTClient.Sandbox.Server do
             state = log(state, %{outcome: :blocked, summary: summary, host: address, port: port})
             {:reply, {:deny, summary}, state}
 
-          {%Grant{per_connection: :allow}, _specs} ->
-            {:reply, :ok, state}
+          {grant, specs} ->
+            if Enum.any?(grant.allowances, &Allowance.covers?(&1, pattern)) do
+              {:reply, :ok, used(state, grant.id)}
+            else
+              matched = Enum.find(specs, &Destinations.matches?(&1, ip, port))
 
-          {grant, _specs} ->
-            approval = %Approval{
-              id: "approval-" <> unique(),
-              grant_id: grant.id,
-              kind: :connection,
-              title: "Connect to #{address}:#{port}",
-              host: address,
-              pattern: "#{address}:#{port}",
-              requested_at: now(),
-              deadline: DateTime.add(now(), state.settings.hold_seconds, :second),
-              facts: [{"Destination", "#{address}:#{port}"}, {"Grant", grant.name}]
-            }
+              approval = %Approval{
+                id: "approval-" <> unique(),
+                grant_id: grant.id,
+                kind: :connection,
+                title: "Connect to #{pattern}",
+                host: address,
+                pattern: pattern,
+                requested_at: now(),
+                deadline: DateTime.add(now(), state.settings.hold_seconds, :second),
+                facts:
+                  [{"Destination", pattern}] ++
+                    if(matched, do: [{"Listed as", matched.source}], else: []) ++
+                    [{"Grant", grant.name}]
+              }
 
-            {:noreply, hold(state, approval, {from, :connection})}
+              {:noreply, hold(state, approval, {from, :connection})}
+            end
         end
     end
   end
 
   def handle_call({:intercept?, host}, _from, state) do
-    {:reply, Enum.any?(state.grants, &(&1.kind == :http and host_allowed?(host, &1.hosts))),
+    {:reply, Enum.any?(state.grants, &(&1.kind == :token and host_allowed?(host, &1.hosts))),
      state}
   end
 
@@ -555,7 +604,7 @@ defmodule MDTClient.Sandbox.Server do
 
   def handle_call({:authorize, request}, from, state) do
     found =
-      for %Grant{kind: :http} = grant <- state.grants,
+      for %Grant{kind: :token} = grant <- state.grants,
           carries?(request.headers, grant.placeholder),
           do: grant
 
@@ -638,7 +687,8 @@ defmodule MDTClient.Sandbox.Server do
         {:noreply, state}
 
       approval ->
-        minutes = state.settings.hold_seconds |> div(60) |> max(1)
+        minutes =
+          approval.deadline |> DateTime.diff(approval.requested_at) |> div(60) |> max(1)
 
         {:noreply,
          state
@@ -646,6 +696,24 @@ defmodule MDTClient.Sandbox.Server do
          |> answer_waiters(approval, {:deny, :timed_out})
          |> log(event_for(approval, :timed_out, "gave up after #{minutes} min"))}
     end
+  end
+
+  # An agent waited as long as it said it would: it hears "still waiting",
+  # and the ask stays for you.
+  def handle_info({:stop_waiting, approval_id, ref}, state) do
+    {mine, others} =
+      state.waiters
+      |> Map.get(approval_id, [])
+      |> Enum.split_with(&match?({_from, {:await, ^ref}}, &1))
+
+    Enum.each(mine, fn {from, _} -> GenServer.reply(from, :pending) end)
+
+    waiters =
+      if others == [],
+        do: Map.delete(state.waiters, approval_id),
+        else: Map.put(state.waiters, approval_id, others)
+
+    {:noreply, %{state | waiters: waiters}}
   end
 
   def handle_info(:flush, state) do
@@ -766,63 +834,37 @@ defmodule MDTClient.Sandbox.Server do
          deny(
            403,
            "mdt_grant_off",
-           "#{grant.name} is off. Ask for it, or ask the user to turn it on.",
+           "#{grant.name} is off. Ask for it with: mdt request #{grant.id} --reason \"...\"",
            grant
          ), state}
 
-      true ->
-        case action(grant, description) do
-          {:allow, why} ->
-            state = log(state, request_event(request, grant, :swapped, "#{title} · #{why}"))
-            {:noreply, forward(state, grant, request, from)}
+      allowance = Enum.find(grant.allowances, &Allowance.covers?(&1, description.pattern)) ->
+        why =
+          if allowance.pattern == :all,
+            do: "every use allowed",
+            else: "allowed like an earlier one"
 
-          {:deny, why} ->
-            state = log(state, request_event(request, grant, :denied, "#{title} · #{why}"))
-
-            {:reply,
-             deny(403, "mdt_denied", "A rule on #{grant.name} refuses this request.", grant),
-             state}
-
-          :ask ->
-            approval = %Approval{
-              id: "approval-" <> unique(),
-              grant_id: grant.id,
-              kind: :request,
-              title: title,
-              method: request.method,
-              host: request.host,
-              path: request.path,
-              pattern: description.pattern,
-              requested_at: now(),
-              deadline: DateTime.add(now(), state.settings.hold_seconds, :second),
-              facts: description.facts,
-              claims: description.claims
-            }
-
-            {:noreply, hold(state, approval, {from, {:request, request}})}
-        end
-    end
-  end
-
-  # An allowance first, then the first rule that matches, then the default.
-  defp action(grant, description) do
-    cond do
-      Enum.any?(grant.allowances, &(&1.pattern == description.pattern)) ->
-        {:allow, "allowed by your earlier approval"}
-
-      rule = Enum.find(grant.rules, &Rule.matches?(&1, description.tags)) ->
-        case rule.action do
-          :allow -> {:allow, "allowed by #{rule.label}"}
-          :deny -> {:deny, "denied by #{rule.label}"}
-          :ask -> :ask
-        end
+        state = log(state, request_event(request, grant, :swapped, "#{title} · #{why}"))
+        {:noreply, forward(state, grant, request, from)}
 
       true ->
-        case grant.default_action do
-          :allow -> {:allow, "allowed by default"}
-          :deny -> {:deny, "denied by default"}
-          :ask -> :ask
-        end
+        approval = %Approval{
+          id: "approval-" <> unique(),
+          grant_id: grant.id,
+          kind: :request,
+          title: title,
+          method: request.method,
+          host: request.host,
+          path: request.path,
+          pattern: description.pattern,
+          request: request,
+          requested_at: now(),
+          deadline: DateTime.add(now(), state.settings.hold_seconds, :second),
+          facts: description.facts,
+          claims: description.claims
+        }
+
+        {:noreply, hold(state, approval, {from, {:request, request}})}
     end
   end
 
@@ -836,10 +878,7 @@ defmodule MDTClient.Sandbox.Server do
       %Approval{} = waiting ->
         state
         |> replace_approval(%{waiting | retries: waiting.retries + 1})
-        |> Map.update!(
-          :waiters,
-          &Map.update(&1, waiting.id, [waiter], fn list -> list ++ [waiter] end)
-        )
+        |> add_waiter(waiting.id, waiter)
 
       nil ->
         Process.send_after(
@@ -849,10 +888,18 @@ defmodule MDTClient.Sandbox.Server do
         )
 
         state
-        |> Map.update!(:waiters, &Map.put(&1, approval.id, [waiter]))
+        |> add_waiter(approval.id, waiter)
         |> change(:approvals, &[approval | &1.approvals])
     end
   end
+
+  defp add_waiter(state, approval_id, waiter),
+    do:
+      Map.update!(
+        state,
+        :waiters,
+        &Map.update(&1, approval_id, [waiter], fn list -> list ++ [waiter] end)
+      )
 
   # Fetches the value, then answers the proxy with the headers it carries.
   defp forward(state, grant, request, from) do
@@ -990,6 +1037,66 @@ defmodule MDTClient.Sandbox.Server do
 
   ## Decisions
 
+  # Which decisions fit which approval: activations are answered by turning
+  # a grant on (or setting one up), uses by letting them through.
+  defp fits?(%Approval{kind: :activation, grant_id: nil}, decision, state) do
+    case decision do
+      {:set_up, grant_id} -> Enum.any?(state.grants, &(&1.id == grant_id))
+      :decline -> true
+      _other -> false
+    end
+  end
+
+  defp fits?(%Approval{kind: :activation}, decision, _state) do
+    case decision do
+      {:turn_on, minutes, uses} -> uses in [:ask, :all] and duration?(minutes, :until_off)
+      :decline -> true
+      _other -> false
+    end
+  end
+
+  defp fits?(%Approval{}, decision, _state) do
+    case decision do
+      :allow_once -> true
+      {:allow, scope, duration} -> scope in [:similar, :all] and duration?(duration, :grant)
+      :deny -> true
+      :deny_and_turn_off -> true
+      _other -> false
+    end
+  end
+
+  defp duration?(minutes, _open) when is_integer(minutes) and minutes > 0, do: true
+  defp duration?(open, open), do: true
+  defp duration?(_other, _open), do: false
+
+  defp decide(state, approval, {:turn_on, minutes, uses}) do
+    grant = Enum.find(state.grants, &(&1.id == approval.grant_id))
+
+    state
+    |> settle(approval, :allowed, {:turn_on, minutes, uses})
+    |> turn_on(grant, minutes, uses, " · asked by #{approval.agent}")
+    |> answer_waiters(approval, :allow)
+  end
+
+  defp decide(state, approval, {:set_up, grant_id}) do
+    grant = Enum.find(state.grants, &(&1.id == grant_id))
+    approval = %{approval | grant_id: grant_id}
+    minutes = approval.minutes
+
+    state
+    |> replace_approval(approval)
+    |> settle(approval, :allowed, {:set_up, grant_id})
+    |> turn_on(grant, minutes, :ask, " · asked by #{approval.agent}")
+    |> answer_waiters(approval, :allow)
+  end
+
+  defp decide(state, approval, :decline) do
+    state
+    |> settle(approval, :denied, :decline)
+    |> answer_waiters(approval, {:deny, :by_you})
+    |> log(event_for(approval, :denied, "you declined"))
+  end
+
   defp decide(state, approval, :allow_once) do
     state
     |> settle(approval, :allowed, :allow_once)
@@ -997,42 +1104,26 @@ defmodule MDTClient.Sandbox.Server do
     |> log(event_for(approval, :allowed, "you allowed once"))
   end
 
-  defp decide(state, approval, {:allow_for, minutes}) do
-    allowance = %Allowance{
-      id: "allowance-" <> unique(),
-      pattern: approval.pattern,
-      until: if(minutes == :grant, do: nil, else: DateTime.add(now(), minutes * 60, :second))
-    }
-
-    if allowance.until do
-      Process.send_after(
-        self(),
-        {:expire_allowance, approval.grant_id, allowance.id},
-        minutes * 60_000
-      )
-    end
-
-    state =
-      state.approvals
-      |> Enum.filter(fn other ->
-        other.status == :waiting and other.grant_id == approval.grant_id and
-          other.pattern == approval.pattern
-      end)
-      |> Enum.reduce(state, fn other, acc ->
-        acc
-        |> settle(other, :allowed, {:allow_for, minutes})
-        |> answer_waiters(other, :allow)
-        |> log(event_for(other, :allowed, "you allowed similar #{duration_words(minutes)}"))
-      end)
-
+  defp decide(state, approval, {:allow, scope, duration}) do
     case Enum.find(state.grants, &(&1.id == approval.grant_id)) do
       nil ->
-        state
+        decide(state, approval, :allow_once)
 
       grant ->
+        pattern = if scope == :all, do: :all, else: approval.pattern
+
         state
-        |> replace_grant(%{grant | allowances: grant.allowances ++ [allowance]})
-        |> changed()
+        |> allow(grant, pattern, duration)
+        |> log(%{
+          outcome: :grant,
+          summary:
+            if(scope == :all,
+              do: "#{grant.name}: every use allowed #{duration_words(duration)}",
+              else:
+                "#{grant.name}: uses like “#{approval.title}” allowed #{duration_words(duration)}"
+            ),
+          grant_id: grant.id
+        })
     end
   end
 
@@ -1068,16 +1159,101 @@ defmodule MDTClient.Sandbox.Server do
     end
   end
 
-  # Answers everyone held on `approval`: the proxy connections and requests.
+  # Adds an allowance to an on grant, and lets through every use waiting on
+  # it that the allowance covers.
+  defp allow(state, grant, pattern, duration) do
+    allowance = %Allowance{
+      id: "allowance-" <> unique(),
+      pattern: pattern,
+      until: if(duration == :grant, do: nil, else: DateTime.add(now(), duration * 60, :second))
+    }
+
+    if allowance.until do
+      Process.send_after(self(), {:expire_allowance, grant.id, allowance.id}, duration * 60_000)
+    end
+
+    state =
+      state.approvals
+      |> Enum.filter(fn other ->
+        other.status == :waiting and other.grant_id == grant.id and Approval.use?(other) and
+          Allowance.covers?(allowance, other.pattern)
+      end)
+      |> Enum.reduce(state, fn other, acc ->
+        how = if pattern == :all, do: "every use", else: "similar"
+
+        acc
+        |> settle(
+          other,
+          :allowed,
+          {:allow, if(pattern == :all, do: :all, else: :similar), duration}
+        )
+        |> answer_waiters(other, :allow)
+        |> log(event_for(other, :allowed, "you allowed #{how} #{duration_words(duration)}"))
+      end)
+
+    grant = Enum.find(state.grants, &(&1.id == grant.id))
+
+    state
+    |> replace_grant(%{grant | allowances: grant.allowances ++ [allowance]})
+    |> changed()
+  end
+
+  # Turns a grant on for `minutes` (or `:until_off`); `:all` also lets every
+  # use through for as long as it stays on.
+  defp turn_on(state, nil, _minutes, _uses, _why), do: state
+
+  defp turn_on(state, grant, minutes, uses, why) do
+    expires_at =
+      if minutes == :until_off, do: nil, else: DateTime.add(now(), minutes * 60, :second)
+
+    grant = %{grant | state: :on, expires_at: expires_at}
+    schedule_expiry(grant)
+
+    state =
+      state
+      |> replace_grant(grant)
+      |> log(%{
+        outcome: :grant,
+        summary:
+          "#{grant.name} turned on #{duration_words(minutes)}" <>
+            if(uses == :all, do: ", every use allowed", else: "") <> why,
+        grant_id: grant.id
+      })
+      |> write_inbox()
+      |> changed()
+
+    if uses == :all, do: allow(state, grant, :all, :grant), else: state
+  end
+
+  # Turning a grant on yourself answers the agents waiting for it.
+  defp settle_activations(state, grant_id, minutes, uses) do
+    state.approvals
+    |> Enum.filter(
+      &(&1.status == :waiting and &1.kind == :activation and &1.grant_id == grant_id)
+    )
+    |> Enum.reduce(state, fn approval, acc ->
+      acc
+      |> settle(approval, :allowed, {:turn_on, minutes, uses})
+      |> answer_waiters(approval, :allow)
+    end)
+  end
+
+  # Answers everyone held on `approval`: the proxy's connections and
+  # requests, and agents waiting through the channel.
   defp answer_waiters(state, approval, outcome) do
     {waiters, all} = Map.pop(state.waiters, approval.id, [])
     state = %{state | waiters: all}
     grant = Enum.find(state.grants, &(&1.id == approval.grant_id))
+    settled = Enum.find(state.approvals, &(&1.id == approval.id)) || approval
 
     Enum.reduce(waiters, state, fn
+      {from, {:await, _ref}}, acc ->
+        GenServer.reply(from, {:ok, settled, grant})
+        acc
+
       {from, :connection}, acc ->
         GenServer.reply(from, if(outcome == :allow, do: :ok, else: {:deny, "Not allowed"}))
-        acc
+        if outcome == :allow, do: used(acc, approval.grant_id), else: acc
 
       {from, {:request, request}}, acc ->
         case {outcome, grant} do
@@ -1111,41 +1287,90 @@ defmodule MDTClient.Sandbox.Server do
     end)
   end
 
-  defp answer(state, %AgentRequest{} = request, :decline) do
-    replace_request(state, %{request | status: :declined, answered_at: now()})
-  end
+  ## Activations
 
-  defp answer(state, %AgentRequest{grant_id: id} = request, {:granted, grant_id}) do
-    target = id || grant_id
+  # What an agent asked for, checked: a grant that exists (by id, or by name
+  # in any case), or a `need` no grant meets yet.
+  defp activation(state, ask) do
+    reason = ask |> Map.get(:reason, "") |> to_string() |> String.trim() |> String.slice(0, 1_000)
+    agent = ask |> Map.get(:agent) |> to_string() |> String.trim() |> String.slice(0, 60)
+    agent = if agent == "", do: "An agent", else: agent
+    minutes = Map.get(ask, :minutes) || 60
+    wanted = ask |> Map.get(:grant) |> to_string() |> String.trim()
+    need = ask |> Map.get(:need) |> to_string() |> String.trim() |> String.slice(0, 400)
 
-    state =
-      replace_request(state, %{request | status: :granted, answered_at: now(), grant_id: target})
+    grant =
+      Enum.find(state.grants, &(&1.id == wanted)) ||
+        Enum.find(state.grants, &(String.downcase(&1.name) == String.downcase(wanted)))
 
-    case Enum.find(state.grants, &(&1.id == target)) do
-      nil ->
-        state
+    waiting = Enum.filter(state.approvals, &(&1.status == :waiting and &1.kind == :activation))
+    pattern = if grant, do: "activate #{grant.id}", else: "need #{need}"
 
-      grant ->
-        grant = %{
-          grant
-          | state: :on,
-            expires_at: DateTime.add(now(), request.minutes * 60, :second)
-        }
+    cond do
+      reason == "" ->
+        {:error, :no_reason}
 
-        schedule_expiry(grant)
+      not (is_integer(minutes) and minutes in 1..1440) ->
+        {:error, :bad_minutes}
 
-        state
-        |> replace_grant(grant)
-        |> log(%{
-          outcome: :grant,
-          summary:
-            "#{grant.name} turned on for #{request.minutes} min · asked by #{request.agent}",
-          grant_id: grant.id
-        })
-        |> write_inbox()
-        |> changed()
+      wanted == "" and need == "" ->
+        {:error, :nothing_asked}
+
+      wanted != "" and is_nil(grant) ->
+        {:error, :unknown_grant}
+
+      grant && Grant.on?(grant) ->
+        {:already_on, grant}
+
+      length(waiting) >= @max_waiting_activations and
+          not Enum.any?(waiting, &(&1.pattern == pattern)) ->
+        {:error, :too_many}
+
+      true ->
+        {:ok,
+         %Approval{
+           id: "ask-" <> unique(),
+           kind: :activation,
+           grant_id: grant && grant.id,
+           title:
+             if(grant,
+               do: "Turn on #{grant.name}",
+               else: "Access you haven't set up"
+             ),
+           agent: agent,
+           minutes: minutes,
+           need: if(grant, do: nil, else: need),
+           reason: reason,
+           pattern: pattern,
+           requested_at: now(),
+           deadline: DateTime.add(now(), @activation_hold_seconds, :second),
+           claims: [{"Reason", reason}]
+         }}
     end
   end
+
+  # One waiting ask per grant (and per described need): asking again joins it.
+  defp hold_activation(state, approval) do
+    case Enum.find(state.approvals, fn other ->
+           other.status == :waiting and other.kind == :activation and
+             other.pattern == approval.pattern
+         end) do
+      %Approval{} = waiting ->
+        joined = %{waiting | retries: waiting.retries + 1}
+        {replace_approval(state, joined), joined}
+
+      nil ->
+        Process.send_after(
+          self(),
+          {:give_up, approval.id},
+          @activation_hold_seconds * 1_000
+        )
+
+        {change(state, :approvals, &[approval | &1.approvals]), approval}
+    end
+  end
+
+  defp grant_of(state, %Approval{grant_id: id}), do: Enum.find(state.grants, &(&1.id == id))
 
   ## The VM
 
@@ -1306,6 +1531,7 @@ defmodule MDTClient.Sandbox.Server do
       cpus: state.settings.cpus,
       memory_gib: state.settings.memory_gib,
       proxy_port: state.settings.proxy_port,
+      vsock: Channel.socket_path(state.username),
       mounts:
         shares ++
           [
@@ -1590,63 +1816,89 @@ defmodule MDTClient.Sandbox.Server do
   end
 
   defp build_grant(attrs, existing) do
-    with {:ok, recipe} <- Recipes.find(attrs["recipe"] || ""),
-         name = String.trim(attrs["name"] || ""),
-         {destinations, destination_error} = destinations(attrs["destinations"], recipe),
-         errors = grant_errors(recipe, name, attrs, destination_error),
-         :ok <- if(errors == %{}, do: :ok, else: {:error, errors}) do
-      value = blank_to_nil(attrs["value"])
+    kind = Enum.find(Grant.kinds(), &(Atom.to_string(&1) == attrs["kind"]))
+
+    preset =
+      case Presets.find(attrs["preset"] || "") do
+        {:ok, %{id: id}} when id not in [:token, :network, :file] -> id
+        _none -> nil
+      end
+
+    if is_nil(kind) do
+      {:error, %{kind: "Pick what kind of access this is."}}
+    else
+      name = String.trim(attrs["name"] || "")
+      purpose = String.trim(attrs["purpose"] || "")
+      minted? = kind == :token and attrs["source"] == "minted"
+      {destinations, destination_error} = destinations(attrs["destinations"], kind)
 
       grant = %Grant{
         id: grant_id(name, existing),
         name: name,
-        recipe: recipe.id,
-        kind: recipe.kind,
-        placeholder: if(recipe.kind == :http, do: placeholder(recipe)),
-        env: list(attrs["env"], recipe.env),
-        hosts: list(attrs["hosts"], recipe.hosts),
-        carriers: recipe.carriers,
+        kind: kind,
+        preset: preset,
+        purpose: purpose,
+        placeholder: if(kind == :token, do: placeholder(attrs["prefix"])),
+        env: if(kind == :token, do: list(attrs["env"]), else: []),
+        file_env: if(kind == :token, do: list(attrs["file_env"]), else: []),
+        git: kind == :token and attrs["git"] in ["true", "on"],
+        hosts:
+          if(kind == :token, do: Enum.map(list(attrs["hosts"]), &String.downcase/1), else: []),
         destinations: destinations,
-        path: file_path(recipe, attrs["path"]),
-        source: source(recipe, attrs["mint"]),
-        rules: recipe.rules,
-        per_connection: if(recipe.id == :network, do: :ask, else: :allow)
+        path: if(kind == :file, do: "/mnt/mdt/files/" <> String.trim(attrs["path"] || "")),
+        source: if(minted?, do: {:minted, String.trim(attrs["mint"] || "")}, else: :stored)
       }
 
-      {:ok, grant, if(recipe.source == :minted, do: nil, else: value)}
-    else
-      :error -> {:error, %{recipe: "Pick what kind of access this is."}}
-      {:error, errors} -> {:error, errors}
+      case grant_errors(grant, attrs, destination_error) do
+        errors when errors == %{} ->
+          {:ok, grant,
+           if(minted? or kind == :network, do: nil, else: blank_to_nil(attrs["value"]))}
+
+        errors ->
+          {:error, errors}
+      end
     end
   end
 
-  defp grant_errors(recipe, name, attrs, destination_error) do
+  @variable ~r/^[A-Za-z_][A-Za-z0-9_]*$/
+  @host ~r/^(\*\.)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/
+  @prefix ~r/^[A-Za-z0-9_.\-]{0,24}$/
+
+  defp grant_errors(%Grant{} = grant, attrs, destination_error) do
+    token? = grant.kind == :token
+    variables = grant.env ++ grant.file_env
+
     [
-      {:name, name == "", "Give it a name you'll recognise on an approval."},
-      {:hosts, recipe.kind == :http and list(attrs["hosts"], recipe.hosts) == [],
-       "List at least one host the value may go to."},
-      {:env,
-       recipe.kind == :http and recipe.id != :google and list(attrs["env"], recipe.env) == [],
-       "Name the variable the VM will read the placeholder from."},
-      {:destinations, recipe.kind == :network and destination_error != nil, destination_error},
-      {:path, recipe.kind == :file and not valid_file_name?(attrs["path"]),
+      {:name, grant.name == "", "Give it a name you'll recognise on an approval."},
+      {:purpose, grant.purpose == "",
+       "Say what it's for. Agents in the VM read this to find the grant they need."},
+      {:hosts, token? and grant.hosts == [], "List at least one host the value may go to."},
+      {:hosts, token? and not Enum.all?(grant.hosts, &Regex.match?(@host, &1)),
+       "Hosts are names like api.example.com, or *.example.com for its subdomains."},
+      {:env, token? and not Enum.all?(variables, &Regex.match?(@variable, &1)),
+       "Variable names are letters, digits and underscores, not starting with a digit."},
+      {:prefix, token? and not Regex.match?(@prefix, String.trim(attrs["prefix"] || "")),
+       "Up to 24 letters, digits, dots, dashes or underscores."},
+      {:destinations, grant.kind == :network and destination_error != nil, destination_error},
+      {:path, grant.kind == :file and not valid_file_name?(attrs["path"]),
        "Name the file, such as kubeconfig. It appears under /mnt/mdt/files/."},
-      {:mint, recipe.source == :minted and blank_to_nil(attrs["mint"]) == nil,
+      {:mint, match?({:minted, ""}, grant.source),
        "Enter the command that prints a short-lived token."},
       {:value,
-       recipe.source == :stored and recipe.kind in [:http, :file] and
+       grant.kind in [:token, :file] and grant.source == :stored and
          blank_to_nil(attrs["value"]) == nil,
        "Paste the value. It is kept in your vault, never in the VM."}
     ]
     |> Enum.filter(fn {_field, failed?, _message} -> failed? end)
+    |> Enum.reverse()
     |> Map.new(fn {field, _failed?, message} -> {field, message} end)
   end
 
-  defp destinations(text, recipe) do
-    entries = list(text, recipe.destinations)
+  defp destinations(text, kind) do
+    entries = list(text)
 
     cond do
-      recipe.kind != :network ->
+      kind != :network ->
         {[], nil}
 
       entries == [] ->
@@ -1672,25 +1924,20 @@ defmodule MDTClient.Sandbox.Server do
     name != "" and Path.basename(name) == name and name not in [".", ".."]
   end
 
-  defp file_path(%{kind: :file}, name), do: "/mnt/mdt/files/" <> String.trim(name || "")
-  defp file_path(_recipe, _name), do: nil
-
-  defp source(%{source: :minted}, mint), do: {:minted, String.trim(mint)}
-  defp source(_recipe, _mint), do: :stored
-
-  defp placeholder(%{id: :github}), do: random_placeholder("ghp_", 36)
-  defp placeholder(%{id: :google}), do: random_placeholder("ya29.mdt", 48)
-  defp placeholder(_recipe), do: random_placeholder("mdt_", 40)
-
-  defp random_placeholder(prefix, length) do
+  # Placeholders look like the real thing where a client checks the format
+  # (`ghp_` for GitHub), and are long and random, so finding one in a header
+  # is unambiguous.
+  defp placeholder(prefix) do
+    prefix = String.trim(prefix || "")
+    prefix = if prefix == "", do: "mdt_", else: prefix
     alphabet = ~c"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
-    bytes = :crypto.strong_rand_bytes(length)
+    bytes = :crypto.strong_rand_bytes(40)
     prefix <> for(<<byte <- bytes>>, into: "", do: <<Enum.at(alphabet, rem(byte, 62))>>)
   end
 
-  defp list(nil, default), do: default
+  defp list(nil), do: []
 
-  defp list(value, _default) do
+  defp list(value) do
     value
     |> String.split([",", "\n"])
     |> Enum.map(&String.trim/1)
@@ -1785,14 +2032,6 @@ defmodule MDTClient.Sandbox.Server do
     )
   end
 
-  defp replace_request(state, request) do
-    change(
-      state,
-      :requests,
-      &Enum.map(&1.requests, fn r -> if r.id == request.id, do: request, else: r end)
-    )
-  end
-
   defp used(state, grant_id) do
     case Enum.find(state.grants, &(&1.id == grant_id)) do
       nil ->
@@ -1817,9 +2056,9 @@ defmodule MDTClient.Sandbox.Server do
     end)
   end
 
-  defp settle_waiting(state, grant_id, decision) do
+  defp settle_waiting(state, grant_id, decision, kinds \\ [:request, :connection]) do
     state.approvals
-    |> Enum.filter(&(&1.status == :waiting and &1.grant_id == grant_id))
+    |> Enum.filter(&(&1.status == :waiting and &1.grant_id == grant_id and &1.kind in kinds))
     |> Enum.reduce(state, fn approval, acc ->
       acc
       |> settle(approval, :denied, decision)
@@ -1867,10 +2106,7 @@ defmodule MDTClient.Sandbox.Server do
   defp broadcast(state, message),
     do: Phoenix.PubSub.broadcast(MDTClient.PubSub, topic(state.username), message)
 
-  defp waiting_count(state) do
-    Enum.count(state.approvals, &(&1.status == :waiting)) +
-      Enum.count(state.requests, &(&1.status == :waiting))
-  end
+  defp waiting_count(state), do: Enum.count(state.approvals, &(&1.status == :waiting))
 
   defp task(state, purpose, fun) do
     %Task{ref: ref} = Task.Supervisor.async_nolink(@tasks, fun)
@@ -1948,9 +2184,7 @@ defmodule MDTClient.Sandbox.Server do
         case Vault.open(key, blob) do
           {:ok, %{version: 1} = saved} ->
             saved
-            |> Map.update!(:grants, fn grants ->
-              Enum.map(grants, &struct(Grant, Map.from_struct(&1)))
-            end)
+            |> Map.update!(:grants, fn grants -> Enum.map(grants, &Grant.upgrade/1) end)
             |> Map.update(:builds, [], fn builds ->
               Enum.map(builds, &struct(Build, Map.from_struct(&1)))
             end)

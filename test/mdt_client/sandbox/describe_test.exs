@@ -25,7 +25,6 @@ defmodule MDTClient.Sandbox.DescribeTest do
         })
       )
 
-    assert described.tags == ["git_push"]
     assert described.title == "Push fix to oliveigah/klife"
     assert {"Ref", "refs/heads/fix  new at 8bd04e2"} in described.facts
     assert {"Client", "git/2.39.5"} in described.facts
@@ -45,21 +44,21 @@ defmodule MDTClient.Sandbox.DescribeTest do
         request(%{host: "api.github.com", method: "POST", path: "/graphql", body: mutation})
       )
 
-    assert described.tags == ["graphql_mutation"]
     assert {"Operation", "mutation CreatePR"} in described.facts
     assert {"Title", "Fix the stall"} in described.claims
     refute Enum.any?(described.facts, fn {_, value} -> value == "Fix the stall" end)
 
     query = Jason.encode!(%{query: "{ viewer { login } }"})
 
-    assert %{tags: ["graphql_query"]} =
+    assert %{title: "GraphQL query viewer on github.com"} =
              Describe.request(request(%{method: "POST", path: "/graphql", body: query}))
   end
 
-  test "REST requests are reads or writes" do
-    assert %{tags: ["read"]} = Describe.request(request(%{path: "/repos/o/r/pulls?state=open"}))
+  test "REST requests name their endpoint, and similar ones share a pattern" do
+    assert %{facts: [{"Endpoint", "GET /repos/o/r/pulls"}]} =
+             Describe.request(request(%{path: "/repos/o/r/pulls?state=open"}))
 
-    assert %{tags: ["write"], pattern: "DELETE api.github.com/repos/o/r"} =
+    assert %{pattern: "DELETE api.github.com/repos/o/r"} =
              Describe.request(
                request(%{host: "api.github.com", method: "DELETE", path: "/repos/o/r"})
              )

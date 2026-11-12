@@ -150,8 +150,8 @@ defmodule MDTClientWeb.SandboxLive.Components do
   def bytes(n) when n < 1024 * 1024, do: "#{Float.round(n / 1024, 1)} KB"
   def bytes(n), do: "#{Float.round(n / (1024 * 1024), 1)} MB"
 
-  @doc "The square tile that stands for a grant's recipe."
-  attr :recipe, :map, required: true
+  @doc "The square tile that stands for a grant: its preset's icon, or its type's."
+  attr :icon, :string, required: true
   attr :on, :boolean, default: false
   attr :class, :any, default: "size-8"
 
@@ -165,7 +165,7 @@ defmodule MDTClientWeb.SandboxLive.Components do
       ),
       @class
     ]}>
-      <.icon name={@recipe.icon} class="size-4" />
+      <.icon name={@icon} class="size-4" />
     </span>
     """
   end
@@ -213,7 +213,7 @@ defmodule MDTClientWeb.SandboxLive.Components do
       <.icon name="hero-exclamation-triangle-micro" class="size-3" /> VM holds the value
     </span>
     <span
-      :if={@grant.kind == :http}
+      :if={@grant.kind == :token}
       class="inline-flex items-center gap-1 rounded border border-ok/30 bg-ok-soft/30 px-1.5 py-0.5 text-[10px] font-medium text-ok-strong"
       title="The VM only has a placeholder. MDT swaps in the real value on the way out."
     >
@@ -403,9 +403,4 @@ defmodule MDTClientWeb.SandboxLive.Components do
   end
 
   defp segment_tone(_tone, _value), do: "bg-active text-ink shadow-sm"
-
-  @doc "The words for a rule action."
-  def action_word(:allow), do: "Allow"
-  def action_word(:ask), do: "Ask"
-  def action_word(:deny), do: "Deny"
 end

@@ -6,52 +6,64 @@ logins are out of reach, except the folders they shared with you.
 
 ## Access comes only from MDT
 
-This VM holds none of the user's credentials. GitHub, Hex, Google Cloud,
-private networks (VPN, LAN, databases) and every other service are opened by
-grants, which the user adds and turns on in MDT, under Agent Sandbox, Grants.
-`/mnt/mdt/grants.md` lists the grants as they are now. It changes while you
-work, so read it again whenever access fails.
+This VM holds none of the user's credentials. Every service that needs a
+login, and every private network (VPN, LAN, databases), is opened by a
+grant: access the user sets up in MDT and turns on for a while. Each grant
+says what it is for, in the user's words. Grants change while you work.
 
 When something needs access you don't have, or a tool says you're not
 logged in:
 
-1. Stop, and tell the user which grant to add or turn on, and why: the kind
-   (GitHub token, Hex API key, Google Cloud, API token, network access,
-   database tunnel, file) and the host or address it is for.
-2. Don't follow the tool's usual instructions. They don't apply here:
+1. Run `mdt grants`. It lists every grant: its id, what it is for, how to
+   use it, and whether it is on. (`/mnt/mdt/grants.md` holds the same.)
+2. If one fits, ask for it:
+   `mdt request GRANT_ID --reason "what you are about to do, and why"`.
+   Add `--minutes N` for how long you need it (60 by default). The user sees
+   your reason and decides; `mdt` waits up to a minute for the answer. If it
+   says the ask is still waiting, keep working on what doesn't need it and
+   run `mdt wait ASK_ID` later.
+3. If none fits, ask for what's missing:
+   `mdt request --need "the access, and the service or host it is for" --reason "why"`.
+   The user sets the grant up, then it is on.
+4. Don't follow the tool's usual instructions. They don't apply here:
    - no login commands (`gh auth login`, `gcloud auth login`, `npm login`,
      `docker login`, `mix hex.user auth`, `codex login --with-api-key`, …);
    - no SSH keys, made or added anywhere;
    - never ask the user to paste a token, password or key into the VM, and
      never write one into a file or a variable yourself.
-3. Once the user says the grant is on, try again.
+
+`mdt` exits with 0 when the grant is on, 1 when the ask was wrong, 2 while
+it waits for the user, 3 when declined or given up, 4 when MDT is locked or
+closed.
 
 Variables such as `GH_TOKEN` hold placeholders, not real values. MDT swaps
-the real value in on the way out, only toward that grant's hosts, and only
-when the user's rules allow it. A placeholder is worthless anywhere else:
-don't copy it, print it or send it elsewhere, and don't look for the real
-value.
+the real value in on the way out, only toward that grant's hosts. A
+placeholder is worthless anywhere else: don't copy it, print it or send it
+elsewhere, and don't look for the real value.
+
+Even with a grant on, each use (each request carrying the placeholder, each
+connection to a private address) waits for the user's approval unless they
+allowed it for a while. A request can hang for minutes: wait, and don't
+retry in a loop.
 
 ## How MDT answers
 
 - An HTTP error whose JSON body has `"by": "MDT agent sandbox"` comes from
   MDT, not from the service. Its `code`:
-  - `mdt_grant_off`: the grant exists but is off. Ask the user to turn it on.
-  - `mdt_denied`: one of the user's rules refuses this request. Don't retry;
-    tell the user what you were trying to do.
-  - `mdt_denied_by_user`: the user refused it. Don't retry unless asked.
+  - `mdt_grant_off`: the grant exists but is off. Ask for it with
+    `mdt request`.
+  - `mdt_denied_by_user`: the user refused this use. Don't retry unless
+    asked; tell the user what you were trying to do.
   - `mdt_approval_timeout`: nobody answered in time. Tell the user, and try
     again when they're ready.
   - `mdt_placeholder_blocked`: the placeholder was sent to a host its grant
     doesn't cover.
   - `mdt_no_value`, `mdt_mint_failed`: the grant can't give a value right
     now. Tell the user.
-- A request can hang for a few minutes while it waits for the user's
-  approval. That's normal: wait, and don't retry in a loop.
 - Private addresses (10.x, 172.16-31.x, 192.168.x, VPN ranges) and the user's
   machine are refused unless a network grant lists them.
-- Nothing you run reaches the user's machine. There is no way to run a
-  command there.
+- Nothing you run reaches the user's machine, except `mdt`, which can only
+  read the grants and ask.
 
 ## Tools
 

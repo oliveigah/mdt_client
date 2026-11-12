@@ -1,14 +1,14 @@
 defmodule MDTClientWeb.SandboxLive.Grants do
   @moduledoc """
-  The grants page: every credential and piece of network access the VM can be
-  given, each with a switch; one grant's details, rules and allowances; and
-  the dialog that adds a grant from a recipe.
+  The grants page: every piece of access the VM can be given, each with a
+  switch; one grant's details, how its uses are approved, and its
+  allowances; and the dialog that adds a grant, of a type or from a preset.
   """
   use MDTClientWeb, :html
 
   import MDTClientWeb.SandboxLive.Components
 
-  alias MDTClient.Sandbox.{Grant, Recipes, Rule}
+  alias MDTClient.Sandbox.{Grant, Presets}
 
   @durations [{15, "15 min"}, {60, "1 h"}, {240, "4 h"}, {"until_off", "Until off"}]
 
@@ -26,7 +26,7 @@ defmodule MDTClientWeb.SandboxLive.Grants do
     ~H"""
     <.page_header
       title="Grants"
-      subtitle="Turn access on for as long as a task needs. Credentials sent over HTTP never enter the VM: it gets a placeholder, and MDT swaps the real value in on the way out."
+      subtitle="Turn access on for as long as a task needs; agents in the VM can ask for it with mdt request. Tokens never enter the VM: it gets a placeholder, and MDT swaps the real value in on the way out, once you approve the use."
     >
       <:actions>
         <.button id="add-grant" variant="primary" phx-click="open_add_grant">
@@ -74,14 +74,12 @@ defmodule MDTClientWeb.SandboxLive.Grants do
   attr :now, DateTime, required: true
 
   defp grant_row(assigns) do
-    assigns = assign(assigns, recipe: Recipes.fetch!(assigns.grant.recipe))
-
     ~H"""
     <li
       id={"grant-row-#{@grant.id}"}
       class="group/row flex items-center gap-3 px-4 py-3 transition-colors hover:bg-hover/40"
     >
-      <.grant_tile recipe={@recipe} on={Grant.on?(@grant)} />
+      <.grant_tile icon={Presets.icon(@grant)} on={Grant.on?(@grant)} />
       <div class="min-w-0 flex-1">
         <div class="flex flex-wrap items-center gap-2">
           <.link
@@ -92,8 +90,17 @@ defmodule MDTClientWeb.SandboxLive.Grants do
             {@grant.name}
           </.link>
           <.exposure grant={@grant} />
+          <span
+            :if={Enum.any?(@grant.allowances, &(&1.pattern == :all))}
+            class="rounded border border-ok/30 bg-ok-soft/30 px-1.5 py-0.5 text-[10px] font-medium text-ok-strong"
+          >
+            Every use allowed
+          </span>
         </div>
-        <p class="mt-0.5 truncate font-mono text-[11px] text-muted">{summary(@grant)}</p>
+        <p :if={@grant.purpose != ""} class="mt-0.5 truncate text-[11px] text-muted">
+          {@grant.purpose}
+        </p>
+        <p class="mt-0.5 truncate font-mono text-[10px] text-faint">{summary(@grant)}</p>
       </div>
 
       <div class="hidden shrink-0 text-right text-[11px] text-faint sm:block">
@@ -145,7 +152,7 @@ defmodule MDTClientWeb.SandboxLive.Grants do
   end
 
   @doc "A one-line description of what a grant reaches."
-  def summary(%Grant{kind: :http} = grant) do
+  def summary(%Grant{kind: :token} = grant) do
     hosts =
       case grant.hosts do
         [first, second | [_ | _] = rest] -> "#{first}, #{second} +#{length(rest)}"
@@ -173,8 +180,6 @@ defmodule MDTClientWeb.SandboxLive.Grants do
   attr :now, DateTime, required: true
 
   def detail(assigns) do
-    assigns = assign(assigns, recipe: Recipes.fetch!(assigns.grant.recipe))
-
     ~H"""
     <.link
       patch={~p"/tools/sandbox/grants"}
@@ -185,13 +190,16 @@ defmodule MDTClientWeb.SandboxLive.Grants do
     </.link>
 
     <header id={"grant-detail-#{@grant.id}"} class="mb-5 flex flex-wrap items-center gap-3">
-      <.grant_tile recipe={@recipe} on={Grant.on?(@grant)} class="size-11" />
+      <.grant_tile icon={Presets.icon(@grant)} on={Grant.on?(@grant)} class="size-11" />
       <div class="min-w-0 flex-1">
         <div class="flex flex-wrap items-center gap-2">
           <h1 class="text-lg font-semibold tracking-tight text-ink">{@grant.name}</h1>
           <.exposure grant={@grant} />
+          <span class="font-mono text-[10px] text-faint">id {@grant.id}</span>
         </div>
-        <p class="mt-0.5 text-[13px] text-muted">{@recipe.name} · {@recipe.blurb}</p>
+        <p class="mt-0.5 text-[13px] text-muted">
+          {Presets.kind_name(@grant.kind)} · <span class="text-ink">{@grant.purpose}</span>
+        </p>
       </div>
       <div class="flex items-center gap-3">
         <%= if Grant.on?(@grant) do %>
@@ -235,7 +243,7 @@ defmodule MDTClientWeb.SandboxLive.Grants do
         </.card>
 
         <.card
-          :if={@grant.kind in [:http, :file] and @grant.source == :stored}
+          :if={@grant.kind in [:token, :file] and @grant.source == :stored}
           id="grant-value-card"
           title="The real value"
           subtitle="Kept in your vault, encrypted with your password. MDT never shows it again."
@@ -278,82 +286,53 @@ defmodule MDTClientWeb.SandboxLive.Grants do
         </.card>
 
         <.card
-          :if={@grant.kind == :http}
-          id="grant-rules"
-          title="Rules"
-          subtitle="Checked in order for every request that carries the placeholder. Ask holds the request until you decide."
-          body_class=""
+          :if={@grant.kind != :file}
+          id="grant-uses"
+          title="Uses"
+          subtitle={
+            if(@grant.kind == :network,
+              do:
+                "Every connection to these destinations waits for your approval, unless an allowance covers it.",
+              else:
+                "Every request carrying the placeholder waits for your approval, unless an allowance covers it."
+            )
+          }
         >
-          <ul class="divide-y divide-line-soft">
-            <li
-              :for={rule <- @grant.rules}
-              id={"rule-#{@grant.id}-#{rule.id}"}
-              class="flex items-center gap-3 px-4 py-2.5"
-            >
-              <div class="min-w-0 flex-1">
-                <p class="text-xs font-medium text-ink">{rule.label}</p>
-                <p class="mt-0.5 truncate font-mono text-[10px] text-faint">{rule.match}</p>
-              </div>
-              <.segmented
-                id={"rule-action-#{@grant.id}-#{rule.id}"}
-                options={for action <- Rule.actions(), do: {action, action_word(action)}}
-                value={rule.action}
-                event="set_rule"
-                name="action"
-                values={%{"id" => @grant.id, "rule" => rule.id}}
-                tone={:actions}
-              />
-            </li>
-            <li
-              id={"rule-#{@grant.id}-default"}
-              class="flex items-center gap-3 bg-deep/40 px-4 py-2.5"
-            >
-              <div class="min-w-0 flex-1">
-                <p class="text-xs font-medium text-ink">Anything else</p>
-                <p class="mt-0.5 text-[10px] text-faint">When no rule above matches</p>
-              </div>
-              <.segmented
-                id={"rule-default-#{@grant.id}"}
-                options={for action <- Rule.actions(), do: {action, action_word(action)}}
-                value={@grant.default_action}
-                event="set_default"
-                name="action"
-                values={%{"id" => @grant.id}}
-                tone={:actions}
-              />
-            </li>
-          </ul>
-        </.card>
-
-        <.card
-          :if={@grant.kind == :network}
-          id="grant-connections"
-          title="Connections"
-          subtitle="Raw connections can't be read like HTTP, so the choice is per connection."
-        >
-          <div class="flex items-center gap-3">
+          <div class="flex flex-wrap items-center gap-3">
             <p class="flex-1 text-xs text-muted">
-              When the VM opens a connection to one of these destinations
+              <%= if Grant.on?(@grant) do %>
+                Let every use through without asking
+              <% else %>
+                Turn it on first to let every use through
+              <% end %>
             </p>
-            <.segmented
-              id={"per-connection-#{@grant.id}"}
-              options={[{:allow, "Let it through"}, {:ask, "Ask me"}]}
-              value={@grant.per_connection}
-              event="set_per_connection"
-              name="choice"
-              values={%{"id" => @grant.id}}
-              tone={:actions}
-            />
+            <div class="inline-flex items-center gap-0.5 rounded-md border border-line bg-deep p-0.5">
+              <button
+                :for={{value, label} <- [{"10", "10 min"}, {"60", "1 h"}, {"grant", "While on"}]}
+                type="button"
+                id={"allow-all-#{@grant.id}-#{value}"}
+                phx-click="allow_all"
+                phx-value-id={@grant.id}
+                phx-value-minutes={value}
+                disabled={not Grant.on?(@grant)}
+                class="cursor-pointer rounded px-2 py-1 text-[11px] font-medium text-muted transition-colors hover:bg-ok-soft/50 hover:text-ok-strong disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-muted"
+              >
+                {label}
+              </button>
+            </div>
           </div>
+          <p class="mt-3 text-[11px] leading-4 text-faint">
+            On an approval you can also allow uses like that one for a while. Allowances end with their time, or when the grant turns off.
+          </p>
         </.card>
       </div>
 
       <div class="space-y-5">
         <.card
-          :if={@grant.kind == :http}
+          :if={@grant.kind != :file}
           id="grant-allowances"
           title="Allowed for now"
-          subtitle="Added by “Allow similar” on an approval. They end with their time, or when the grant turns off."
+          subtitle="Uses these cover go through without asking. They end with their time, or when the grant turns off."
           body_class=""
         >
           <div :if={@grant.allowances == []}>
@@ -366,7 +345,12 @@ defmodule MDTClientWeb.SandboxLive.Grants do
               class="flex items-center gap-3 px-4 py-2.5"
             >
               <div class="min-w-0 flex-1">
-                <p class="break-all font-mono text-[11px] text-ink">{allowance.pattern}</p>
+                <p :if={allowance.pattern == :all} class="text-[11px] font-medium text-ok-strong">
+                  Every use
+                </p>
+                <p :if={allowance.pattern != :all} class="break-all font-mono text-[11px] text-ink">
+                  {allowance.pattern}
+                </p>
                 <p class="mt-0.5 text-[10px] text-faint">
                   <%= if allowance.until do %>
                     <.clock
@@ -436,11 +420,11 @@ defmodule MDTClientWeb.SandboxLive.Grants do
 
   attr :grant, Grant, required: true
 
-  defp delivery(%{grant: %Grant{kind: :http}} = assigns) do
+  defp delivery(%{grant: %Grant{kind: :token}} = assigns) do
     ~H"""
     <div class="space-y-4">
       <p class="text-xs leading-5 text-muted">
-        The VM sees a placeholder. When a request carrying it goes to one of the hosts below, MDT checks the rules, swaps in the real value and sends it on. Sent anywhere else, it is blocked and logged.
+        The VM sees a placeholder. When a request carrying it goes to one of the hosts below, MDT asks you, swaps in the real value and sends it on. Sent anywhere else, it is blocked and logged.
       </p>
       <dl class="grid grid-cols-[8rem_minmax(0,1fr)] gap-x-4 gap-y-3 text-xs">
         <dt class="pt-0.5 text-muted">In the VM</dt>
@@ -448,8 +432,17 @@ defmodule MDTClientWeb.SandboxLive.Grants do
           <p :for={var <- @grant.env} class="font-mono text-[11px] text-ink">
             {var}=<span class="select-all text-muted">{@grant.placeholder}</span>
           </p>
-          <p :if={@grant.recipe == :github} class="text-[11px] text-faint">
-            plus a git credential helper for https://github.com
+          <p :for={var <- @grant.file_env} class="font-mono text-[11px] text-ink">
+            {var}=<span class="text-muted">{Grant.token_file(@grant)}</span>
+          </p>
+          <p class="text-[11px] text-faint">
+            The file {Grant.token_file(@grant)} holds the placeholder too.
+          </p>
+          <p :if={Grant.git_hosts(@grant) != []} class="text-[11px] text-faint">
+            git over HTTPS gets it from MDT's credential helper for {Enum.join(
+              Grant.git_hosts(@grant),
+              ", "
+            )}.
           </p>
         </dd>
 
@@ -463,9 +456,9 @@ defmodule MDTClientWeb.SandboxLive.Grants do
           </span>
         </dd>
 
-        <dt class="pt-0.5 text-muted">Carried in</dt>
-        <dd class="space-y-0.5">
-          <p :for={carrier <- @grant.carriers} class="font-mono text-[11px] text-ink">{carrier}</p>
+        <dt class="pt-0.5 text-muted">Swapped in</dt>
+        <dd class="text-[11px] text-ink">
+          Any header carrying the placeholder, Basic credentials included.
         </dd>
 
         <dt class="pt-0.5 text-muted">Real value</dt>
@@ -530,14 +523,22 @@ defmodule MDTClientWeb.SandboxLive.Grants do
 
   ## Adding a grant
 
-  @doc "The dialog that adds a grant: first what kind, then its details."
+  @doc """
+  The dialog that adds a grant: first a type or a preset, then the form.
+  Opened from an agent's ask, it says what the agent asked for, and the new
+  grant answers it.
+  """
   attr :adding, :map, required: true
-  attr :requests, :list, required: true
+  attr :waiting, :list, required: true
 
   def add_dialog(assigns) do
     assigns =
       assign(assigns,
-        request: Enum.find(assigns.requests, &(&1.id == assigns.adding[:request_id]))
+        ask:
+          Enum.find(
+            assigns.waiting,
+            &(&1.id == assigns.adding[:approval_id] and &1.kind == :activation)
+          )
       )
 
     ~H"""
@@ -558,22 +559,23 @@ defmodule MDTClientWeb.SandboxLive.Grants do
             type="button"
             id="add-grant-back"
             phx-click="add_grant_back"
-            title="Pick another kind"
+            title="Pick another type"
             class="flex size-7 cursor-pointer items-center justify-center rounded text-muted transition-colors hover:bg-hover hover:text-ink"
           >
             <.icon name="hero-arrow-left-micro" class="size-4" />
           </button>
           <div class="min-w-0 flex-1">
             <h2 id="add-grant-title" class="text-sm font-semibold text-ink">
-              {if @adding.step == :recipe, do: "Add a grant", else: "Add #{@adding.recipe.name}"}
+              {if @adding.step == :pick, do: "Add a grant", else: "Add #{@adding.preset.name}"}
             </h2>
             <p class="mt-0.5 text-[11px] text-muted">
-              <%= if @request do %>
-                {@request.agent} asked for: {@request.need}
-              <% else %>
-                {if @adding.step == :recipe,
-                  do: "Pick what it is. Each kind starts from the safest way to deliver it.",
-                  else: @adding.recipe.blurb}
+              <%= cond do %>
+                <% @ask -> %>
+                  {@ask.agent} asked for: {@ask.need}
+                <% @adding.step == :pick -> %>
+                  Pick what it is, or start from a preset.
+                <% true -> %>
+                  {@adding.preset.blurb}
               <% end %>
             </p>
           </div>
@@ -589,37 +591,68 @@ defmodule MDTClientWeb.SandboxLive.Grants do
         </header>
 
         <div class="min-h-0 overflow-y-auto p-5">
-          <div :if={@adding.step == :recipe} id="recipe-grid" class="grid gap-2.5 sm:grid-cols-2">
-            <button
-              :for={recipe <- Recipes.all()}
-              type="button"
-              id={"recipe-#{recipe.id}"}
-              phx-click="pick_recipe"
-              phx-value-recipe={recipe.id}
-              class="group flex cursor-pointer items-start gap-3 rounded-lg border border-line p-3 text-left transition-all hover:-translate-y-px hover:border-accent/50 hover:bg-accent-soft/20 focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
-            >
-              <span class="flex size-8 shrink-0 items-center justify-center rounded-lg bg-deep text-muted transition-colors group-hover:text-accent">
-                <.icon name={recipe.icon} class="size-4" />
-              </span>
-              <span class="min-w-0 flex-1">
-                <span class="block text-xs font-semibold text-ink">{recipe.name}</span>
-                <span class="mt-0.5 block text-[11px] leading-4 text-muted">{recipe.blurb}</span>
+          <div :if={@adding.step == :pick} class="space-y-5">
+            <div id="type-grid" class="grid gap-2.5 sm:grid-cols-3">
+              <button
+                :for={type <- Presets.types()}
+                type="button"
+                id={"type-#{type.id}"}
+                phx-click="pick_preset"
+                phx-value-preset={type.id}
+                class="group flex cursor-pointer flex-col items-start gap-2 rounded-lg border border-line p-3 text-left transition-all hover:-translate-y-px hover:border-accent/50 hover:bg-accent-soft/20 focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
+              >
+                <span class="flex size-8 items-center justify-center rounded-lg bg-deep text-muted transition-colors group-hover:text-accent">
+                  <.icon name={type.icon} class="size-4" />
+                </span>
+                <span class="block text-xs font-semibold text-ink">{type.name}</span>
+                <span class="block text-[11px] leading-4 text-muted">{type.blurb}</span>
                 <span class={[
-                  "mt-1.5 inline-flex items-center gap-1 text-[10px] font-medium",
-                  if(recipe.kind == :file, do: "text-warn-strong", else: "text-ok-strong")
+                  "inline-flex items-center gap-1 text-[10px] font-medium",
+                  if(type.kind == :file, do: "text-warn-strong", else: "text-ok-strong")
                 ]}>
                   <.icon
                     name={
-                      if recipe.kind == :file,
+                      if type.kind == :file,
                         do: "hero-exclamation-triangle-micro",
                         else: "hero-shield-check-micro"
                     }
                     class="size-3"
                   />
-                  {exposure_words(recipe)}
+                  {exposure_words(type.kind)}
                 </span>
-              </span>
-            </button>
+              </button>
+            </div>
+
+            <div>
+              <p class="mb-2 text-[10px] font-semibold uppercase tracking-wide text-muted">
+                Presets
+              </p>
+              <div id="preset-grid" class="grid gap-2 sm:grid-cols-2">
+                <button
+                  :for={preset <- Presets.presets()}
+                  type="button"
+                  id={"preset-#{preset.id}"}
+                  phx-click="pick_preset"
+                  phx-value-preset={preset.id}
+                  class="group flex cursor-pointer items-center gap-2.5 rounded-lg border border-line-soft px-3 py-2 text-left transition-all hover:border-accent/50 hover:bg-accent-soft/20"
+                >
+                  <.icon
+                    name={preset.icon}
+                    class="size-4 shrink-0 text-muted transition-colors group-hover:text-accent"
+                  />
+                  <span class="min-w-0 flex-1">
+                    <span class="block text-xs font-medium text-ink">{preset.name}</span>
+                    <span class="block truncate text-[10px] text-faint">{preset.blurb}</span>
+                  </span>
+                  <span class="shrink-0 rounded bg-deep px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wide text-faint">
+                    {Presets.kind_name(preset.kind)}
+                  </span>
+                </button>
+              </div>
+              <p class="mt-2 text-[11px] leading-4 text-faint">
+                A preset only fills the form. What it makes is a plain grant you can change.
+              </p>
+            </div>
           </div>
 
           <.form
@@ -630,13 +663,14 @@ defmodule MDTClientWeb.SandboxLive.Grants do
             phx-submit="create_grant"
             class="space-y-4"
           >
-            <input type="hidden" name="grant[recipe]" value={@adding.recipe.id} />
+            <input type="hidden" name="grant[kind]" value={@adding.preset.kind} />
+            <input type="hidden" name="grant[preset]" value={@adding.preset.id} />
             <ol
-              id="recipe-guide"
+              id="preset-guide"
               class="space-y-1.5 rounded-lg border border-accent/25 bg-accent-soft/20 p-3"
             >
               <li
-                :for={{step, index} <- Enum.with_index(@adding.recipe.guide, 1)}
+                :for={{step, index} <- Enum.with_index(@adding.preset.guide, 1)}
                 class="flex gap-2.5 text-xs leading-5 text-ink"
               >
                 <span class="flex size-5 shrink-0 items-center justify-center rounded-full bg-accent-soft text-[10px] font-semibold text-accent-strong">
@@ -645,6 +679,7 @@ defmodule MDTClientWeb.SandboxLive.Grants do
                 <span>{step}</span>
               </li>
             </ol>
+
             <.input
               field={@adding.form[:name]}
               label="Name"
@@ -653,19 +688,22 @@ defmodule MDTClientWeb.SandboxLive.Grants do
             />
             <.field_error errors={@adding.errors} field={:name} />
 
-            <%= if @adding.recipe.kind == :http do %>
+            <div>
+              <.input
+                field={@adding.form[:purpose]}
+                type="textarea"
+                label="What it's for"
+                rows="2"
+                placeholder="Push to github.com/me/project and open pull requests there"
+              />
+              <p class="mt-1 text-[10px] text-faint">
+                Agents in the VM read this to find the grant they need. Say what it opens, and for what.
+              </p>
+              <.field_error errors={@adding.errors} field={:purpose} />
+            </div>
+
+            <%= if @adding.preset.kind == :token do %>
               <div class="grid gap-4 sm:grid-cols-2">
-                <div>
-                  <.input
-                    field={@adding.form[:env]}
-                    label="Variables in the VM"
-                    placeholder="API_TOKEN"
-                  />
-                  <p class="mt-1 text-[10px] text-faint">
-                    Comma separated. They hold the placeholder.
-                  </p>
-                  <.field_error errors={@adding.errors} field={:env} />
-                </div>
                 <div>
                   <.input
                     field={@adding.form[:hosts]}
@@ -677,38 +715,133 @@ defmodule MDTClientWeb.SandboxLive.Grants do
                   </p>
                   <.field_error errors={@adding.errors} field={:hosts} />
                 </div>
+                <div>
+                  <.input
+                    field={@adding.form[:env]}
+                    label="Variables holding the placeholder"
+                    placeholder="API_TOKEN"
+                  />
+                  <p class="mt-1 text-[10px] text-faint">
+                    Comma separated. Optional: a file holds it too.
+                  </p>
+                  <.field_error errors={@adding.errors} field={:env} />
+                </div>
               </div>
-              <div :if={@adding.recipe.source == :minted}>
-                <.input
-                  field={@adding.form[:mint]}
-                  label="Command that prints a short-lived token"
-                  placeholder="gcloud auth print-access-token --impersonate-service-account=… --lifetime=1800s"
-                />
-                <p class="mt-1 text-[10px] text-faint">
-                  Runs on this machine, with your host login. Only its output is used, and only until it expires.
+
+              <details
+                id="token-more"
+                class="group rounded-lg border border-line-soft"
+                open={
+                  @adding.form[:file_env].value not in [nil, ""] or
+                    @adding.form[:git].value == "true" or @adding.errors[:prefix] != nil
+                }
+              >
+                <summary class="flex cursor-pointer list-none items-center gap-1.5 px-3 py-2 text-[11px] font-medium text-muted transition-colors hover:text-ink [&::-webkit-details-marker]:hidden">
+                  <.icon
+                    name="hero-chevron-right-micro"
+                    class="size-3.5 transition-transform group-open:rotate-90"
+                  /> More ways the VM gets it
+                </summary>
+                <div class="grid gap-4 border-t border-line-soft p-3 sm:grid-cols-2">
+                  <div>
+                    <.input
+                      field={@adding.form[:file_env]}
+                      label="Variables naming the token file"
+                      placeholder="CLOUDSDK_AUTH_ACCESS_TOKEN_FILE"
+                    />
+                    <p class="mt-1 text-[10px] text-faint">
+                      For tools that read the token from a file.
+                    </p>
+                  </div>
+                  <div>
+                    <.input
+                      field={@adding.form[:prefix]}
+                      label="Placeholder starts with"
+                      placeholder="mdt_"
+                    />
+                    <p class="mt-1 text-[10px] text-faint">
+                      For clients that check the format: ghp_, sk-, ….
+                    </p>
+                    <.field_error errors={@adding.errors} field={:prefix} />
+                  </div>
+                  <label class="flex cursor-pointer items-start gap-2 sm:col-span-2">
+                    <input type="hidden" name="grant[git]" value="false" />
+                    <input
+                      type="checkbox"
+                      name="grant[git]"
+                      id="grant-git"
+                      value="true"
+                      checked={@adding.form[:git].value == "true"}
+                      class="mt-0.5 size-3.5 cursor-pointer accent-accent"
+                    />
+                    <span class="text-xs text-ink">
+                      Answer git over HTTPS for these hosts
+                      <span class="block text-[10px] text-faint">
+                        MDT's credential helper gives git the placeholder as the password.
+                      </span>
+                    </span>
+                  </label>
+                </div>
+              </details>
+
+              <div>
+                <p class="mb-1.5 text-[11px] font-medium uppercase tracking-wide text-muted">
+                  The real value
                 </p>
-                <.field_error errors={@adding.errors} field={:mint} />
-              </div>
-              <div :if={@adding.recipe.source == :stored}>
-                <label class="mb-1 block text-[11px] font-medium uppercase tracking-wide text-muted">
-                  Value
-                </label>
-                <input
-                  type="password"
-                  name="grant[value]"
-                  id="grant-value"
-                  autocomplete="new-password"
-                  placeholder="Paste the token"
-                  class={input_classes()}
-                />
-                <p class="mt-1 text-[10px] text-faint">
-                  Kept in your vault, encrypted with your password. The VM only ever gets the placeholder.
-                </p>
-                <.field_error errors={@adding.errors} field={:value} />
+                <div
+                  id="grant-source"
+                  class="mb-2 inline-flex items-center gap-0.5 rounded-md border border-line bg-deep p-0.5"
+                >
+                  <label
+                    :for={
+                      {value, label} <- [
+                        {"stored", "Stored in your vault"},
+                        {"minted", "Minted by a command"}
+                      ]
+                    }
+                    class="relative"
+                  >
+                    <input
+                      type="radio"
+                      name="grant[source]"
+                      id={"grant-source-#{value}"}
+                      value={value}
+                      checked={source(@adding.form) == value}
+                      class="peer sr-only"
+                    />
+                    <span class="block cursor-pointer rounded px-2 py-1 text-[11px] font-medium text-muted transition-colors hover:text-ink peer-checked:bg-active peer-checked:text-ink peer-checked:shadow-sm">
+                      {label}
+                    </span>
+                  </label>
+                </div>
+                <div :if={source(@adding.form) == "minted"}>
+                  <.input
+                    field={@adding.form[:mint]}
+                    placeholder="gcloud auth print-access-token --impersonate-service-account=… --lifetime=1800s"
+                  />
+                  <p class="mt-1 text-[10px] text-faint">
+                    Runs on this machine, with your host login, when the VM needs a token. Only its output is used, for up to 10 minutes.
+                  </p>
+                  <.field_error errors={@adding.errors} field={:mint} />
+                </div>
+                <div :if={source(@adding.form) == "stored"}>
+                  <input
+                    type="password"
+                    name="grant[value]"
+                    id="grant-value"
+                    autocomplete="new-password"
+                    placeholder="Paste the token"
+                    class={input_classes()}
+                  />
+                  <p class="mt-1 text-[10px] text-faint">
+                    Kept in your vault, encrypted with your password. The VM only ever gets the placeholder.
+                  </p>
+                  <.field_error errors={@adding.errors} field={:value} />
+                </div>
               </div>
             <% end %>
 
-            <div :if={@adding.recipe.kind == :network}>
+            <div :if={@adding.preset.kind == :network}>
               <.input
                 field={@adding.form[:destinations]}
                 type="textarea"
@@ -721,7 +854,7 @@ defmodule MDTClientWeb.SandboxLive.Grants do
               <.field_error errors={@adding.errors} field={:destinations} />
             </div>
 
-            <div :if={@adding.recipe.kind == :file} class="space-y-3">
+            <div :if={@adding.preset.kind == :file} class="space-y-3">
               <div class="flex gap-2.5 rounded-lg border border-warn/35 bg-warn-soft/30 p-3">
                 <.icon name="hero-exclamation-triangle" class="mt-px size-4 shrink-0 text-warn" />
                 <p class="text-xs leading-5 text-ink">
@@ -751,33 +884,20 @@ defmodule MDTClientWeb.SandboxLive.Grants do
               </div>
             </div>
 
-            <div
-              :if={@adding.recipe.rules != []}
-              class="rounded-lg border border-line-soft bg-deep/50 p-3"
+            <p
+              :if={@adding.preset.kind != :file}
+              class="flex items-start gap-2 rounded-lg border border-line-soft bg-deep/50 p-3 text-[11px] leading-4 text-muted"
             >
-              <p class="text-[10px] font-semibold uppercase tracking-wide text-muted">
-                Starts with these rules
-              </p>
-              <ul class="mt-2 space-y-1">
-                <li :for={rule <- @adding.recipe.rules} class="flex items-center gap-2 text-[11px]">
-                  <span class={[
-                    "w-10 shrink-0 rounded px-1 py-px text-center text-[9px] font-semibold uppercase",
-                    rule.action == :allow && "bg-ok-soft text-ok-strong",
-                    rule.action == :ask && "bg-warn-soft text-warn-strong",
-                    rule.action == :deny && "bg-bad-soft text-bad"
-                  ]}>
-                    {action_word(rule.action)}
-                  </span>
-                  <span class="text-ink">{rule.label}</span>
-                  <span class="truncate font-mono text-[10px] text-faint">{rule.match}</span>
-                </li>
-              </ul>
-            </div>
+              <.icon name="hero-hand-raised-micro" class="mt-px size-3.5 shrink-0 text-warn" />
+              Once on, every {if @adding.preset.kind == :network, do: "connection", else: "request"} using it waits for your approval. From an approval, or the grant's page, you can let uses through for a while.
+            </p>
 
             <footer class="flex items-center justify-end gap-2 pt-1">
               <.button type="button" phx-click="close_add_grant" variant="ghost">Cancel</.button>
               <.button type="submit" id="create-grant" variant="primary">
-                {if @request, do: "Add and turn on for #{@request.minutes} min", else: "Add grant"}
+                {if @ask,
+                  do: "Add and turn on for #{minutes_words(@ask.minutes)}",
+                  else: "Add grant"}
               </.button>
             </footer>
           </.form>
@@ -786,6 +906,12 @@ defmodule MDTClientWeb.SandboxLive.Grants do
     </div>
     """
   end
+
+  defp source(form), do: if(form[:source].value == "minted", do: "minted", else: "stored")
+
+  defp minutes_words(60), do: "1 h"
+  defp minutes_words(minutes) when rem(minutes, 60) == 0, do: "#{div(minutes, 60)} h"
+  defp minutes_words(minutes), do: "#{minutes} min"
 
   attr :errors, :map, required: true
   attr :field, :atom, required: true
@@ -802,9 +928,7 @@ defmodule MDTClientWeb.SandboxLive.Grants do
     """
   end
 
-  defp exposure_words(%{kind: :http, source: :minted}), do: "Minted here, VM gets a placeholder"
-  defp exposure_words(%{kind: :http}), do: "VM gets a placeholder"
-  defp exposure_words(%{id: :database}), do: "Login stays in the tunnel"
-  defp exposure_words(%{kind: :network}), do: "Nothing to hold"
-  defp exposure_words(%{kind: :file}), do: "VM holds the value"
+  defp exposure_words(:token), do: "VM gets a placeholder"
+  defp exposure_words(:network), do: "Nothing to hold"
+  defp exposure_words(:file), do: "VM holds the value"
 end

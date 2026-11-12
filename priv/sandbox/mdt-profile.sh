@@ -3,7 +3,8 @@
 # /etc/profile.d). Login shells reset PATH; restore the tools for Zed's
 # environment probe, terminals, language servers, tasks and agents alike.
 # Keep this POSIX compatible: /etc/profile can also be read by sh.
-for _mdt_bin in /usr/local/share/cargo/bin "$HOME/.local/bin" \
+# /mnt/mdt/bin holds `mdt`, which agents ask MDT for access with.
+for _mdt_bin in /mnt/mdt/bin /usr/local/share/cargo/bin "$HOME/.local/bin" \
   /cache/go/bin /cache/cargo/bin /cache/npm-global/bin \
   /usr/local/share/mise/shims /cache/mise/shims; do
   case ":$PATH:" in

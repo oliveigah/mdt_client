@@ -1,7 +1,7 @@
 defmodule MDTClient.Sandbox.InstructionsTest do
   use ExUnit.Case, async: true
 
-  alias MDTClient.Sandbox.{Grant, Instructions, Recipes, Rule}
+  alias MDTClient.Sandbox.{Allowance, Grant, Instructions}
 
   doctest Instructions
 
@@ -36,29 +36,45 @@ defmodule MDTClient.Sandbox.InstructionsTest do
     assert text =~ "gh auth login"
     assert text =~ "mdt_grant_off"
     assert text =~ "/mnt/mdt/grants.md"
+    assert text =~ "mdt request GRANT_ID --reason"
+    assert text =~ "mdt request --need"
     assert text =~ "~/.optmem/memo wake"
   end
 
-  test "grants.md names grants, variables and rules, never values" do
-    github = Recipes.fetch!(:github)
-
-    grant = %Grant{
+  test "the grants list says what each is for and how to use it, never values" do
+    github = %Grant{
       id: "github",
       name: "GitHub",
-      recipe: :github,
-      kind: :http,
+      kind: :token,
+      purpose: "Push to\nmy repos",
       state: :on,
+      expires_at: ~U[2026-11-12 13:00:00Z],
       placeholder: "ghp_placeholder",
       env: ["GH_TOKEN"],
-      hosts: ["api.github.com", "github.com"],
-      rules: [%Rule{id: "r", label: "Reads", match: "read", action: :allow, tag: "read"}],
-      default_action: :ask
+      git: true,
+      hosts: ["api.github.com", "github.com"]
     }
 
-    text = Instructions.grants([grant], ~U[2026-11-12 12:00:00Z])
-    assert text =~ "| GitHub | #{github.name} | on |"
-    assert text =~ "`GH_TOKEN` (placeholders)"
-    assert text =~ "Reads: go through; anything else: wait for the user"
+    vpn = %Grant{
+      id: "vpn",
+      name: "VPN",
+      kind: :network,
+      purpose: "Grafana",
+      destinations: ["10.0.0.0/8:443"],
+      allowances: [%Allowance{id: "a", pattern: :all}],
+      state: :on
+    }
+
+    text = Instructions.grants([github, vpn], ~U[2026-11-12 12:00:00Z])
+    assert text =~ "## GitHub"
+    assert text =~ "id: `github` · Token or API key · on until 13:00 UTC (60 min left)"
+    assert text =~ "for: Push to my repos"
+    assert text =~ "$GH_TOKEN, /mnt/mdt/tokens/github"
+    assert text =~ "only to api.github.com, github.com"
+    assert text =~ "git over HTTPS to api.github.com, github.com"
+    assert text =~ "each request waits for the user's approval"
+    assert text =~ "connect directly to 10.0.0.0/8:443"
+    assert text =~ "every connection goes through for now"
     refute text =~ "ghp_placeholder"
     assert Instructions.grants([], ~U[2026-11-12 12:00:00Z]) =~ "No grants yet."
   end

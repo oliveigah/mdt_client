@@ -8,10 +8,12 @@ defmodule MDTClient.Sandbox.Inbox do
       this machine's trusted roots; the image links its system bundle to the
       second;
     * `profile.sh`, `bashrc.sh`, `env.sh` - the shell's tool paths,
-      interactive defaults and placeholders of every credential grant;
-    * `bin/git-credential`, `git/<host>` - git's answers for the hosts MDT
-      holds tokens for;
-    * `tokens/<grant>` - placeholder token files for tools that read one;
+      interactive defaults and placeholders of every token grant;
+    * `bin/mdt` - the command agents ask MDT for access with
+      (`MDTClient.Sandbox.Channel`);
+    * `bin/git-credential`, `git/<host>` - git's answers for the hosts of
+      token grants that answer git;
+    * `tokens/<grant>` - each token grant's placeholder, as a file;
     * `files/` - the real value of file grants that are on;
     * `AGENTS.md`, `grants.md` - what agents are told, and the grants as they
       are now.
@@ -41,24 +43,23 @@ defmodule MDTClient.Sandbox.Inbox do
     put_changed(dir, "profile.sh", priv("mdt-profile.sh"))
     put_changed(dir, "bashrc.sh", priv("mdt-bashrc.sh"))
     put_changed(dir, "bin/git-credential", priv("mdt-git-credential"), 0o755)
+    put_changed(dir, "bin/mdt", priv("mdt-cli"), 0o755)
     put_changed(dir, "AGENTS.md", Instructions.text())
 
-    http = Enum.filter(grants, &(&1.kind == :http))
+    tokens = Enum.filter(grants, &(&1.kind == :token))
 
-    put(dir, "env.sh", env_script(http))
+    put(dir, "env.sh", env_script(tokens))
     put(dir, "grants.md", Instructions.grants(grants, DateTime.utc_now()))
 
-    for grant <- http, grant.recipe == :github do
-      for host <- ["github.com"] do
-        put(
-          dir,
-          Path.join("git", host),
-          "protocol=https\nhost=#{host}\nusername=x-access-token\npassword=#{grant.placeholder}\n"
-        )
-      end
+    for grant <- tokens, host <- Grant.git_hosts(grant) do
+      put(
+        dir,
+        Path.join("git", host),
+        "protocol=https\nhost=#{host}\nusername=x-access-token\npassword=#{grant.placeholder}\n"
+      )
     end
 
-    for grant <- http, grant.recipe == :google do
+    for grant <- tokens do
       put(dir, Path.join("tokens", grant.id), grant.placeholder)
     end
 
@@ -69,14 +70,17 @@ defmodule MDTClient.Sandbox.Inbox do
     :ok
   end
 
-  @doc "The environment the VM's processes get: each grant's variables set to its placeholder."
+  @doc """
+  The environment the VM's processes get from token grants: `env` variables
+  hold the placeholder, `file_env` variables the path of the file holding it.
+  """
   @spec env([Grant.t()]) :: [{String.t(), String.t()}]
   def env(grants) do
-    for %Grant{kind: :http} = grant <- grants, var <- grant.env do
-      if grant.recipe == :google and var == "CLOUDSDK_AUTH_ACCESS_TOKEN_FILE",
-        do: {var, "/mnt/mdt/tokens/#{grant.id}"},
-        else: {var, grant.placeholder}
-    end
+    for %Grant{kind: :token} = grant <- grants,
+        pair <-
+          Enum.map(grant.env, &{&1, grant.placeholder}) ++
+            Enum.map(grant.file_env, &{&1, Grant.token_file(grant)}),
+        do: pair
   end
 
   @doc """

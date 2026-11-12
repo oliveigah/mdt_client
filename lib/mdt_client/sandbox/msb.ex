@@ -62,7 +62,8 @@ defmodule MDTClient.Sandbox.Msb do
   end
 
   @doc "Whether an image tag is in microsandbox's cache."
-  @spec image?(String.t()) :: boolean()
+  @spec image?(String.t() | nil) :: boolean()
+  def image?(nil), do: false
   def image?(tag), do: match?({:ok, _}, run(["image", "inspect", tag], 20))
 
   @doc "The arguments of `msb create` for a VM with these parts."
@@ -84,11 +85,18 @@ defmodule MDTClient.Sandbox.Msb do
 
     env = Enum.flat_map(vm.env, fn {key, value} -> ["--env", "#{key}=#{value}"] end)
 
+    # The agent channel: the VM's vsock port, joined to MDT's socket.
+    vsock =
+      case vm[:vsock] do
+        nil -> []
+        path -> ["--vsock", "#{path}:#{MDTClient.Sandbox.Channel.port()}"]
+      end
+
     ["create", image, "--name", name, "--replace", "--pull", "never"] ++
       ["--shell", shell] ++
       ["--cpus", "#{cpus}", "--memory", "#{memory}G"] ++
       ["--proxy", "http://127.0.0.1:#{port}", "--net", "public,private"] ++
-      mounts ++ env
+      vsock ++ mounts ++ env
   end
 
   defp normalize(status) do

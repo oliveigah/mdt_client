@@ -1,12 +1,10 @@
 defmodule MDTClient.Sandbox.Describe do
   @moduledoc """
-  Turns a request carrying a placeholder into what an approval shows and what
-  rules match on.
+  Turns a request carrying a placeholder into what an approval shows. It
+  decides nothing: every use waits for you unless an allowance covers it.
 
-    * `tags` - what kind of request it is: `read`, `write`, `git_fetch`,
-      `git_push`, `graphql_query` or `graphql_mutation`. A rule matches when
-      its tag is among them; `any` matches everything.
-    * `title`, `facts` - worked out from the request itself.
+    * `title`, `facts` - worked out from the request itself: git's ref
+      updates, a GraphQL operation, a REST endpoint.
     * `claims` - text the agent wrote (titles, bodies, messages), kept apart
       so it can never read as a fact.
     * `pattern` - what "allow similar" lets through: the same method and
@@ -26,7 +24,6 @@ defmodule MDTClient.Sandbox.Describe do
         }
 
   @type t :: %{
-          tags: [String.t()],
           title: String.t(),
           facts: [{String.t(), String.t()}],
           claims: [{String.t(), String.t()}],
@@ -61,7 +58,6 @@ defmodule MDTClient.Sandbox.Describe do
       end
 
     %{
-      tags: ["git_push"],
       title: title,
       facts:
         [{"Repository", repo}] ++
@@ -74,7 +70,6 @@ defmodule MDTClient.Sandbox.Describe do
 
   defp fetch(request, route) do
     %{
-      tags: ["git_fetch"],
       title: "Fetch from #{repository(route)}",
       facts: [{"Repository", repository(route)}] ++ client(request),
       claims: [],
@@ -86,7 +81,6 @@ defmodule MDTClient.Sandbox.Describe do
     service = URI.decode_query(query || "")["service"] || "git-upload-pack"
 
     %{
-      tags: ["read", if(service == "git-receive-pack", do: "git_push_refs", else: "git_fetch")],
       title: "List refs of #{repository(route)}",
       facts: [{"Repository", repository(route)}, {"For", service}] ++ client(request),
       claims: [],
@@ -108,7 +102,6 @@ defmodule MDTClient.Sandbox.Describe do
     label = Enum.join(Enum.reject([kind, name], &is_nil/1), " ")
 
     %{
-      tags: [if(kind == "mutation", do: "graphql_mutation", else: "graphql_query")],
       title: "GraphQL #{label} on #{request.host}",
       facts: [{"Operation", label}] ++ repository_facts(variables) ++ client(request),
       claims: claims(variables),
@@ -117,8 +110,6 @@ defmodule MDTClient.Sandbox.Describe do
   end
 
   defp rest(request, route) do
-    read? = request.method in ["GET", "HEAD", "OPTIONS"]
-
     body_claims =
       case Jason.decode(request.body) do
         {:ok, %{} = json} -> claims(json)
@@ -126,7 +117,6 @@ defmodule MDTClient.Sandbox.Describe do
       end
 
     %{
-      tags: [if(read?, do: "read", else: "write")],
       title: "#{request.method} #{request.host}#{route}",
       facts: [{"Endpoint", "#{request.method} #{route}"}] ++ client(request),
       claims: body_claims,

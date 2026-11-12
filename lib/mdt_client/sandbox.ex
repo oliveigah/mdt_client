@@ -13,10 +13,13 @@ defmodule MDTClient.Sandbox do
   `{:sandbox_event, event}` and image build output as
   `{:sandbox_build_line, line}`. `subscribe_waiting/1` delivers only
   `{:sandbox_waiting, count}`, for the title bar of every page.
+
+  Approvals are of two types, in one queue: agents asking for a grant to be
+  turned on (activations, which arrive through `MDTClient.Sandbox.Channel`),
+  and uses of a grant held by the proxy. See `MDTClient.Sandbox.Approval`.
   """
 
   alias MDTClient.Sandbox.{
-    AgentRequest,
     Approval,
     Build,
     Destinations,
@@ -40,8 +43,6 @@ defmodule MDTClient.Sandbox do
           values: %{String.t() => boolean()},
           waiting: [Approval.t()],
           history: [Approval.t()],
-          requests: [AgentRequest.t()],
-          answered: [AgentRequest.t()],
           image: map(),
           builds: [Build.t()],
           created_ref: String.t() | nil,
@@ -72,7 +73,7 @@ defmodule MDTClient.Sandbox do
   @spec subscribe(username()) :: :ok | {:error, term()}
   def subscribe(username), do: Phoenix.PubSub.subscribe(MDTClient.PubSub, Server.topic(username))
 
-  @doc "Subscribes the caller to the count of approvals and agent requests waiting."
+  @doc "Subscribes the caller to the count of approvals waiting."
   @spec subscribe_waiting(username()) :: :ok | {:error, term()}
   def subscribe_waiting(username),
     do: Phoenix.PubSub.subscribe(MDTClient.PubSub, Server.waiting_topic(username))
@@ -81,7 +82,7 @@ defmodule MDTClient.Sandbox do
   @spec snapshot(username()) :: snapshot()
   def snapshot(username), do: Server.call(username, :snapshot)
 
-  @doc "How many approvals and agent requests wait for you; 0 while locked."
+  @doc "How many approvals of either type wait for you; 0 while locked."
   @spec waiting_count(username()) :: non_neg_integer()
   def waiting_count(username) do
     Server.call(username, :waiting_count)
@@ -167,31 +168,27 @@ defmodule MDTClient.Sandbox do
   @spec seed_memory(username()) :: :ok | {:error, :busy | :running | :no_memory}
   def seed_memory(username), do: Server.call(username, :seed_memory)
 
-  @doc "Turns a grant on for `minutes`, or `:until_off`."
-  @spec turn_on(username(), String.t(), pos_integer() | :until_off) ::
+  @doc """
+  Turns a grant on for `minutes`, or `:until_off`. With `uses: :all`, every
+  use goes through without asking while it stays on; otherwise each one
+  waits for you. Agents waiting for it hear it is on.
+  """
+  @spec turn_on(username(), String.t(), pos_integer() | :until_off, :ask | :all) ::
           {:ok, Grant.t()} | {:error, :not_found}
-  def turn_on(username, id, minutes), do: Server.call(username, {:turn_on, id, minutes})
+  def turn_on(username, id, minutes, uses \\ :ask),
+    do: Server.call(username, {:turn_on, id, minutes, uses})
 
   @doc "Turns a grant off. Requests waiting on it are refused."
   @spec turn_off(username(), String.t()) :: {:ok, Grant.t()} | {:error, :not_found}
   def turn_off(username, id), do: Server.call(username, {:turn_off, id})
 
-  @doc "Sets what one of a grant's rules does."
-  @spec set_rule(username(), String.t(), String.t(), :allow | :ask | :deny) ::
-          {:ok, Grant.t()} | {:error, :not_found}
-  def set_rule(username, id, rule_id, action),
-    do: Server.call(username, {:set_rule, id, rule_id, action})
-
-  @doc "Sets what happens to a grant's requests that no rule matches."
-  @spec set_default(username(), String.t(), :allow | :ask | :deny) ::
-          {:ok, Grant.t()} | {:error, :not_found}
-  def set_default(username, id, action), do: Server.call(username, {:set_default, id, action})
-
-  @doc "Sets whether a network grant's connections go through or wait for you."
-  @spec set_per_connection(username(), String.t(), :allow | :ask) ::
-          {:ok, Grant.t()} | {:error, :not_found}
-  def set_per_connection(username, id, choice),
-    do: Server.call(username, {:set_per_connection, id, choice})
+  @doc """
+  Lets every use of an `on` grant through without asking, for `minutes` or
+  while it stays on (`:grant`). Uses waiting on it go through at once.
+  """
+  @spec allow_all(username(), String.t(), pos_integer() | :grant) ::
+          {:ok, Grant.t()} | {:error, :not_found | :off}
+  def allow_all(username, id, duration), do: Server.call(username, {:allow_all, id, duration})
 
   @doc "Ends a temporary allowance early."
   @spec revoke_allowance(username(), String.t(), String.t()) ::
@@ -200,8 +197,18 @@ defmodule MDTClient.Sandbox do
     do: Server.call(username, {:revoke_allowance, id, allowance_id})
 
   @doc """
-  Adds a grant from the add dialog's params: `"recipe"`, `"name"`, the
-  recipe's fields and, for stored values, `"value"`. It starts off.
+  Adds a grant from the add dialog's params. It starts off.
+
+    * every type: `"kind"` (`"token"`, `"network"` or `"file"`), `"name"`,
+      `"purpose"` (what it is for, which agents read), and `"preset"` when a
+      preset filled the form;
+    * `"token"`: `"hosts"`, `"env"`, `"file_env"`, `"git"`, `"prefix"` (how
+      the placeholder starts), `"source"` (`"stored"` with `"value"`, or
+      `"minted"` with `"mint"`, a command printing a short-lived token);
+    * `"network"`: `"destinations"`, one per line;
+    * `"file"`: `"path"` (a file name) and `"value"`.
+
+  Lists are comma or newline separated.
   """
   @spec create_grant(username(), map()) :: {:ok, Grant.t()} | {:error, %{atom() => String.t()}}
   def create_grant(username, attrs), do: Server.call(username, {:create_grant, attrs})
@@ -215,23 +222,28 @@ defmodule MDTClient.Sandbox do
   def delete_grant(username, id), do: Server.call(username, {:delete_grant, id})
 
   @doc """
-  Decides a waiting approval: `:allow_once`, `{:allow_for, minutes}` (or
-  `{:allow_for, :grant}`, while the grant stays on), `:deny`, or
-  `:deny_and_turn_off`, which also turns its grant off.
+  Decides a waiting approval.
+
+  A use (a request or a connection):
+
+    * `:allow_once`;
+    * `{:allow, :similar, duration}` - this one, and uses like it for
+      `duration` (minutes, or `:grant` while the grant stays on);
+    * `{:allow, :all, duration}` - every use of its grant for `duration`;
+    * `:deny`, or `:deny_and_turn_off`, which also turns its grant off.
+
+  An activation (an agent asking for a grant):
+
+    * `{:turn_on, minutes | :until_off, :ask | :all}` - turns the grant on;
+      `:all` lets every use through while it stays on;
+    * `{:set_up, grant_id}` - for an ask no grant met: the grant you just
+      added for it, turned on for the minutes asked;
+    * `:decline`.
   """
-  @spec decide(username(), String.t(), Approval.decision()) :: :ok | {:error, :not_waiting}
+  @spec decide(username(), String.t(), Approval.decision()) ::
+          :ok | {:error, :not_waiting | :bad_decision}
   def decide(username, approval_id, decision),
     do: Server.call(username, {:decide, approval_id, decision})
-
-  @doc """
-  Answers an agent request: `:decline`, or `{:granted, grant_id}`, which turns
-  the grant on for the minutes asked. `grant_id` matters only for requests
-  for something that did not exist yet.
-  """
-  @spec answer(username(), String.t(), :decline | {:granted, String.t() | nil}) ::
-          :ok | {:error, :not_waiting}
-  def answer(username, request_id, answer),
-    do: Server.call(username, {:answer, request_id, answer})
 
   @doc """
   Changes resources, the hold time, the proxy port, the image name or the
