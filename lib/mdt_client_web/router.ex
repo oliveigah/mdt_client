@@ -34,13 +34,20 @@ defmodule MDTClientWeb.Router do
         {MDTClientWeb.UserAuth, :unlocked},
         {MDTClientWeb.Hooks.Theme, :default},
         {MDTClientWeb.Hooks.Updates, :default},
-        {MDTClientWeb.Notices, :default}
+        {MDTClientWeb.Notices, :default},
+        {MDTClientWeb.Hooks.Sandbox, :default}
       ] do
       live "/tools", ToolsLive
       live "/tools/http", HttpClientLive
       live "/tools/git", GitLive
       live "/tools/diagrams", DiagramsLive
       live "/tools/notes", NotesLive
+      live "/tools/sandbox", SandboxLive, :overview
+      live "/tools/sandbox/approvals", SandboxLive, :approvals
+      live "/tools/sandbox/grants", SandboxLive, :grants
+      live "/tools/sandbox/grants/:id", SandboxLive, :grant
+      live "/tools/sandbox/activity", SandboxLive, :activity
+      live "/tools/sandbox/settings", SandboxLive, :settings
       live "/transfer", TransferLive
       live "/agents", AgentAccessLive
     end

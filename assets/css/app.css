@@ -350,3 +350,27 @@ body.tauri-window #window-resize { display: block }
     border-radius: 0.4em;
   }
 }
+
+/* The thin bar on a request held for approval, draining until it gives up.
+   `--drain-from` is the share of the hold still left when it was drawn. */
+@keyframes sandbox-drain {
+  from {
+    transform: scaleX(var(--drain-from, 1));
+  }
+  to {
+    transform: scaleX(0);
+  }
+}
+
+.sandbox-drain {
+  transform: scaleX(var(--drain-from, 1));
+  animation-name: sandbox-drain;
+  animation-timing-function: linear;
+  animation-fill-mode: forwards;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sandbox-drain {
+    animation: none;
+  }
+}

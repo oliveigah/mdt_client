@@ -38,6 +38,10 @@ defmodule MDTClientWeb.Layouts do
   attr :notices, :list, default: [], doc: "the notices to float, see `MDTClientWeb.Notices`"
   attr :update, :map, default: %{status: :idle, release: nil, message: nil}
 
+  attr :sandbox_waiting, :integer,
+    default: 0,
+    doc: "approvals and agent requests waiting in the agent sandbox"
+
   slot :inner_block, required: true
 
   def app(assigns) do
@@ -61,6 +65,21 @@ defmodule MDTClientWeb.Layouts do
         <.tool_switcher current={@tool} />
 
         <div class="flex-1"></div>
+
+        <.link
+          :if={@sandbox_waiting > 0}
+          navigate={~p"/tools/sandbox/approvals"}
+          id="sandbox-waiting"
+          title="Agent requests waiting for you"
+          class="group flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-warn/40 bg-warn-soft/40 px-2 text-[11px] font-semibold text-warn-strong transition-colors hover:border-warn/70 hover:bg-warn-soft/70"
+        >
+          <span class="relative flex size-2">
+            <span class="absolute inline-flex size-full rounded-full bg-warn opacity-60 motion-safe:animate-ping"></span>
+            <span class="relative inline-flex size-2 rounded-full bg-warn"></span>
+          </span>
+          <span id="sandbox-waiting-count">{@sandbox_waiting}</span>
+          <span class="hidden md:inline">waiting</span>
+        </.link>
 
         <.update_check update={@update} />
 

@@ -15,7 +15,13 @@ defmodule MDTClientWeb.ToolsLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_scope={@current_scope} notices={@notices} update={@update}>
+    <Layouts.app
+      flash={@flash}
+      current_scope={@current_scope}
+      notices={@notices}
+      update={@update}
+      sandbox_waiting={@sandbox_waiting}
+    >
       <div class="flex min-h-0 flex-1 items-center justify-center overflow-y-auto p-6">
         <div class="w-full max-w-2xl">
           <header class="mb-6">
@@ -69,6 +75,14 @@ defmodule MDTClientWeb.ToolsLive do
               class="rounded border border-warn/40 bg-warn-soft/50 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-warn"
             >
               Soon
+            </span>
+            <span
+              :if={@tool.status == :preview}
+              id={"tool-#{@tool.id}-preview"}
+              title="The screens work on sample data; nothing runs yet"
+              class="rounded border border-violet/40 bg-violet/10 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-violet-strong"
+            >
+              Preview
             </span>
           </div>
           <p class="truncate text-xs text-muted">{@tool.tagline}</p>

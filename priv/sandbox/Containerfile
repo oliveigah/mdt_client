@@ -1,0 +1,93 @@
+# The VM's userspace. Edit freely: MDT appends a small layer after the last
+# line that points the VM at /mnt/mdt (its CA bundle, git's credential helper,
+# the placeholders) and at /cache.
+#
+# The build runs with podman on this machine, in a container, with an empty
+# context: no host file reaches the image. Downloads are checked against
+# their published checksums, and nothing runs npm install scripts.
+#
+# Tools come from mise, installed into /usr/local/share/mise with the versions
+# in /etc/mise/config.toml. Versions installed later in the VM go to
+# /cache/mise, which survives recreating it. Keep /root empty: the VM's Home
+# is mounted over it.
+FROM docker.io/library/ubuntu:26.04
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+ARG MISE_VERSION=2026.11.7
+ENV DEBIAN_FRONTEND=noninteractive LANG=C.UTF-8 LC_ALL=C.UTF-8
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      bash ca-certificates curl git openssh-client less procps iproute2 \
+      build-essential pkg-config libssl-dev unzip xz-utils zstd tmux socat \
+      postgresql-client sqlite3 inotify-tools \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN arch="$(uname -m)" \
+    && case "$arch" in x86_64) arch=x64 ;; aarch64) arch=arm64 ;; *) exit 1 ;; esac \
+    && file="mise-v${MISE_VERSION}-linux-${arch}.tar.xz" \
+    && base="https://github.com/jdx/mise/releases/download/v${MISE_VERSION}" \
+    && cd /tmp && curl -fsSLO "$base/$file" \
+    && curl -fsSL "$base/SHASUMS256.txt" | grep " ./${file}\$" | sed 's# ./# #' | sha256sum -c - \
+    && tar -xJf "$file" --strip-components=2 -C /usr/local/bin mise/bin/mise \
+    && rm "$file" && mise --version
+
+# Rust through rustup, which is what mise would run anyway. This way the
+# toolchains stay in the image while CARGO_HOME (the registry, cargo install)
+# lives in /cache, and rust-toolchain.toml files still pick their version.
+ENV RUSTUP_HOME=/usr/local/share/rustup CARGO_HOME=/usr/local/share/cargo
+RUN arch="$(uname -m)" \
+    && url="https://static.rust-lang.org/rustup/dist/${arch}-unknown-linux-gnu/rustup-init" \
+    && cd /tmp && curl -fsSLO "$url" \
+    && echo "$(curl -fsSL "$url.sha256" | cut -d' ' -f1)  rustup-init" | sha256sum -c - \
+    && chmod +x rustup-init \
+    && ./rustup-init -y --no-modify-path --profile minimal --default-toolchain stable \
+         --component clippy,rustfmt \
+    && rm rustup-init
+
+# The default versions. A project's .tool-versions or mise.toml picks others;
+# `mise install` in the project fetches them (Erlang comes prebuilt from
+# hex.pm, in seconds). Majors are pinned, so a rebuild takes the latest
+# patches. Codex is pinned exactly: mise's registry lags its releases.
+RUN mkdir -p /etc/mise && printf '%s\n' \
+      '[tools]' \
+      'erlang = "29"' \
+      'elixir = "1.20"' \
+      'rebar = "3"' \
+      'node = "24"' \
+      'pnpm = "latest"' \
+      'python = "3.14"' \
+      'uv = "latest"' \
+      'go = "1.27"' \
+      'java = "temurin-21"' \
+      'kotlin = "latest"' \
+      'gh = "latest"' \
+      'gcloud = "latest"' \
+      'kubectl = "latest"' \
+      'pulumi = "latest"' \
+      'jq = "latest"' \
+      'yq = "latest"' \
+      'ripgrep = "latest"' \
+      'fd = "latest"' \
+      'shellcheck = "latest"' \
+      'claude = "latest"' \
+      'codex = "0.167.1"' \
+      > /etc/mise/config.toml
+
+ENV MISE_DATA_DIR=/usr/local/share/mise \
+    MISE_CACHE_DIR=/tmp/mise-cache \
+    MISE_YES=1 \
+    MISE_ERLANG_PRECOMPILED_OS=ubuntu-26.04 \
+    MISE_TRUSTED_CONFIG_PATHS=/ \
+    DISABLE_AUTOUPDATER=1 \
+    PATH="/usr/local/share/mise/shims:/usr/local/share/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+RUN mise install && mise reshim && mise ls && rm -rf /tmp/mise-cache \
+    && claude --version && codex --version && elixir --version && cargo --version
+
+# mise keeps Mix's archives inside each Elixir version, so Hex and rebar for
+# the default one belong in the image.
+RUN mix local.hex --force && mix local.rebar --force
+
+WORKDIR /root
+USER root
+ENTRYPOINT []
+CMD ["/bin/bash"]

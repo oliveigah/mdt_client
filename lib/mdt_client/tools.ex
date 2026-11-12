@@ -49,6 +49,17 @@ defmodule MDTClient.Tools do
       path: "/tools/notes",
       shortcut: "4",
       status: :ready
+    },
+    %{
+      id: :sandbox,
+      name: "Agent Sandbox",
+      tagline: "Run agents in a VM, share access on the spot",
+      description:
+        "Start the VM your agents work in, choose which folders it sees, turn credentials and network access on for as long as a task needs, and approve the requests that use them.",
+      icon: "hero-cube-transparent",
+      path: "/tools/sandbox",
+      shortcut: "5",
+      status: :ready
     }
   ]
 

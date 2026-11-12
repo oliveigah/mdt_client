@@ -13,6 +13,9 @@ config :mdt_client,
   # Tests add remotes that do not exist; the ones about fetching turn it on.
   git_auto_fetch: false
 
+# The sandbox never calls msb in tests, and its proxy takes any free port.
+config :mdt_client, MDTClient.Sandbox.Server, external: false, proxy_port: 0
+
 # Print only warnings and errors during test
 config :logger, level: :warning
 

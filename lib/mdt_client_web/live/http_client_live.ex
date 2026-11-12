@@ -71,6 +71,7 @@ defmodule MDTClientWeb.HttpClientLive do
       tool={@tool}
       notices={@notices}
       update={@update}
+      sandbox_waiting={@sandbox_waiting}
     >
       <div
         class="flex min-h-0 flex-1 overflow-hidden"

@@ -61,7 +61,13 @@ defmodule MDTClientWeb.AgentAccessLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_scope={@current_scope} notices={@notices} update={@update}>
+    <Layouts.app
+      flash={@flash}
+      current_scope={@current_scope}
+      notices={@notices}
+      update={@update}
+      sandbox_waiting={@sandbox_waiting}
+    >
       <div class="flex min-h-0 flex-1 overflow-y-auto px-6 py-8 sm:px-10">
         <div class="mx-auto w-full max-w-3xl">
           <.link
