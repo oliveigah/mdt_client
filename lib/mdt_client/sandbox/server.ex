@@ -1302,6 +1302,7 @@ defmodule MDTClient.Sandbox.Server do
     %{
       name: state.vm.name,
       image: state.image.tag,
+      shell: "/bin/bash",
       cpus: state.settings.cpus,
       memory_gib: state.settings.memory_gib,
       proxy_port: state.settings.proxy_port,

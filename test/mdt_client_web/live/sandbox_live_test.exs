@@ -75,6 +75,7 @@ defmodule MDTClientWeb.SandboxLiveTest do
     assert has_element?(view, "#connect-ssh-config", "ssh serve #{name} --stdio")
     assert has_element?(view, "#connect-ssh-config", "ForwardAgent no")
     assert has_element?(view, "#connect-profile", "context_servers")
+    assert has_element?(view, "#connect-profile", "/bin/bash")
     refute has_element?(view, "#connect-profile", "agent_servers")
     assert has_element?(view, "#connect-open", "zed ssh://mdt-sandbox")
   end
@@ -134,9 +135,19 @@ defmodule MDTClientWeb.SandboxLiveTest do
     {:ok, view, _html} = live(conn, ~p"/tools/sandbox/grants")
 
     view |> element("#grant-duration-#{grant.id}-15") |> render_click()
+    before_switch = DateTime.utc_now() |> DateTime.truncate(:second)
     view |> element("#grant-switch-#{grant.id}") |> render_click()
+    after_switch = DateTime.utc_now() |> DateTime.truncate(:second)
     assert has_element?(view, "#grants-on #grant-row-#{grant.id}")
-    assert has_element?(view, "#grant-left-#{grant.id}", "15:00 left")
+    active = Enum.find(Sandbox.snapshot(username).grants, &(&1.id == grant.id))
+
+    assert has_element?(
+             view,
+             "#grant-left-#{grant.id} #grant-clock-#{grant.id}-#{DateTime.to_unix(active.expires_at)}"
+           )
+
+    assert DateTime.compare(active.expires_at, DateTime.add(before_switch, 15 * 60)) != :lt
+    assert DateTime.compare(active.expires_at, DateTime.add(after_switch, 15 * 60)) != :gt
 
     view |> element("#grant-switch-#{grant.id}") |> render_click()
     assert has_element?(view, "#grants-off #grant-row-#{grant.id}")
@@ -191,8 +202,8 @@ defmodule MDTClientWeb.SandboxLiveTest do
   test "settings refuse unsafe folders and Containerfiles without a FROM", %{conn: conn} do
     {:ok, view, _html} = live(conn, ~p"/tools/sandbox/settings")
 
-    view |> form("#share-form", share: %{path: "~/.ssh", mode: "rw"}) |> render_submit()
-    assert has_element?(view, "#share-error", "SSH keys")
+    view |> form("#share-form", share: %{path: "~", mode: "rw"}) |> render_submit()
+    assert has_element?(view, "#share-error", "Your home folder holds your credentials")
 
     view |> form("#containerfile-form", image: %{containerfile: "RUN true"}) |> render_submit()
     assert has_element?(view, "#containerfile-error")
@@ -218,6 +229,8 @@ defmodule MDTClientWeb.SandboxLiveTest do
     assert has_element?(view, "#settings-folders", "/cache")
     assert has_element?(view, "#snapshots-empty")
     assert has_element?(view, "#settings-vm-memory")
+    assert has_element?(view, "#image-setup-guide")
+    refute has_element?(view, "#containerfile-default-differs")
 
     view |> form("#image-name-form", image_name: %{name: "Not Valid"}) |> render_submit()
     assert has_element?(view, "#image-name-error")
@@ -225,6 +238,24 @@ defmodule MDTClientWeb.SandboxLiveTest do
     view |> form("#image-name-form", image_name: %{name: "agentbox"}) |> render_submit()
     refute has_element?(view, "#image-name-error")
     assert has_element?(view, "#image-name[value='agentbox']")
+  end
+
+  test "an older recipe can adopt the current default explicitly", %{
+    conn: conn,
+    username: username
+  } do
+    {:ok, _} =
+      Sandbox.update_settings(username, %{"containerfile" => "FROM debian:bookworm-slim\n"})
+
+    {:ok, view, _html} = live(conn, ~p"/tools/sandbox/settings")
+
+    assert has_element?(view, "#containerfile-default-differs")
+    view |> element("#containerfile-reset") |> render_click()
+    view |> form("#containerfile-form") |> render_submit()
+    refute has_element?(view, "#containerfile-default-differs")
+
+    assert Sandbox.snapshot(username).settings.containerfile ==
+             MDTClient.Sandbox.Image.default_containerfile()
   end
 
   test "creating the VM first asks about Home, Cache and memory", %{
@@ -265,6 +296,9 @@ defmodule MDTClientWeb.SandboxLiveTest do
     end)
 
     {:ok, view, _html} = live(conn, ~p"/tools/sandbox")
+    assert has_element?(view, "#vm-image", "box:2026-11-12.1")
+    refute has_element?(view, "#vm-image", "box:2026-11-12.2")
+    assert has_element?(view, "#vm-next-image", "box:2026-11-12.2")
     view |> element("#vm-recreate-any") |> render_click()
 
     assert has_element?(view, "#create-dialog", "it runs 2026-11-12.1 now")

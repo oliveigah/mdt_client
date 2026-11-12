@@ -68,6 +68,35 @@ defmodule MDTClient.Sandbox.ServerTest do
     assert Sandbox.use_build(username, "mdt_agent_sdb_image:2026-11-12.1") == {:error, :not_found}
   end
 
+  test "a VM created before the explicit Bash shell needs recreation", %{username: username} do
+    pid = GenServer.whereis(Store.via(Server, username))
+
+    :sys.replace_state(pid, fn state ->
+      previous_spec = %{
+        name: state.vm.name,
+        image: "box:1",
+        cpus: state.settings.cpus,
+        memory_gib: state.settings.memory_gib,
+        proxy_port: state.settings.proxy_port,
+        mounts: [
+          {Path.join(state.dir, "inbox"), "/mnt/mdt", :ro},
+          {state.folders.home, "/root", :rw},
+          {state.folders.optmem, "/root/.optmem", :rw},
+          {state.folders.cache, "/cache", :rw}
+        ]
+      }
+
+      %{
+        state
+        | vm: %{state.vm | exists?: true},
+          image: %{state.image | tag: "box:1"},
+          created_spec: :erlang.phash2(previous_spec)
+      }
+    end)
+
+    assert Sandbox.snapshot(username).vm.stale?
+  end
+
   test "creating checks the choices before touching anything", %{username: username} do
     assert Sandbox.recreate_vm(username) == {:error, :no_image}
 

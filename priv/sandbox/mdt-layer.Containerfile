@@ -10,7 +10,7 @@ RUN set -e; \
       > /etc/ca-certificates/update.d/zz-mdt; \
     chmod 755 /etc/ca-certificates/update.d/zz-mdt; \
     ln -sf /mnt/mdt/profile.sh /etc/profile.d/mdt.sh; \
-    if [ -f /etc/bash.bashrc ]; then echo '[ -r /mnt/mdt/profile.sh ] && . /mnt/mdt/profile.sh' >> /etc/bash.bashrc; fi; \
+    if [ -f /etc/bash.bashrc ]; then echo '[ -r /mnt/mdt/bashrc.sh ] && . /mnt/mdt/bashrc.sh' >> /etc/bash.bashrc; fi; \
     if command -v git >/dev/null; then \
       git config --system credential.helper /mnt/mdt/bin/git-credential; \
       git config --system url."https://github.com/".insteadOf "git@github.com:"; \
@@ -26,7 +26,10 @@ ENV SSL_CERT_FILE=/mnt/mdt/ca-bundle.pem \
     NODE_EXTRA_CA_CERTS=/mnt/mdt/ca.pem \
     HEX_HTTP_TIMEOUT=900 \
     BASH_ENV=/mnt/mdt/profile.sh \
+    SHELL=/bin/bash \
     MDT_SANDBOX=1 \
+    ZED_FILE_WATCHER_MODE=poll \
+    ZED_FILE_WATCHER_POLL_MS=5000 \
     XDG_CACHE_HOME=/cache/xdg \
     MISE_DATA_DIR=/cache/mise \
     MISE_CACHE_DIR=/cache/xdg/mise \

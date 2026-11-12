@@ -102,6 +102,7 @@ defmodule MDTClientWeb.SandboxLive do
                 <Overview.page
                   vm={@vm}
                   image={@image}
+                  created_ref={@created_ref}
                   proxy={@proxy}
                   tools={@tools}
                   settings={@settings}

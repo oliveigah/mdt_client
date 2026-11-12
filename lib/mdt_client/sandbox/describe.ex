@@ -146,7 +146,7 @@ defmodule MDTClient.Sandbox.Describe do
   defp pkt_lines(<<hex::binary-size(4), rest::binary>>, acc) do
     with {length, ""} <- Integer.parse(hex, 16),
          true <- length >= 4,
-         <<line::binary-size(length - 4), rest::binary>> <- rest,
+         <<line::binary-size(^length - 4), rest::binary>> <- rest,
          [old, new, ref | _] <-
            line |> String.split(<<0>>) |> hd() |> String.trim() |> String.split(" ") do
       pkt_lines(rest, [{ref, old, new} | acc])

@@ -68,7 +68,14 @@ defmodule MDTClient.Sandbox.Msb do
   @doc "The arguments of `msb create` for a VM with these parts."
   @spec create_args(map()) :: [String.t()]
   def create_args(
-        %{name: name, image: image, cpus: cpus, memory_gib: memory, proxy_port: port} = vm
+        %{
+          name: name,
+          image: image,
+          cpus: cpus,
+          memory_gib: memory,
+          proxy_port: port,
+          shell: shell
+        } = vm
       ) do
     mounts =
       Enum.flat_map(vm.mounts, fn {host, guest, mode} ->
@@ -78,6 +85,7 @@ defmodule MDTClient.Sandbox.Msb do
     env = Enum.flat_map(vm.env, fn {key, value} -> ["--env", "#{key}=#{value}"] end)
 
     ["create", image, "--name", name, "--replace", "--pull", "never"] ++
+      ["--shell", shell] ++
       ["--cpus", "#{cpus}", "--memory", "#{memory}G"] ++
       ["--proxy", "http://127.0.0.1:#{port}", "--net", "public,private"] ++
       mounts ++ env

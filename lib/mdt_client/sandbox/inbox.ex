@@ -7,8 +7,8 @@ defmodule MDTClient.Sandbox.Inbox do
     * `ca.pem`, `ca-bundle.pem` - the identity's CA, alone and appended to
       this machine's trusted roots; the image links its system bundle to the
       second;
-    * `profile.sh`, `env.sh` - what every bash in the VM reads: the
-      placeholders of every credential grant;
+    * `profile.sh`, `bashrc.sh`, `env.sh` - the shell's tool paths,
+      interactive defaults and placeholders of every credential grant;
     * `bin/git-credential`, `git/<host>` - git's answers for the hosts MDT
       holds tokens for;
     * `tokens/<grant>` - placeholder token files for tools that read one;
@@ -39,6 +39,7 @@ defmodule MDTClient.Sandbox.Inbox do
     put_changed(dir, "ca.pem", ca_pem)
     put_changed(dir, "ca-bundle.pem", bundle(ca_pem))
     put_changed(dir, "profile.sh", priv("mdt-profile.sh"))
+    put_changed(dir, "bashrc.sh", priv("mdt-bashrc.sh"))
     put_changed(dir, "bin/git-credential", priv("mdt-git-credential"), 0o755)
     put_changed(dir, "AGENTS.md", Instructions.text())
 

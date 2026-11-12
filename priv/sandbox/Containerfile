@@ -17,7 +17,7 @@ ARG MISE_VERSION=2026.11.7
 ENV DEBIAN_FRONTEND=noninteractive LANG=C.UTF-8 LC_ALL=C.UTF-8
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      bash ca-certificates curl git openssh-client less procps iproute2 \
+      bash bash-completion ca-certificates curl git openssh-client less procps iproute2 \
       build-essential pkg-config libssl-dev unzip xz-utils zstd tmux socat \
       postgresql-client sqlite3 inotify-tools \
     && rm -rf /var/lib/apt/lists/*
@@ -80,12 +80,26 @@ ENV MISE_DATA_DIR=/usr/local/share/mise \
     MISE_TRUSTED_CONFIG_PATHS=/ \
     DISABLE_AUTOUPDATER=1 \
     PATH="/usr/local/share/mise/shims:/usr/local/share/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-RUN mise install && mise reshim && mise ls && rm -rf /tmp/mise-cache \
+RUN mise install --system && mise reshim --system && mise ls && rm -rf /tmp/mise-cache \
     && claude --version && codex --version && elixir --version && cargo --version
+
+RUN mkdir -p /usr/share/bash-completion/completions \
+    && mise completion bash > /usr/share/bash-completion/completions/mise
 
 # mise keeps Mix's archives inside each Elixir version, so Hex and rebar for
 # the default one belong in the image.
 RUN mix local.hex --force && mix local.rebar --force
+
+# Check the same split used by a fresh VM: baked tools in system storage,
+# runtime installs in an empty cache. No downloads should be needed here.
+RUN MISE_DATA_DIR=/tmp/mdt-runtime mise install --dry-run --dry-run-code \
+    && MISE_DATA_DIR=/tmp/mdt-runtime MISE_AUTO_INSTALL=0 HEX_OFFLINE=1 mise exec -- sh -ec '\
+      for tool in erl elixir mix node npm npx python python3 uv go java kotlin \
+        gh gcloud kubectl pulumi pnpm rebar3 jq yq rg fd shellcheck claude codex; do \
+        command -v "$tool" >/dev/null || exit 1; \
+      done; \
+      mix hex.info >/dev/null; java -version; python --version; node --version' \
+    && rm -rf /tmp/mdt-runtime /tmp/mise-cache
 
 WORKDIR /root
 USER root

@@ -24,6 +24,7 @@ defmodule MDTClient.Sandbox.InboxTest do
     assert String.ends_with?(File.read!(Path.join(dir, "ca-bundle.pem")), ca)
     assert File.read!(Path.join(dir, "env.sh")) =~ "export GH_TOKEN='ghp_placeholder'"
     assert File.read!(Path.join(dir, "profile.sh")) =~ "/mnt/mdt/env.sh"
+    assert File.read!(Path.join(dir, "bashrc.sh")) =~ "/mnt/mdt/profile.sh"
     assert %File.Stat{mode: mode} = File.stat!(Path.join(dir, "bin/git-credential"))
     assert Bitwise.band(mode, 0o111) != 0
     assert File.read!(Path.join(dir, "AGENTS.md")) =~ "Access comes only from MDT"

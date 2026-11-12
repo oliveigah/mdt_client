@@ -5,8 +5,8 @@ defmodule MDTClient.Sandbox.Image do
 
   MDT's layer holds only pointers into `/mnt/mdt` and `/cache`, so nothing in
   the image belongs to one identity: the CA, the credential helper and the
-  agents' instructions arrive when the VM is created, and an MDT update never
-  needs a rebuild.
+  agents' instructions arrive when the VM is created. Updates to those files
+  need no rebuild; changing the layer's startup wiring does.
 
   Each build gets a tag of its date and number (`2026-11-12.1`) under the
   image name from the settings. MDT keeps the current build and the two

@@ -12,6 +12,7 @@ defmodule MDTClientWeb.SandboxLive.Overview do
 
   attr :vm, :any, required: true
   attr :image, :map, required: true
+  attr :created_ref, :string, default: nil
   attr :proxy, :map, required: true
   attr :tools, :map, required: true
   attr :settings, :any, required: true
@@ -56,10 +57,17 @@ defmodule MDTClientWeb.SandboxLive.Overview do
               for <.clock id="vm-uptime" since={@vm.started_at} duration now={@now} />
             </span>
           </div>
-          <p class="mt-1 font-mono text-[11px] text-muted">
-            {@image.tag} · {@settings.cpus} CPUs · {@settings.memory_gib} GiB · {length(
+          <p id="vm-image" class="mt-1 font-mono text-[11px] text-muted">
+            {if @vm.exists?, do: @created_ref || "unknown image", else: @image.tag} · {@settings.cpus} CPUs · {@settings.memory_gib} GiB · {length(
               @settings.shares
             )} shared folders
+          </p>
+          <p
+            :if={@vm.exists? and @created_ref != @image.tag}
+            id="vm-next-image"
+            class="mt-1 text-[11px] text-muted"
+          >
+            Next image: <span class="font-mono">{@image.tag}</span>. Recreate to use it.
           </p>
         </div>
         <div class="flex items-center gap-2">
@@ -356,7 +364,14 @@ defmodule MDTClientWeb.SandboxLive.Overview do
               "profiles" => %{
                 "MDT Sandbox" => %{
                   "base" => "default",
-                  "settings" => %{"context_servers" => %{}}
+                  "settings" => %{
+                    "context_servers" => %{},
+                    "terminal" => %{
+                      "shell" => %{
+                        "with_arguments" => %{"program" => "/bin/bash", "args" => ["--login"]}
+                      }
+                    }
+                  }
                 }
               }
             },
@@ -398,11 +413,11 @@ defmodule MDTClientWeb.SandboxLive.Overview do
         </.connect_step>
         <.connect_step
           n={3}
-          title="Give Zed a profile that keeps your MCP servers out"
+          title="Give Zed a sandbox profile"
           id="connect-profile"
           text={@profile}
         >
-          Merge it into your Zed user settings, then pick it with "settings profile selector: toggle". Then use Zed's own Claude Code and Codex agents: on a remote project they install inside the VM, in its Home, so they survive recreating it.
+          Merge it into your Zed user settings, then pick it with "settings profile selector: toggle". This starts terminals in Bash and keeps your host MCP servers out. Zed's own Claude Code and Codex agents install inside the VM, in its Home, so they survive recreating it.
         </.connect_step>
         <.connect_step n={4} title="Open a shared folder" id="connect-open" text={@open}>
           Shared folders keep their paths from this machine; in the VM, ~ is /root, so they are not under ~/projects there. A folder shared after the VM was created appears once it is recreated. Then sign the agents in from a Zed terminal (claude auth login, codex login --device-auth). Logins live in the VM's Home and survive recreating it.

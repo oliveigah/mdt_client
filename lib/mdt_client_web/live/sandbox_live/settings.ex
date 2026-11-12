@@ -39,6 +39,7 @@ defmodule MDTClientWeb.SandboxLive.Settings do
         refused: Sandbox.refused_addresses(),
         mdt_layer: Image.mdt_layer(),
         current: current,
+        different_default?: assigns.settings.containerfile != Image.default_containerfile(),
         edited?: current != nil and current.containerfile != assigns.settings.containerfile
       )
 
@@ -104,6 +105,18 @@ defmodule MDTClientWeb.SandboxLive.Settings do
           {if @image.loaded?, do: "Rebuild", else: "Build"}
         </.button>
       </:actions>
+
+      <div
+        id="image-setup-guide"
+        class="border-b border-line-soft px-4 py-3 text-[11px] leading-5 text-muted"
+      >
+        <p>
+          MDT's default comes with Bash, completion, language runtimes and development CLIs already installed. Save the recipe, build the image, then recreate the VM to use it. Restarting keeps the same image.
+        </p>
+        <p :if={@different_default?} id="containerfile-default-differs" class="mt-1 text-ink">
+          Your saved recipe differs from MDT's current default. To adopt the current setup, choose "Start from MDT's default" below, save, and build. Review any customizations before replacing them. You can keep Home and Cache when recreating.
+        </p>
+      </div>
 
       <.form
         for={@name_form}
@@ -222,7 +235,7 @@ defmodule MDTClientWeb.SandboxLive.Settings do
           <ul class="space-y-1.5 border-t border-line-soft px-4 py-3 text-[10px] leading-4 text-muted">
             <li class="flex gap-2">
               <.icon name="hero-finger-print-micro" class="mt-px size-3 shrink-0 text-accent" />
-              MDT's layer only points at /mnt/mdt and /cache, so the image holds nothing of this identity's and a newer MDT needs no rebuild.
+              MDT's layer points at /mnt/mdt and /cache. The image holds nothing of this identity's; CA, grant and helper updates arrive without rebuilding it.
             </li>
             <li class="flex gap-2">
               <.icon name="hero-exclamation-triangle-micro" class="mt-px size-3 shrink-0 text-warn" />

@@ -1,0 +1,186 @@
+diff --git a/crates/filesystem/lib/backends/passthroughfs/unix/inode.rs b/crates/filesystem/lib/backends/passthroughfs/unix/inode.rs
+index 1af2c06..867c898 100644
+--- a/crates/filesystem/lib/backends/passthroughfs/unix/inode.rs
++++ b/crates/filesystem/lib/backends/passthroughfs/unix/inode.rs
+@@ -566,8 +566,10 @@ fn get_inode_fd_linux(fs: &PassthroughFs, inode: u64) -> io::Result<InodeFd> {
+ 
+     let current_anchor = current_anchor_alias(&data);
+     let candidates = candidate_aliases(&data, current_anchor.clone());
+-    // Stale-alias failures (ENOENT/ENOTDIR — the path was renamed or removed) mean "try the next alias" and fall through to ENOENT. Any other reopen failure (EMFILE,
+-    // EACCES, EIO) is a host-side problem, not a missing file: preserve it so fd exhaustion does not masquerade as phantom "No such file or directory" in the guest.
++    // The kernel can still reference an old inode after a host-side rename or
++    // replacement. Try every known alias, then return ESTALE so pathname-based
++    // operations revalidate instead of treating an existing replacement as absent.
++    // Preserve host errors such as EMFILE/EACCES/EIO rather than hiding them.
+     let mut host_err: Option<io::Error> = None;
+     for alias in candidates {
+         let mut seen = HashSet::new();
+@@ -584,17 +586,23 @@ fn get_inode_fd_linux(fs: &PassthroughFs, inode: u64) -> io::Result<InodeFd> {
+                 continue;
+             }
+         };
+-        if validate_identity_linux(fd, expected).is_ok() {
+-            drop(inodes);
+-            if current_anchor.as_ref() != Some(&alias) {
+-                repair_anchor(fs, inode, &alias);
++        match validate_identity_linux(fd, expected) {
++            Ok(()) => {
++                drop(inodes);
++                if current_anchor.as_ref() != Some(&alias) {
++                    repair_anchor(fs, inode, &alias);
++                }
++                return Ok(InodeFd { fd, owned: true });
++            }
++            Err(err) if err.raw_os_error() == Some(libc::ESTALE) => {}
++            Err(err) => {
++                host_err = Some(err);
+             }
+-            return Ok(InodeFd { fd, owned: true });
+         }
+         unsafe { libc::close(fd) };
+     }
+ 
+-    Err(host_err.unwrap_or_else(platform::enoent))
++    Err(host_err.unwrap_or_else(|| io::Error::from_raw_os_error(libc::ESTALE)))
+ }
+ 
+ #[cfg(target_os = "linux")]
+@@ -738,7 +746,7 @@ pub(crate) fn secure_open_path_linux(
+ fn validate_identity_linux(fd: RawFd, expected: InodeAltKey) -> io::Result<()> {
+     let actual = linux_alt_key_from_fd(fd)?;
+     if actual != expected {
+-        return Err(platform::enoent());
++        return Err(io::Error::from_raw_os_error(libc::ESTALE));
+     }
+     Ok(())
+ }
+diff --git a/crates/filesystem/lib/backends/passthroughfs/unix/tests/mod.rs b/crates/filesystem/lib/backends/passthroughfs/unix/tests/mod.rs
+index 41cee4f..9ec55e6 100644
+--- a/crates/filesystem/lib/backends/passthroughfs/unix/tests/mod.rs
++++ b/crates/filesystem/lib/backends/passthroughfs/unix/tests/mod.rs
+@@ -19,6 +19,7 @@ mod test_flag_translation;
+ mod test_host_permissions;
+ mod test_init_binary;
+ mod test_kill_priv;
++mod test_live_host_changes;
+ mod test_lookup_inode;
+ mod test_metadata;
+ mod test_name_validation;
+diff --git a/crates/filesystem/lib/backends/passthroughfs/unix/tests/test_live_host_changes.rs b/crates/filesystem/lib/backends/passthroughfs/unix/tests/test_live_host_changes.rs
+new file mode 100644
+index 0000000..9471929
+--- /dev/null
++++ b/crates/filesystem/lib/backends/passthroughfs/unix/tests/test_live_host_changes.rs
+@@ -0,0 +1,112 @@
++//! Host mutations bypass FUSE: cached identities must be revalidated, while
++//! existing open handles continue to refer to the original object.
++
++use super::*;
++
++#[test]
++fn test_normal_metadata_cache_and_buffered_io_are_preserved() {
++    let sb = TestSandbox::new();
++    sb.host_create_file("file", b"original");
++    let entry = sb.lookup_root("file").unwrap();
++    assert_eq!(entry.entry_timeout, std::time::Duration::from_secs(5));
++    assert_eq!(entry.attr_timeout, std::time::Duration::from_secs(5));
++
++    sb.host_create_file("file", b"changed and longer");
++    let (metadata, timeout) = sb.fs.getattr(sb.ctx(), entry.inode, None).unwrap();
++    assert_eq!(metadata.st_size, 18);
++    assert_eq!(timeout, std::time::Duration::from_secs(5));
++    let (_, options) = sb.fs.open(sb.ctx(), entry.inode, false, 0).unwrap();
++    assert!(!options.contains(OpenOptions::KEEP_CACHE));
++    assert!(!options.contains(OpenOptions::DIRECT_IO));
++}
++
++#[cfg(target_os = "linux")]
++#[test]
++fn test_host_replacement_keeps_valid_hard_link_aliases() {
++    let sb = TestSandbox::new();
++    sb.host_create_file("original", b"original");
++    let original = sb.lookup_root("original").unwrap();
++    sb.fs
++        .link(sb.ctx(), original.inode, ROOT_INODE, c"alias")
++        .unwrap();
++
++    sb.host_create_file("replacement", b"new bytes");
++    std::fs::rename(sb.root.join("replacement"), sb.root.join("original")).unwrap();
++
++    let handle = sb.fuse_open(original.inode, 0).unwrap();
++    assert_eq!(
++        sb.fuse_read(original.inode, handle, 32, 0).unwrap(),
++        b"original"
++    );
++    assert_eq!(
++        std::fs::read(sb.root.join("original")).unwrap(),
++        b"new bytes"
++    );
++}
++
++#[cfg(target_os = "linux")]
++#[test]
++fn test_host_replacement_returns_estale_instead_of_missing_file() {
++    let sb = TestSandbox::new();
++    sb.host_create_file("index", b"original");
++    let original = sb.lookup_root("index").unwrap();
++
++    sb.host_create_file("index.lock", b"replacement");
++    std::fs::rename(sb.root.join("index.lock"), sb.root.join("index")).unwrap();
++
++    // A cached FUSE node no longer identifies the object at this path. ESTALE
++    // lets the VFS retry the path lookup; ENOENT makes Git treat its index as empty.
++    let result = sb.fuse_open(original.inode, 0);
++    TestSandbox::assert_errno(result, 116);
++
++    let replacement = sb.lookup_root("index").unwrap();
++    assert_ne!(replacement.inode, original.inode);
++    let handle = sb.fuse_open(replacement.inode, 0).unwrap();
++    assert_eq!(
++        sb.fuse_read(replacement.inode, handle, 32, 0).unwrap(),
++        b"replacement"
++    );
++}
++
++#[cfg(target_os = "linux")]
++#[test]
++fn test_host_directory_replacement_revalidates_the_cached_parent() {
++    let sb = TestSandbox::new();
++    sb.host_create_file("directory/file", b"original");
++    let original = sb.lookup_root("directory").unwrap();
++
++    std::fs::rename(sb.root.join("directory"), sb.root.join("old-directory")).unwrap();
++    sb.host_create_file("directory/file", b"replacement");
++
++    TestSandbox::assert_errno(sb.lookup(original.inode, "file"), 116);
++    let replacement = sb.lookup_root("directory").unwrap();
++    let file = sb.lookup(replacement.inode, "file").unwrap();
++    let handle = sb.fuse_open(file.inode, 0).unwrap();
++    assert_eq!(
++        sb.fuse_read(file.inode, handle, 32, 0).unwrap(),
++        b"replacement"
++    );
++}
++
++#[cfg(target_os = "linux")]
++#[test]
++fn test_open_handle_survives_host_replacement() {
++    let sb = TestSandbox::new();
++    sb.host_create_file("file", b"original");
++    let original = sb.lookup_root("file").unwrap();
++    let handle = sb.fuse_open(original.inode, 0).unwrap();
++
++    sb.host_create_file("replacement", b"new bytes");
++    std::fs::rename(sb.root.join("replacement"), sb.root.join("file")).unwrap();
++
++    assert_eq!(
++        sb.fuse_read(original.inode, handle, 32, 0).unwrap(),
++        b"original"
++    );
++    let replacement = sb.lookup_root("file").unwrap();
++    let handle = sb.fuse_open(replacement.inode, 0).unwrap();
++    assert_eq!(
++        sb.fuse_read(replacement.inode, handle, 32, 0).unwrap(),
++        b"new bytes"
++    );
++}
