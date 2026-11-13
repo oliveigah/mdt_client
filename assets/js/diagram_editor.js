@@ -501,7 +501,7 @@ export const DiagramEditor = {
 
   // The points a selected arrow is shaped by: where it leaves its start, or
   // the row it starts on, its bends, and where it reaches its end.
-  controls(arrow) {
+  joints(arrow) {
     const route = this.route(arrow)
     const first = arrow.start && arrow.startRow ? 1 : 0
     const last = route.length - (arrow.end && arrow.endRow ? 2 : 1)
@@ -511,12 +511,12 @@ export const DiagramEditor = {
   // Where each stretch between them offers to bend: its middle, or just past
   // the label when that sits there. Null for a stretch too short to bend.
   bendSpots(arrow) {
-    const controls = this.controls(arrow)
+    const joints = this.joints(arrow)
     const label = this.labelBoxes.get(arrow.id)
     const zoom = this.view.zoom
 
-    return controls.slice(1).map((to, index) => {
-      const from = controls[index]
+    return joints.slice(1).map((to, index) => {
+      const from = joints[index]
       if (Math.hypot(to.x - from.x, to.y - from.y) < BEND_MIN / zoom) return null
       const middle = {x: (from.x + to.x) / 2, y: (from.y + to.y) / 2}
       return label && containsPoint(label, middle) ? leaveBox(inflate(label, 8 / zoom), middle, to) : middle
@@ -1137,14 +1137,14 @@ export const DiagramEditor = {
     const element = arrow[id] && this.find(arrow[id])
     if (element && !arrow[row] && !arrow[anchor]) return center(element)
 
-    const controls = this.controls(arrow)
-    return end === "start" ? controls[0] : controls[controls.length - 1]
+    const joints = this.joints(arrow)
+    return end === "start" ? joints[0] : joints[joints.length - 1]
   },
 
   // A bend dragged back in line with the points either side of it goes, the
   // stretch being straight again.
   straighten(arrow, index) {
-    const [before, bend, after] = this.controls(arrow).slice(index, index + 3)
+    const [before, bend, after] = this.joints(arrow).slice(index, index + 3)
     if (!after || distanceToSegment(bend, before, after) > STRAIGHT / this.view.zoom) return
 
     arrow.points = bends(arrow).filter((_, other) => other !== index)
