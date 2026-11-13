@@ -144,8 +144,9 @@ defmodule MDTClient.Sandbox.Shares do
     end)
   end
 
-  # Whether `path` is `folder` or somewhere inside it.
-  defp within?(path, folder), do: path == folder or String.starts_with?(path, folder <> "/")
+  @doc "Whether `path` is `folder` or somewhere inside it. Both are plain absolute paths."
+  @spec within?(String.t(), String.t()) :: boolean()
+  def within?(path, folder), do: path == folder or String.starts_with?(path, folder <> "/")
 
   defp realpath_or_self(path) do
     case realpath(Path.expand(path)) do
@@ -154,8 +155,12 @@ defmodule MDTClient.Sandbox.Shares do
     end
   end
 
-  # Resolves every symlink along `path`, as the kernel would when mounting it.
-  defp realpath(path), do: resolve(Path.split(path), "/", 0)
+  @doc """
+  `path` with every symlink along it resolved, as the kernel would resolve
+  it. A missing part ends the walk where it is: the rest is joined as given.
+  """
+  @spec realpath(String.t()) :: {:ok, String.t()} | {:error, :loop}
+  def realpath(path), do: resolve(Path.split(path), "/", 0)
 
   defp resolve(_parts, _at, links) when links > @max_links, do: {:error, :loop}
   defp resolve([], at, _links), do: {:ok, at}

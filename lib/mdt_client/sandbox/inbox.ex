@@ -16,7 +16,9 @@ defmodule MDTClient.Sandbox.Inbox do
     * `tokens/<grant>` - each token grant's placeholder, as a file;
     * `files/` - the real value of file grants that are on;
     * `AGENTS.md`, `grants.md` - what agents are told, and the grants as they
-      are now.
+      are now;
+    * `host.md` - your machine, for writing host commands
+      (`MDTClient.Sandbox.HostInfo`), written by `write_host/2`.
 
   Everything here but `files/` is worthless outside MDT's proxy. A file grant
   writes the real value, which is why turning it off deletes it and why
@@ -69,6 +71,10 @@ defmodule MDTClient.Sandbox.Inbox do
 
     :ok
   end
+
+  @doc "Writes `host.md`, the description of your machine that `mdt host` also prints."
+  @spec write_host(Path.t(), String.t()) :: :ok
+  def write_host(dir, text), do: put_changed(dir, "host.md", text)
 
   @doc """
   The environment the VM's processes get from token grants: `env` variables

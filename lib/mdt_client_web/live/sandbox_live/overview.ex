@@ -19,6 +19,7 @@ defmodule MDTClientWeb.SandboxLive.Overview do
   attr :grants, :list, required: true
   attr :grant_map, :map, required: true
   attr :waiting, :list, required: true
+  attr :running, :list, default: []
   attr :recent, :list, required: true
   attr :stats, :map, required: true
   attr :now, DateTime, required: true
@@ -219,9 +220,10 @@ defmodule MDTClientWeb.SandboxLive.Overview do
         </div>
         <div :if={@waiting == []} class="rounded-xl border border-dashed border-line">
           <.empty icon="hero-check-badge" id="overview-nothing-waiting">
-            Nothing waits for you. Agents asking for a grant, and uses of a grant, show up here, and in the title bar of every tool.
+            Nothing waits for you. Agents asking for a grant or to run a command on this machine, and uses of a grant, show up here, and in the title bar of every tool.
           </.empty>
         </div>
+        <Approvals.running :if={@running != []} running={@running} now={@now} />
         <Approvals.approval
           :for={approval <- Enum.take(@waiting, 3)}
           approval={approval}
@@ -452,8 +454,13 @@ defmodule MDTClientWeb.SandboxLive.Overview do
 
   defp waiting_words(waiting) do
     asks = Enum.count(waiting, &(&1.kind == :activation))
-    uses = length(waiting) - asks
+    commands = Enum.count(waiting, &(&1.kind == :command))
+    uses = length(waiting) - asks - commands
 
-    "#{uses} #{if uses == 1, do: "use", else: "uses"} · #{asks} #{if asks == 1, do: "agent", else: "agents"} asking"
+    "#{uses} #{if uses == 1, do: "use", else: "uses"} · #{asks} #{if asks == 1, do: "agent", else: "agents"} asking" <>
+      if(commands > 0,
+        do: " · #{commands} #{if commands == 1, do: "command", else: "commands"}",
+        else: ""
+      )
   end
 end

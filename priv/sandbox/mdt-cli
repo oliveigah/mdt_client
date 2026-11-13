@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # mdt: ask MDT, the user's control panel, for access. Written by MDT to
 # /mnt/mdt/bin/mdt. It reaches MDT over vsock (socat), and can only read the
-# grants and ask the user to turn one on. See MDTClient.Sandbox.Channel.
+# grants and the host's description, ask the user to turn a grant on, and
+# ask them to run a command on their machine. See MDTClient.Sandbox.Channel.
 set -u
 
 channel=${MDT_CHANNEL:-VSOCK-CONNECT:2:5000}
+max_script=16384
 
 usage() {
   cat <<'USAGE'
@@ -20,11 +22,31 @@ mdt - ask MDT, the user's control panel, for access
   mdt request --need "the access, and the service or host" --reason "why" [--minutes 60]
       Ask for access no grant gives yet. The user sets it up.
 
-  mdt wait ASK_ID [--wait 60]
-      Keep waiting for the answer to an earlier ask.
+  mdt host
+      The user's machine: OS, architecture, shell, shared folders, tools.
 
-Exit status: 0 the grant is on, 1 the ask was wrong, 2 still waiting for the
-user, 3 declined or given up, 4 MDT isn't answering (locked or closed).
+  mdt run --reason "why it must run on the user's machine" [--dir DIR] [--timeout 120] [--wait 60] [--] COMMAND [ARG...]
+  mdt run --reason "..." [options] <<'EOF'
+  script
+  EOF
+      Ask the user to run a command on their machine, as them, outside this
+      VM. Last resort: use a grant when one can do it. The user approves the
+      exact text, once. --dir defaults to the current directory; outside a
+      shared folder it runs in the user's home folder. --timeout is in
+      seconds (1 to 3600). One argument is a shell line as it is; several
+      are quoted and joined; none reads the script from stdin (16 KiB max).
+
+  mdt wait ID [--wait 60]
+      Keep waiting for the answer to an earlier ask or run.
+
+Exit status of grants, request and wait on an ask: 0 the grant is on, 1 the
+ask was wrong, 2 still waiting for the user, 3 declined or given up, 4 MDT
+isn't answering (locked or closed).
+
+Exit status of run, and wait on a run: the command's own status when it ran
+and its output came back (124 if it hit its time limit). Otherwise, with a
+line on stderr: 120 still waiting for the user, 121 it didn't run or its
+output didn't come back, 122 the ask was wrong, 123 MDT isn't answering.
 USAGE
 }
 
@@ -44,7 +66,7 @@ number() {
   case $2 in
     '' | *[!0-9]*)
       echo "mdt: $1 takes a whole number" >&2
-      exit 1
+      exit "$3"
       ;;
   esac
   printf '%s' "$2"
@@ -72,44 +94,114 @@ agent() {
   printf 'an agent'
 }
 
-send() {
+# Sends one ask and prints MDT's answer. $2 is the status when MDT can't be
+# reached.
+exchange() {
   if ! command -v socat >/dev/null 2>&1; then
     echo "mdt: socat is missing from this VM's image, so MDT can't be reached. Tell the user." >&2
-    exit 4
+    exit "$2"
   fi
-  local reply status
   # ignoreeof: the ask stays open until MDT answers and closes.
   reply=$(printf '%s\n' "$1" | socat -t 1 -,ignoreeof "$channel" 2>/dev/null)
   if [ -z "$reply" ]; then
     echo "mdt: MDT isn't answering. It may be locked or closed: tell the user." >&2
-    exit 4
+    exit "$2"
   fi
-  status=${reply%%$'\n'*}
-  printf '%s\n' "${reply#*$'\n'}"
+}
+
+# The first line of $1, and the rest after it (empty when there is none).
+first_line() { printf '%s' "${1%%$'\n'*}"; }
+after_first() {
+  case $1 in
+    *$'\n'*) printf '%s' "${1#*$'\n'}" ;;
+  esac
+}
+
+send() {
+  local reply status
+  exchange "$1" 4
+  status=$(first_line "$reply")
+  printf '%s\n' "$(after_first "$reply")"
   case $status in
     0 | 1 | 2 | 3 | 4) exit "$status" ;;
     *) exit 1 ;;
   esac
 }
 
+# A run's answer: `ran STATUS`, a note for stderr, then the output and a
+# dot, which keeps its trailing newlines through $(...); or one of MDT's own
+# statuses and a message for stderr.
+send_run() {
+  local reply first rest note output status
+  exchange "$1" 123
+  first=$(first_line "$reply")
+  rest=$(after_first "$reply")
+  case $first in
+    "ran "*)
+      status=${first#ran }
+      note=$(first_line "$rest")
+      output=$(after_first "$rest")
+      [ -n "$note" ] && printf '%s\n' "$note" >&2
+      printf '%s' "${output%.}"
+      case $status in
+        '' | *[!0-9]*) exit 1 ;;
+        *) exit "$status" ;;
+      esac
+      ;;
+    120 | 121 | 122 | 123)
+      printf 'mdt: %s\n' "$rest" >&2
+      exit "$first"
+      ;;
+    *)
+      printf 'mdt: %s\n' "$rest" >&2
+      exit 121
+      ;;
+  esac
+}
+
 command=${1:-help}
 [ $# -gt 0 ] && shift
 
-grant="" need="" reason="" minutes=60 wait=60 id=""
+# Options of run are wrong with 122, of the rest with 1.
+wrong=1
+[ "$command" = run ] && wrong=122
+
+grant="" need="" reason="" minutes=60 wait=60 id="" dir="" timeout=120
+words=()
 while [ $# -gt 0 ]; do
   case $1 in
     --reason) reason=${2-}; shift 2 || shift ;;
     --reason=*) reason=${1#*=}; shift ;;
     --need) need=${2-}; shift 2 || shift ;;
     --need=*) need=${1#*=}; shift ;;
-    --minutes) minutes=$(number --minutes "${2-}") || exit 1; shift 2 || shift ;;
-    --minutes=*) minutes=$(number --minutes "${1#*=}") || exit 1; shift ;;
-    --wait) wait=$(number --wait "${2-}") || exit 1; shift 2 || shift ;;
-    --wait=*) wait=$(number --wait "${1#*=}") || exit 1; shift ;;
+    --minutes) minutes=$(number --minutes "${2-}" "$wrong") || exit "$wrong"; shift 2 || shift ;;
+    --minutes=*) minutes=$(number --minutes "${1#*=}" "$wrong") || exit "$wrong"; shift ;;
+    --wait) wait=$(number --wait "${2-}" "$wrong") || exit "$wrong"; shift 2 || shift ;;
+    --wait=*) wait=$(number --wait "${1#*=}" "$wrong") || exit "$wrong"; shift ;;
+    --dir) dir=${2-}; shift 2 || shift ;;
+    --dir=*) dir=${1#*=}; shift ;;
+    --timeout) timeout=$(number --timeout "${2-}" "$wrong") || exit "$wrong"; shift 2 || shift ;;
+    --timeout=*) timeout=$(number --timeout "${1#*=}" "$wrong") || exit "$wrong"; shift ;;
     -h | --help) usage; exit 0 ;;
-    -*) echo "mdt: unknown option $1" >&2; exit 1 ;;
+    --)
+      shift
+      words=("$@")
+      break
+      ;;
+    -*)
+      echo "mdt: unknown option $1" >&2
+      exit "$wrong"
+      ;;
     *)
-      if [ "$command" = wait ]; then id=$1; else grant=$1; fi
+      if [ "$command" = run ]; then
+        # The command starts here; options go before it.
+        words=("$@")
+        break
+      elif [ "$command" = wait ]; then
+        id=$1
+      else
+        grant=$1
+      fi
       shift
       ;;
   esac
@@ -119,6 +211,9 @@ case $command in
   grants | list)
     send '{"command":"grants"}'
     ;;
+  host)
+    send '{"command":"host"}'
+    ;;
   request | ask)
     if [ -z "$grant" ] && [ -z "$need" ]; then
       echo "mdt: name a grant, or describe a --need. See: mdt help" >&2
@@ -126,12 +221,36 @@ case $command in
     fi
     send "{\"command\":\"request\",\"grant\":$(json "$grant"),\"need\":$(json "$need"),\"reason\":$(json "$reason"),\"minutes\":$minutes,\"wait\":$wait,\"agent\":$(json "$(agent)")}"
     ;;
+  run)
+    if [ ${#words[@]} -eq 1 ]; then
+      script=${words[0]}
+    elif [ ${#words[@]} -gt 1 ]; then
+      script=$(printf '%q ' "${words[@]}")
+      script=${script% }
+    elif [ -t 0 ]; then
+      echo "mdt: give the command after --, or the script on stdin. See: mdt help" >&2
+      exit 122
+    else
+      script=$(cat)
+    fi
+    bytes=$(printf '%s' "$script" | LC_ALL=C wc -c)
+    if [ "$bytes" -gt "$max_script" ]; then
+      echo "mdt: the script is over 16 KiB. Put the long part in a file in a shared folder, and say so in the reason." >&2
+      exit 122
+    fi
+    [ -z "$dir" ] && dir=$PWD
+    dir=$( (cd "$dir" 2>/dev/null && pwd -P) || printf '%s' "$dir")
+    send_run "{\"command\":\"run\",\"script\":$(json "$script"),\"dir\":$(json "$dir"),\"timeout\":$timeout,\"reason\":$(json "$reason"),\"wait\":$wait,\"agent\":$(json "$(agent)")}"
+    ;;
   wait)
     if [ -z "$id" ]; then
       echo "mdt: wait needs the ask's id. See: mdt help" >&2
       exit 1
     fi
-    send "{\"command\":\"wait\",\"id\":$(json "$id"),\"wait\":$wait}"
+    case $id in
+      run-*) send_run "{\"command\":\"wait\",\"id\":$(json "$id"),\"wait\":$wait}" ;;
+      *) send "{\"command\":\"wait\",\"id\":$(json "$id"),\"wait\":$wait}" ;;
+    esac
     ;;
   help | -h | --help)
     usage

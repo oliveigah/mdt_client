@@ -275,7 +275,7 @@ defmodule MDTClient.Sandbox.ServerTest do
 
     late = authorize_async(username, other)
     approval = wait_for_approval(username)
-    send(Store.whereis(Server, username), {:give_up, approval.id})
+    send(Store.whereis(Server, username), {:give_up, approval.id, approval.deadline})
     assert {:deny, 403, body} = Task.await(late)
     assert body =~ "mdt_approval_timeout"
   end
@@ -429,7 +429,8 @@ defmodule MDTClient.Sandbox.ServerTest do
     {:ok, grant} = Sandbox.create_grant(username, Map.put(@github, "value", "ghp_real_value"))
     {:ok, approval} = ask(username, %{grant: grant.id})
 
-    assert Task.await(await(username, approval.id, 30)) == :pending
+    assert {:pending, %{id: id, status: :waiting}} = Task.await(await(username, approval.id, 30))
+    assert id == approval.id
     assert [%{status: :waiting}] = Sandbox.snapshot(username).waiting
 
     waiting = await(username, approval.id)
@@ -454,7 +455,7 @@ defmodule MDTClient.Sandbox.ServerTest do
     assert {:ok, %{status: :denied, decision: :decline}, _} = Task.await(waiting)
 
     {:ok, late} = ask(username, %{grant: grant.id})
-    send(Store.whereis(Server, username), {:give_up, late.id})
+    send(Store.whereis(Server, username), {:give_up, late.id, late.deadline})
     assert {:ok, %{status: :timed_out}, _} = Task.await(await(username, late.id))
 
     {:ok, mine} = ask(username, %{grant: grant.id})

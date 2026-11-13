@@ -1,12 +1,17 @@
 defmodule MDTClientWeb.SandboxLive.Approvals do
   @moduledoc """
-  The approvals page, and the cards it shares with the overview. Two types
+  The approvals page, and the cards it shares with the overview. Three types
   of approval wait in one queue:
 
     * **activations** - an agent in the VM asks for a grant to be turned on,
       or for access no grant gives yet;
     * **uses** - a request carrying a grant's placeholder, or a connection
-      through a network grant, held by the proxy.
+      through a network grant, held by the proxy;
+    * **commands** - an agent asks to run a command on this machine, as you.
+      Drawn in red: no allowance ever covers one. The full card is the only
+      place to run it, so the script is always read in full first. A command
+      whose output you chose to see first comes back with it, to send or
+      keep; while it runs it sits above the queue with a Stop button.
 
   A card keeps what MDT saw apart from what the agent wrote. Facts sit in a
   plain list; the agent's words sit in a dashed box marked as unverified, so
@@ -18,10 +23,11 @@ defmodule MDTClientWeb.SandboxLive.Approvals do
 
   import MDTClientWeb.SandboxLive.Components
 
-  alias MDTClient.Sandbox.{Approval, Grant, Presets, RequestView}
+  alias MDTClient.Sandbox.{Approval, Grant, HostCommand, Presets, RequestView}
   alias MDTClient.Sandbox.Instructions
 
   attr :waiting, :list, required: true
+  attr :running, :list, default: []
   attr :history, :list, required: true
   attr :grants, :map, required: true, doc: "grants by id"
   attr :marks, :list, required: true, doc: "`RequestView.marks/1` of every grant"
@@ -32,10 +38,12 @@ defmodule MDTClientWeb.SandboxLive.Approvals do
     ~H"""
     <.page_header
       title="Approvals"
-      subtitle="Agents asking for a grant, and every use of a grant: requests carrying its placeholder, connections through a network grant. Each waits here until you decide, or gives up on its own."
+      subtitle="Agents asking for a grant or to run a command on this machine, and every use of a grant: requests carrying its placeholder, connections through a network grant. Each waits here until you decide, or gives up on its own."
     />
 
     <div class="space-y-6">
+      <.running :if={@running != []} running={@running} now={@now} />
+
       <section id="waiting-approvals" aria-label="Waiting for a decision" class="space-y-3">
         <h2 class="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-muted">
           Waiting
@@ -45,7 +53,7 @@ defmodule MDTClientWeb.SandboxLive.Approvals do
         </h2>
         <div :if={@waiting == []} class="rounded-xl border border-dashed border-line">
           <.empty icon="hero-hand-raised" id="no-waiting-approvals">
-            Nothing is waiting. Agents asking for a grant (with <code class="font-mono">mdt request</code>), and each use of a grant that is on, show up here.
+            Nothing is waiting. Agents asking for a grant (<code class="font-mono">mdt request</code>) or to run a command on this machine (<code class="font-mono">mdt run</code>), and each use of a grant that is on, show up here.
           </.empty>
         </div>
         <.approval
@@ -68,22 +76,24 @@ defmodule MDTClientWeb.SandboxLive.Approvals do
           <.empty icon="hero-clock">Decisions you make will be listed here.</.empty>
         </div>
         <ul class="divide-y divide-line-soft">
-          <li
-            :for={approval <- @history}
-            id={"decided-#{approval.id}"}
-            class="flex items-center gap-3 px-4 py-2.5"
-          >
-            <.decided_badge approval={approval} />
-            <div class="min-w-0 flex-1">
-              <p class="truncate text-xs text-ink">{history_title(approval, @grants)}</p>
-              <p class="truncate text-[11px] text-faint">
-                {grant_name(@grants, approval)} · {decision_words(approval)}
-              </p>
-            </div>
-            <span class="shrink-0 text-[11px] text-faint">
-              <.clock id={"decided-at-#{approval.id}"} since={approval.decided_at} now={@now} />
-            </span>
-          </li>
+          <%= for approval <- @history do %>
+            <%= if approval.kind == :command do %>
+              <.decided_command approval={approval} now={@now} />
+            <% else %>
+              <li id={"decided-#{approval.id}"} class="flex items-center gap-3 px-4 py-2.5">
+                <.decided_badge approval={approval} />
+                <div class="min-w-0 flex-1">
+                  <p class="truncate text-xs text-ink">{history_title(approval, @grants)}</p>
+                  <p class="truncate text-[11px] text-faint">
+                    {grant_name(@grants, approval)} · {decision_words(approval)}
+                  </p>
+                </div>
+                <span class="shrink-0 text-[11px] text-faint">
+                  <.clock id={"decided-at-#{approval.id}"} since={approval.decided_at} now={@now} />
+                </span>
+              </li>
+            <% end %>
+          <% end %>
         </ul>
       </.card>
     </div>
@@ -99,6 +109,11 @@ defmodule MDTClientWeb.SandboxLive.Approvals do
   attr :compact, :boolean, default: false
 
   def approval(%{approval: %Approval{kind: :activation}} = assigns), do: activation_card(assigns)
+
+  def approval(%{approval: %Approval{kind: :command, stage: :output}} = assigns),
+    do: output_card(assigns)
+
+  def approval(%{approval: %Approval{kind: :command}} = assigns), do: command_card(assigns)
   def approval(assigns), do: use_card(assigns)
 
   ## Uses
@@ -392,6 +407,432 @@ defmodule MDTClientWeb.SandboxLive.Approvals do
     """
   end
 
+  ## Commands
+
+  defp command_card(assigns) do
+    approval = assigns.approval
+    total = max(DateTime.diff(approval.deadline, approval.requested_at, :second), 1)
+    left = max(DateTime.diff(approval.deadline, assigns.now, :second), 0)
+
+    assigns =
+      assign(assigns,
+        left: left,
+        fraction: Float.round(min(left / total, 1.0), 3),
+        form: to_form(%{"id" => approval.id, "output" => "send"}, as: :run)
+      )
+
+    ~H"""
+    <article
+      id={"approval-#{@approval.id}"}
+      class="rounded-xl border border-bad/45 bg-panel shadow-sm shadow-black/5 transition-shadow hover:shadow-md dark:shadow-black/30"
+    >
+      <.drain
+        id={"approval-drain-#{@approval.id}-#{@left}"}
+        left={@left}
+        fraction={@fraction}
+        tone="bad"
+      />
+
+      <header class="flex items-start gap-3 px-4 pb-3 pt-3.5">
+        <span class="flex size-8 shrink-0 items-center justify-center rounded-lg border border-bad/35 bg-bad-soft/40 text-bad">
+          <.icon name="hero-command-line" class="size-4" />
+        </span>
+        <div class="min-w-0 flex-1">
+          <div class="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-muted">
+            <span class="font-medium text-ink/80">{@approval.agent}</span>
+            <span>in the VM</span>
+            <span class="text-faint">·</span>
+            <span class="font-medium text-bad">Asks to run a command on this machine</span>
+            <span
+              :if={@approval.retries > 0}
+              id={"approval-retries-#{@approval.id}"}
+              title="The agent asked again while this waited."
+              class="rounded bg-deep px-1.5 py-0.5 font-mono text-[10px] text-faint"
+            >
+              asked {@approval.retries + 1} times
+            </span>
+          </div>
+          <h3 class="mt-0.5 break-all font-mono text-[13px] font-semibold leading-5 text-ink">
+            {@approval.title}
+          </h3>
+          <p class="mt-0.5 break-all font-mono text-[11px] text-muted">
+            in {@approval.dir} · at most {HostCommand.seconds_words(@approval.timeout)}
+          </p>
+        </div>
+        <.gives_up approval={@approval} now={@now} tone="text-bad" />
+      </header>
+
+      <div :if={not @compact} class="space-y-3 px-4 pb-4">
+        <.script id={@approval.id} script={@approval.script} />
+
+        <div class={[
+          "grid gap-3",
+          (@approval.hints != [] or @approval.claims != []) &&
+            "lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]"
+        ]}>
+          <.facts id={"approval-facts-#{@approval.id}"} facts={@approval.facts} />
+          <div class="space-y-3">
+            <.hints id={"approval-hints-#{@approval.id}"} hints={@approval.hints} />
+            <.claims id={"approval-claims-#{@approval.id}"} claims={@approval.claims} />
+          </div>
+        </div>
+      </div>
+
+      <footer class="rounded-b-xl border-t border-line-soft bg-deep/40 px-4 py-2.5">
+        <%= if @compact do %>
+          <div class="flex flex-wrap items-center gap-2">
+            <.link
+              id={"review-command-#{@approval.id}"}
+              patch={~p"/tools/sandbox/approvals"}
+              class="inline-flex items-center gap-1.5 rounded-md border border-bad/40 bg-panel px-3 py-1.5 text-xs font-semibold text-bad transition-colors hover:bg-bad-soft/30"
+            >
+              <.icon name="hero-document-magnifying-glass-micro" class="size-3.5" />
+              Read it in full to decide
+            </.link>
+            <div class="flex-1"></div>
+            <.decline_button approval={@approval} />
+          </div>
+        <% else %>
+          <.form
+            for={@form}
+            id={"command-form-#{@approval.id}"}
+            phx-submit="run_command"
+            class="flex flex-wrap items-center gap-x-3 gap-y-2"
+          >
+            <input type="hidden" name={@form[:id].name} value={@approval.id} />
+            <.pills
+              id={"command-output-#{@approval.id}"}
+              name={@form[:output].name}
+              options={[{"send", "Output to the agent"}, {"review", "Show me the output first"}]}
+              checked="send"
+              tone="bad"
+            />
+            <button
+              type="submit"
+              id={"run-command-#{@approval.id}"}
+              class="inline-flex cursor-pointer items-center gap-1.5 rounded-md bg-bad px-3 py-1.5 text-xs font-semibold text-white transition-all hover:brightness-110 active:brightness-95 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-bad"
+            >
+              <.icon name="hero-play-micro" class="size-3.5" /> Run once, as you
+            </button>
+            <div class="flex-1"></div>
+            <.decline_button approval={@approval} />
+          </.form>
+          <p class="mt-2 text-[10px] leading-4 text-faint">
+            It runs outside the VM, with your files, keys and network. No allowance ever covers a command: each one asks.
+          </p>
+        <% end %>
+      </footer>
+    </article>
+    """
+  end
+
+  defp output_card(assigns) do
+    approval = assigns.approval
+    total = max(DateTime.diff(approval.deadline, approval.run.finished_at, :second), 1)
+    left = max(DateTime.diff(approval.deadline, assigns.now, :second), 0)
+
+    assigns =
+      assign(assigns,
+        left: left,
+        fraction: Float.round(min(left / total, 1.0), 3),
+        run: approval.run
+      )
+
+    ~H"""
+    <article
+      id={"approval-#{@approval.id}"}
+      class="rounded-xl border border-bad/45 bg-panel shadow-sm shadow-black/5 transition-shadow hover:shadow-md dark:shadow-black/30"
+    >
+      <.drain
+        id={"approval-drain-#{@approval.id}-#{@left}"}
+        left={@left}
+        fraction={@fraction}
+        tone="bad"
+      />
+
+      <header class="flex items-start gap-3 px-4 pb-3 pt-3.5">
+        <span class="flex size-8 shrink-0 items-center justify-center rounded-lg border border-bad/35 bg-bad-soft/40 text-bad">
+          <.icon name="hero-document-text" class="size-4" />
+        </span>
+        <div class="min-w-0 flex-1">
+          <div class="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-muted">
+            <span class="font-medium text-ink/80">{@approval.agent}</span>
+            <span class="text-faint">·</span>
+            <span>Ran on this machine; its output waits for you</span>
+          </div>
+          <h3 class="mt-0.5 break-all font-mono text-[13px] font-semibold leading-5 text-ink">
+            {@approval.title}
+          </h3>
+          <p class="mt-0.5 text-[11px] text-muted">
+            <.exit_status id={"output-exit-#{@approval.id}"} run={@run} /> · {run_words(@run)}
+          </p>
+        </div>
+        <.gives_up approval={@approval} now={@now} tone="text-bad" />
+      </header>
+
+      <div :if={not @compact} class="space-y-3 px-4 pb-4">
+        <.output id={@approval.id} run={@run} />
+        <details id={"output-script-#{@approval.id}"} class="group/script">
+          <summary class="flex cursor-pointer list-none items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wide text-muted transition-colors hover:text-ink [&::-webkit-details-marker]:hidden">
+            <.icon
+              name="hero-chevron-right-micro"
+              class="size-3 transition-transform group-open/script:rotate-90"
+            /> The command
+          </summary>
+          <div class="mt-2"><.script id={"#{@approval.id}-ran"} script={@approval.script} /></div>
+        </details>
+      </div>
+
+      <footer class="flex flex-wrap items-center gap-2 rounded-b-xl border-t border-line-soft bg-deep/40 px-4 py-2.5">
+        <%= if @compact do %>
+          <.link
+            id={"review-output-#{@approval.id}"}
+            patch={~p"/tools/sandbox/approvals"}
+            class="inline-flex items-center gap-1.5 rounded-md border border-bad/40 bg-panel px-3 py-1.5 text-xs font-semibold text-bad transition-colors hover:bg-bad-soft/30"
+          >
+            <.icon name="hero-document-magnifying-glass-micro" class="size-3.5" />
+            Read the output to decide
+          </.link>
+        <% else %>
+          <button
+            type="button"
+            id={"send-output-#{@approval.id}"}
+            phx-click="decide"
+            phx-value-id={@approval.id}
+            phx-value-decision="send_output"
+            class="inline-flex cursor-pointer items-center gap-1.5 rounded-md bg-ok px-3 py-1.5 text-xs font-semibold text-deep transition-all hover:brightness-110 active:brightness-95"
+          >
+            <.icon name="hero-paper-airplane-micro" class="size-3.5" /> Send it to the agent
+          </button>
+        <% end %>
+        <div class="flex-1"></div>
+        <button
+          type="button"
+          id={"keep-output-#{@approval.id}"}
+          phx-click="decide"
+          phx-value-id={@approval.id}
+          phx-value-decision="keep_output"
+          class="inline-flex cursor-pointer items-center rounded-md border border-line bg-panel px-3 py-1.5 text-xs font-medium text-ink transition-colors hover:border-bad/50 hover:bg-bad-soft/40 hover:text-bad"
+        >
+          Keep it
+        </button>
+      </footer>
+    </article>
+    """
+  end
+
+  @doc "Commands running on this machine, each with a Stop button."
+  attr :running, :list, required: true
+  attr :now, DateTime, required: true
+
+  def running(assigns) do
+    ~H"""
+    <section id="running-commands" aria-label="Running on this machine" class="space-y-2">
+      <h2 class="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-muted">
+        <span class="relative flex size-2">
+          <span class="absolute inline-flex size-full animate-ping rounded-full bg-bad/60"></span>
+          <span class="relative inline-flex size-2 rounded-full bg-bad"></span>
+        </span>
+        Running on this machine
+      </h2>
+      <div
+        :for={approval <- @running}
+        id={"running-#{approval.id}"}
+        class="flex items-center gap-3 rounded-xl border border-bad/30 bg-panel px-4 py-2.5"
+      >
+        <.icon name="hero-command-line" class="size-4 shrink-0 text-bad" />
+        <div class="min-w-0 flex-1">
+          <p class="truncate font-mono text-xs text-ink" title={approval.script}>
+            {approval.title}
+          </p>
+          <p class="truncate text-[11px] text-faint">
+            {approval.agent} · in {approval.dir} · output {if approval.run.output_to == :send,
+              do: "to the agent",
+              else: "to you first"}
+            <span :if={approval.run.stopped} class="text-bad">· stopping…</span>
+          </p>
+        </div>
+        <span class="shrink-0 text-[11px] text-muted">
+          started
+          <.clock id={"running-for-#{approval.id}"} since={approval.run.started_at} now={@now} />
+          · limit {HostCommand.seconds_words(approval.timeout)}
+        </span>
+        <button
+          type="button"
+          id={"stop-command-#{approval.id}"}
+          phx-click="stop_command"
+          phx-value-id={approval.id}
+          disabled={approval.run.stopped}
+          class="inline-flex cursor-pointer items-center gap-1 rounded-md border border-bad/40 px-2.5 py-1 text-xs font-medium text-bad transition-colors hover:bg-bad-soft/40 disabled:cursor-default disabled:opacity-50"
+        >
+          <.icon name="hero-stop-micro" class="size-3.5" /> Stop
+        </button>
+      </div>
+    </section>
+    """
+  end
+
+  attr :approval, Approval, required: true
+  attr :now, DateTime, required: true
+
+  defp decided_command(assigns) do
+    ~H"""
+    <li id={"decided-#{@approval.id}"}>
+      <details class="group/decided">
+        <summary class="flex cursor-pointer list-none items-center gap-3 px-4 py-2.5 transition-colors hover:bg-hover/40 [&::-webkit-details-marker]:hidden">
+          <.decided_badge approval={@approval} />
+          <div class="min-w-0 flex-1">
+            <p class="truncate font-mono text-xs text-ink">{@approval.title}</p>
+            <p class="truncate text-[11px] text-faint">
+              {@approval.agent} · on this machine · {decision_words(@approval)}
+            </p>
+          </div>
+          <span class="shrink-0 text-[11px] text-faint">
+            <.clock id={"decided-at-#{@approval.id}"} since={@approval.decided_at} now={@now} />
+          </span>
+          <.icon
+            name="hero-chevron-down-micro"
+            class="size-3.5 shrink-0 text-faint transition-transform group-open/decided:rotate-180"
+          />
+        </summary>
+        <div class="space-y-3 px-4 pb-4">
+          <.script id={"decided-#{@approval.id}"} script={@approval.script} />
+          <p class="text-[11px] text-muted">
+            In <span class="font-mono">{@approval.dir}</span>
+            <span :if={@approval.reason}>
+              · the agent said: <span class="italic">“{@approval.reason}”</span>
+            </span>
+          </p>
+          <.output
+            :if={@approval.run && @approval.run.state == :done}
+            id={"decided-#{@approval.id}"}
+            run={@approval.run}
+          />
+        </div>
+      </details>
+    </li>
+    """
+  end
+
+  attr :id, :string, required: true
+  attr :script, :string, required: true
+
+  defp script(assigns) do
+    ~H"""
+    <section
+      id={"command-script-#{@id}"}
+      aria-label="The command"
+      class="overflow-hidden rounded-lg border border-bad/25 bg-deep/60"
+    >
+      <div class="flex items-center gap-2 border-b border-line-soft px-3 py-1.5">
+        <.icon name="hero-command-line-micro" class="size-3.5 text-muted" />
+        <p class="flex-1 text-[10px] font-semibold uppercase tracking-wide text-muted">
+          Exactly what runs, with bash -lc
+        </p>
+        <.copy_button id={"copy-script-#{@id}"} target={"copy-script-text-#{@id}"} label="Script" />
+      </div>
+      <pre
+        id={"command-script-text-#{@id}"}
+        class="max-h-96 overflow-auto whitespace-pre-wrap break-all px-3 py-2.5 font-mono text-[12px] leading-5 text-ink"
+      >{@script}</pre>
+      <pre id={"copy-script-text-#{@id}"} hidden>{@script}</pre>
+    </section>
+    """
+  end
+
+  attr :id, :string, required: true
+  attr :run, :map, required: true
+
+  defp output(assigns) do
+    ~H"""
+    <section
+      id={"command-output-#{@id}"}
+      aria-label="Its output"
+      class="overflow-hidden rounded-lg border border-line-soft bg-deep/60"
+    >
+      <div class="flex items-center gap-2 border-b border-line-soft px-3 py-1.5">
+        <.icon name="hero-document-text-micro" class="size-3.5 text-muted" />
+        <p class="flex-1 text-[10px] font-semibold uppercase tracking-wide text-muted">
+          Output
+          <span class="ml-1 rounded bg-panel px-1.5 py-px font-sans text-[9px] font-medium normal-case tracking-normal text-faint">
+            <.exit_status id={"exit-#{@id}"} run={@run} />
+            · {bytes(@run.bytes)}{if @run.cut > 0,
+              do: ", #{bytes(@run.cut)} cut from the middle"}
+          </span>
+        </p>
+        <.copy_button
+          :if={@run.output != ""}
+          id={"copy-output-#{@id}"}
+          target={"copy-output-text-#{@id}"}
+          label="Output"
+        />
+      </div>
+      <p :if={@run.error} class="px-3 py-2.5 text-xs text-bad">{@run.error}</p>
+      <p :if={!@run.error and @run.output == ""} class="px-3 py-2.5 text-[11px] text-faint">
+        It printed nothing.
+      </p>
+      <pre
+        :if={@run.output != ""}
+        id={"command-output-text-#{@id}"}
+        class="max-h-96 overflow-auto whitespace-pre-wrap break-all px-3 py-2.5 font-mono text-[11px] leading-5 text-ink"
+      >{@run.output}</pre>
+      <pre :if={@run.output != ""} id={"copy-output-text-#{@id}"} hidden>{@run.output}</pre>
+    </section>
+    """
+  end
+
+  attr :id, :string, required: true
+  attr :run, :map, required: true
+
+  defp exit_status(assigns) do
+    ~H"""
+    <span
+      id={@id}
+      class={[
+        "font-mono font-semibold",
+        if(@run.exit == 0, do: "text-ok-strong", else: "text-bad")
+      ]}
+    >
+      {cond do
+        @run.error -> "didn't start"
+        @run.stopped -> "stopped (exit #{@run.exit})"
+        @run.timed_out -> "hit its limit (exit #{@run.exit})"
+        true -> "exit #{@run.exit}"
+      end}
+    </span>
+    """
+  end
+
+  attr :id, :string, required: true
+  attr :hints, :list, required: true
+
+  defp hints(assigns) do
+    ~H"""
+    <div
+      :if={@hints != []}
+      id={@id}
+      class="rounded-lg border border-warn/35 bg-warn-soft/25 p-3"
+    >
+      <p class="mb-1.5 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wide text-warn-strong">
+        <.icon name="hero-exclamation-triangle-micro" class="size-3" /> Worth a second look
+      </p>
+      <ul class="space-y-1">
+        <li :for={hint <- @hints} class="flex gap-1.5 text-xs leading-5 text-ink">
+          <span class="text-warn-strong">•</span><span>{hint}</span>
+        </li>
+      </ul>
+      <p class="mt-1.5 text-[10px] leading-4 text-faint">
+        MDT's guesses from the text alone, not a review: a command can do anything its text allows.
+      </p>
+    </div>
+    """
+  end
+
+  defp run_words(run) do
+    seconds = DateTime.diff(run.finished_at, run.started_at)
+    "took #{HostCommand.seconds_words(seconds)} · #{bytes(run.bytes)} of output"
+  end
+
   ## Activations
 
   defp activation_card(assigns) do
@@ -564,6 +1005,7 @@ defmodule MDTClientWeb.SandboxLive.Approvals do
   attr :name, :string, required: true
   attr :options, :list, required: true
   attr :checked, :any, required: true
+  attr :tone, :string, default: "violet"
 
   # Radio buttons drawn as a segmented control: plain form inputs, so the
   # card needs no state on the server.
@@ -583,7 +1025,14 @@ defmodule MDTClientWeb.SandboxLive.Approvals do
           checked={to_string(value) == to_string(@checked)}
           class="peer sr-only"
         />
-        <span class="block cursor-pointer rounded px-2 py-1 text-[11px] font-medium text-muted transition-colors hover:bg-hover hover:text-ink peer-checked:bg-violet/15 peer-checked:text-violet-strong peer-focus-visible:outline-2 peer-focus-visible:outline-violet">
+        <span class={[
+          "block cursor-pointer rounded px-2 py-1 text-[11px] font-medium text-muted transition-colors hover:bg-hover hover:text-ink peer-focus-visible:outline-2",
+          if(@tone == "bad",
+            do: "peer-checked:bg-bad-soft/50 peer-checked:text-bad peer-focus-visible:outline-bad",
+            else:
+              "peer-checked:bg-violet/15 peer-checked:text-violet-strong peer-focus-visible:outline-violet"
+          )
+        ]}>
           {label}
         </span>
       </label>
@@ -602,13 +1051,21 @@ defmodule MDTClientWeb.SandboxLive.Approvals do
     ~H"""
     <div class={[
       "h-0.5 overflow-hidden rounded-t-xl",
-      if(@tone == "violet", do: "bg-violet/15", else: "bg-warn/15")
+      case @tone do
+        "violet" -> "bg-violet/15"
+        "bad" -> "bg-bad/15"
+        _ -> "bg-warn/15"
+      end
     ]}>
       <div
         id={@id}
         class={[
           "sandbox-drain h-full origin-left",
-          if(@tone == "violet", do: "bg-violet", else: "bg-warn")
+          case @tone do
+            "violet" -> "bg-violet"
+            "bad" -> "bg-bad"
+            _ -> "bg-warn"
+          end
         ]}
         style={"--drain-from: #{@fraction}; animation-duration: #{@left}s"}
       >
@@ -702,6 +1159,25 @@ defmodule MDTClientWeb.SandboxLive.Approvals do
     """
   end
 
+  defp decided_badge(%{approval: %Approval{kind: :command}} = assigns) do
+    ~H"""
+    <span class={[
+      "inline-flex w-[4.5rem] shrink-0 items-center justify-center rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide",
+      cond do
+        @approval.run && @approval.run.state == :done -> "bg-bad-soft/50 text-bad"
+        @approval.status == :timed_out -> "bg-warn-soft/60 text-warn-strong"
+        true -> "bg-hover text-muted"
+      end
+    ]}>
+      {cond do
+        @approval.run && @approval.run.state == :done -> "Ran"
+        @approval.status == :timed_out -> "Gave up"
+        true -> "Declined"
+      end}
+    </span>
+    """
+  end
+
   defp decided_badge(assigns) do
     ~H"""
     <.outcome_badge outcome={@approval.status} />
@@ -729,6 +1205,18 @@ defmodule MDTClientWeb.SandboxLive.Approvals do
   end
 
   @doc "What a decision did, in a few words."
+  def decision_words(%Approval{kind: :command, status: :timed_out, stage: :output, run: run}),
+    do: "#{exit_words(run)}, output kept: not released in time"
+
+  def decision_words(%Approval{kind: :command, decision: {:run, to}, run: run}),
+    do: "#{exit_words(run)}, output #{if to == :send, do: "sent to the agent", else: "to you"}"
+
+  def decision_words(%Approval{kind: :command, decision: :send_output, run: run}),
+    do: "#{exit_words(run)}, you sent the output"
+
+  def decision_words(%Approval{kind: :command, decision: :keep_output, run: run}),
+    do: "#{exit_words(run)}, you kept the output"
+
   def decision_words(%Approval{status: :timed_out}), do: "gave up waiting"
   def decision_words(%Approval{decision: :allow_once}), do: "allowed once"
 
@@ -752,6 +1240,12 @@ defmodule MDTClientWeb.SandboxLive.Approvals do
     do: "set up and turned on for #{minutes_words(minutes)}"
 
   def decision_words(%Approval{}), do: "decided"
+
+  defp exit_words(%{error: error}) when is_binary(error), do: "didn't start"
+  defp exit_words(%{state: :running}), do: "running"
+  defp exit_words(%{stopped: true, exit: exit}), do: "stopped (exit #{exit})"
+  defp exit_words(%{timed_out: true, exit: exit}), do: "hit its limit (exit #{exit})"
+  defp exit_words(%{exit: exit}), do: "exit #{exit}"
 
   defp duration_words(:grant), do: "while the grant is on"
   defp duration_words(:until_off), do: "until turned off"

@@ -14,9 +14,10 @@ defmodule MDTClient.Sandbox do
   `{:sandbox_build_line, line}`. `subscribe_waiting/1` delivers only
   `{:sandbox_waiting, count}`, for the title bar of every page.
 
-  Approvals are of two types, in one queue: agents asking for a grant to be
-  turned on (activations, which arrive through `MDTClient.Sandbox.Channel`),
-  and uses of a grant held by the proxy. See `MDTClient.Sandbox.Approval`.
+  Approvals are of three types, in one queue: agents asking for a grant to
+  be turned on (activations) or to run a command on the host (commands),
+  both arriving through `MDTClient.Sandbox.Channel`, and uses of a grant
+  held by the proxy. See `MDTClient.Sandbox.Approval`.
   """
 
   alias MDTClient.Sandbox.{
@@ -42,6 +43,7 @@ defmodule MDTClient.Sandbox do
           grants: [Grant.t()],
           values: %{String.t() => boolean()},
           waiting: [Approval.t()],
+          running: [Approval.t()],
           history: [Approval.t()],
           image: map(),
           builds: [Build.t()],
@@ -51,7 +53,8 @@ defmodule MDTClient.Sandbox do
           folders: map(),
           proxy: map(),
           tools: map(),
-          inbox: String.t()
+          inbox: String.t(),
+          host: map()
         }
 
   @typedoc """
@@ -239,15 +242,38 @@ defmodule MDTClient.Sandbox do
     * `{:set_up, grant_id}` - for an ask no grant met: the grant you just
       added for it, turned on for the minutes asked;
     * `:decline`.
+
+  A command (an agent asking to run something on the host), waiting to run:
+
+    * `{:run, :send}` - runs it once; its output goes back to the agent;
+    * `{:run, :review}` - runs it once; when it ends, it waits again for
+      you with its output;
+    * `:decline`.
+
+  A command that ran and waits with its output: `:send_output` or
+  `:keep_output`.
   """
   @spec decide(username(), String.t(), Approval.decision()) ::
           :ok | {:error, :not_waiting | :bad_decision}
   def decide(username, approval_id, decision),
     do: Server.call(username, {:decide, approval_id, decision})
 
+  @doc "Stops a command running on the host: TERM to its processes, KILL 5 seconds later."
+  @spec stop_command(username(), String.t()) :: :ok | {:error, :not_running}
+  def stop_command(username, approval_id),
+    do: Server.call(username, {:stop_command, approval_id})
+
   @doc """
-  Changes resources, the hold time, the proxy port, the image name or the
-  Containerfile from the settings forms.
+  Looks again for the command-line tools agents are told about (`mdt host`),
+  in the background.
+  """
+  @spec probe_host(username()) :: :ok | {:error, :busy}
+  def probe_host(username), do: Server.call(username, :probe_host)
+
+  @doc """
+  Changes resources, the hold time, the proxy port, the image name, the
+  Containerfile or your notes about this machine (`"host_notes"`) from the
+  settings forms.
   """
   @spec update_settings(username(), map()) ::
           {:ok, Settings.t()} | {:error, %{atom() => String.t()}}

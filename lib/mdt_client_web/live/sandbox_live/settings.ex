@@ -30,6 +30,9 @@ defmodule MDTClientWeb.SandboxLive.Settings do
   attr :vm_errors, :map, required: true
   attr :share_form, :any, required: true
   attr :share_error, :string, default: nil
+  attr :host, :map, required: true
+  attr :host_form, :any, required: true
+  attr :host_error, :string, default: nil
 
   def page(assigns) do
     current = Enum.find(assigns.builds, &(&1.ref == assigns.image.tag))
@@ -506,6 +509,72 @@ defmodule MDTClientWeb.SandboxLive.Settings do
               </p>
             </div>
           </dl>
+        </.card>
+
+        <.card
+          id="settings-host"
+          title="This machine, as agents see it"
+          subtitle="What mdt host prints and /mnt/mdt/host.md holds, so agents can write commands that run here. They never probe it themselves."
+        >
+          <dl class="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1 text-xs">
+            <dt class="text-muted">System</dt>
+            <dd id="host-os" class="text-ink">{@host.facts.os} · {@host.facts.kernel}</dd>
+            <dt class="text-muted">Architecture</dt>
+            <dd class="font-mono text-[11px] text-ink">{@host.facts.arch}</dd>
+            <dt class="text-muted">Shell</dt>
+            <dd class="font-mono text-[11px] text-ink">{@host.facts.shell}</dd>
+            <dt class="text-muted">Tools</dt>
+            <dd id="host-tools" class="flex flex-wrap items-center gap-x-2 text-ink">
+              <%= cond do %>
+                <% @host.probing? -> %>
+                  <span class="text-muted">Looking…</span>
+                <% is_nil(@host.tools) -> %>
+                  <span class="text-muted">Not checked yet</span>
+                <% true -> %>
+                  <span>{length(@host.tools)} found</span>
+              <% end %>
+              <button
+                type="button"
+                id="host-probe"
+                phx-click="probe_host"
+                disabled={@host.probing?}
+                class="cursor-pointer text-[11px] text-accent hover:underline disabled:cursor-default disabled:opacity-50"
+              >
+                Check again
+              </button>
+            </dd>
+          </dl>
+          <.form
+            for={@host_form}
+            id="host-notes-form"
+            phx-submit="save_host_notes"
+            class="mt-3 space-y-2 border-t border-line-soft pt-3"
+          >
+            <.input
+              field={@host_form[:notes]}
+              id="host-notes"
+              type="textarea"
+              label="Your notes for agents"
+              rows="3"
+              placeholder="e.g. The work VPN comes up with openvpn3 session-start --config work. Kubernetes contexts: staging, prod."
+              class={[input_classes(), "leading-5", @host_error && "border-bad/70"]}
+            />
+            <p :if={@host_error} id="host-notes-error" class="text-[11px] text-bad">
+              {@host_error}
+            </p>
+            <div class="flex items-center gap-2">
+              <details id="host-preview" class="group/preview flex-1">
+                <summary class="cursor-pointer list-none text-[11px] text-accent hover:underline [&::-webkit-details-marker]:hidden">
+                  What agents read
+                </summary>
+                <pre
+                  id="host-text"
+                  class="mt-2 max-h-80 overflow-auto whitespace-pre-wrap rounded-lg border border-line-soft bg-deep/50 p-2.5 font-mono text-[10px] leading-4 text-ink"
+                >{@host.text}</pre>
+              </details>
+              <.button type="submit" id="host-notes-save" class="self-start">Save</.button>
+            </div>
+          </.form>
         </.card>
 
         <.card

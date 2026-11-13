@@ -12,6 +12,8 @@ defmodule MDTClient.Sandbox.Event do
     * `:violation` - a placeholder headed for a host its grant does not list
     * `:grant` - a grant was turned on or off
     * `:vm` - the VM started, stopped or was recreated
+    * `:command` - a command an agent asked to run on the host: run,
+      declined, stopped, ended, its output sent or kept. Never its output.
   """
 
   @enforce_keys [:id, :at, :outcome, :summary]
@@ -41,6 +43,7 @@ defmodule MDTClient.Sandbox.Event do
           | :violation
           | :grant
           | :vm
+          | :command
 
   @type t :: %__MODULE__{
           id: String.t(),
@@ -61,7 +64,8 @@ defmodule MDTClient.Sandbox.Event do
     "traffic" => [:tunnel],
     "credentials" => [:swapped, :allowed, :denied, :timed_out, :refused],
     "blocked" => [:blocked, :violation],
-    "changes" => [:grant, :vm]
+    "changes" => [:grant, :vm],
+    "commands" => [:command]
   }
 
   @doc "The filter groups the activity page offers, and the outcomes in each."

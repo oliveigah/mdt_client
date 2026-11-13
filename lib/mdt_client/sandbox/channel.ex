@@ -3,21 +3,32 @@ defmodule MDTClient.Sandbox.Channel do
   How agents in the VM ask MDT for access: a Unix socket that microsandbox
   joins to the VM's vsock port 5000 (`msb create --vsock`). The VM has no
   network route to MDT, so this is the only way in, and all it offers is
-  reading the grants and asking for one.
+  reading the grants and the host's description, asking for a grant, and
+  asking to run a command on the host.
 
   Inside the VM, `/mnt/mdt/bin/mdt` (`priv/sandbox/mdt-cli`) speaks it with
   socat, one ask per connection:
 
     * the client sends one line of JSON: `{"command": "grants"}`,
-      `{"command": "request", "grant": "...", "need": "...", "minutes": 60,
-      "reason": "...", "agent": "...", "wait": 60}` or
+      `{"command": "host"}`, `{"command": "request", "grant": "...",
+      "need": "...", "minutes": 60, "reason": "...", "agent": "...",
+      "wait": 60}`, `{"command": "run", "script": "...", "dir": "...",
+      "timeout": 120, "reason": "...", "agent": "...", "wait": 60}` or
       `{"command": "wait", "id": "...", "wait": 60}`;
     * MDT answers with the exit status the command should end with on the
       first line, then text for the agent, and closes.
 
-  Exit statuses: 0 the grant is on, 1 something is wrong with the ask,
-  2 still waiting for the user, 3 declined or given up. The command itself
-  uses 4 when MDT doesn't answer: locked, or not running.
+  Exit statuses for grants: 0 the grant is on, 1 something is wrong with the
+  ask, 2 still waiting for the user, 3 declined or given up. The command
+  itself uses 4 when MDT doesn't answer: locked, or not running.
+
+  A command that ran answers `ran STATUS` on the first line, a note for the
+  agent's stderr on the second (often empty), then the output. MDT's own
+  outcomes for runs use statuses commands rarely use: 120 still waiting,
+  121 it didn't run or its output didn't come back, 122 something is wrong
+  with the ask, and the command itself uses 123 when MDT doesn't answer.
+  Asks to run have ids starting with `run-`, so `mdt wait` knows which set
+  of statuses applies.
 
   An ask waits for you as an activation approval (`MDTClient.Sandbox.Approval`)
   for 30 minutes; the agent waits at most `"wait"` seconds of it, then hears
@@ -35,7 +46,7 @@ defmodule MDTClient.Sandbox.Channel do
   require Logger
 
   alias MDTClient.Accounts
-  alias MDTClient.Sandbox.{Approval, Grant, Instructions, Server}
+  alias MDTClient.Sandbox.{Approval, Grant, HostCommand, Instructions, Server}
   alias MDTClient.Vault.Store
 
   @port 5000
@@ -43,6 +54,11 @@ defmodule MDTClient.Sandbox.Channel do
   @read_timeout 10_000
   @default_wait 60
   @max_wait 600
+
+  @run_waiting 120
+  @run_not_done 121
+  @run_wrong 122
+  @run_unreachable 123
 
   @doc "The vsock port agents connect to inside the VM."
   @spec port() :: pos_integer()
@@ -156,34 +172,70 @@ defmodule MDTClient.Sandbox.Channel do
   @doc false
   # One ask: a line of JSON in, an exit status and text out.
   def serve(client, username) do
-    {status, text} =
+    ask =
       case :gen_tcp.recv(client, 0, @read_timeout) do
         {:ok, line} ->
           case Jason.decode(line) do
-            {:ok, %{"command" => command} = ask} -> answer(command, ask, username)
-            _ -> {1, "MDT couldn't read that ask. Use the mdt command."}
+            {:ok, %{"command" => command} = ask} when is_binary(command) -> ask
+            _ -> :unreadable
           end
 
         {:error, _reason} ->
-          {1, "MDT got no ask."}
+          :none
       end
 
-    :gen_tcp.send(client, "#{status}\n#{String.trim_trailing(text)}\n")
+    reply =
+      try do
+        case ask do
+          :unreadable -> {1, "MDT couldn't read that ask. Use the mdt command."}
+          :none -> {1, "MDT got no ask."}
+          %{"command" => command} -> answer(command, ask, username)
+        end
+      catch
+        :exit, _locked ->
+          status = if run?(ask), do: @run_unreachable, else: 4
+          {status, "MDT is locked. Ask the user to unlock it."}
+      end
+
+    :gen_tcp.send(client, encode(reply))
     :gen_tcp.close(client)
-  catch
-    :exit, _locked ->
-      :gen_tcp.send(client, "4\nMDT is locked. Ask the user to unlock it.\n")
-      :gen_tcp.close(client)
   end
+
+  # The output ends with a dot, so a shell reading it with `$(...)` keeps
+  # its trailing newlines; the mdt command takes the dot off.
+  defp encode({{:ran, status}, note, output}), do: "ran #{status}\n#{note}\n#{output}."
+  defp encode({status, text}), do: "#{status}\n#{String.trim_trailing(text)}\n"
+
+  defp run?(%{"command" => "run"}), do: true
+  defp run?(%{"command" => "wait", "id" => "run-" <> _}), do: true
+  defp run?(_ask), do: false
 
   @doc """
   The answer to one ask, as `{exit_status, text}`. Public for the tests,
   which ask without a socket.
   """
-  @spec answer(String.t(), map(), String.t()) :: {0..3, String.t()}
+  @spec answer(String.t(), map(), String.t()) ::
+          {non_neg_integer(), String.t()} | {{:ran, integer()}, String.t(), String.t()}
   def answer("grants", _ask, username) do
     grants = Server.call(username, :agent_grants)
     {0, Instructions.grants(grants, DateTime.utc_now())}
+  end
+
+  def answer("host", _ask, username), do: {0, Server.call(username, :host_text)}
+
+  def answer("run", ask, username) do
+    request = %{
+      script: ask["script"],
+      dir: ask["dir"],
+      timeout: ask["timeout"],
+      reason: ask["reason"],
+      agent: ask["agent"]
+    }
+
+    case Server.call(username, {:request_command, request}) do
+      {:ok, approval} -> await(username, approval.id, wait(ask))
+      {:error, reason} -> {@run_wrong, run_refusal(reason)}
+    end
   end
 
   def answer("request", ask, username) do
@@ -211,19 +263,84 @@ defmodule MDTClient.Sandbox.Channel do
     do: await(username, id, wait(ask))
 
   def answer(_command, _ask, _username),
-    do: {1, "MDT knows these commands: grants, request, wait. Run mdt help."}
-
-  defp await(_username, id, 0), do: pending(id)
+    do: {1, "MDT knows these commands: grants, host, request, run, wait. Run mdt help."}
 
   defp await(username, id, seconds) do
     ms = seconds * 1_000
 
     case Server.call(username, {:await, id, ms}, ms + 5_000) do
-      :pending -> pending(id)
+      {:pending, %Approval{kind: :command} = approval} -> run_pending(id, approval)
+      {:pending, _approval} -> pending(id)
+      {:ok, %Approval{kind: :command} = approval, _grant} -> ran(approval)
       {:ok, approval, grant} -> settled(approval, grant)
-      {:error, :not_found} -> {1, "No ask #{id} is known. MDT forgets asks when it restarts."}
+      {:error, :not_found} -> not_found(id)
     end
   end
+
+  defp not_found("run-" <> _ = id),
+    do: {@run_not_done, "No run #{id} is known. MDT forgets asks when it restarts."}
+
+  defp not_found(id), do: {1, "No ask #{id} is known. MDT forgets asks when it restarts."}
+
+  defp run_pending(id, approval) do
+    what =
+      case approval do
+        %Approval{status: :waiting, stage: :output} ->
+          "It ran; the user is looking at its output before it comes back to you."
+
+        %Approval{run: %{state: :running}} ->
+          "The user approved it, and it is running on their machine."
+
+        %Approval{} ->
+          "Still waiting for the user to approve it."
+      end
+
+    {@run_waiting,
+     """
+     #{what} Keep working on what doesn't need it, then run: mdt wait #{id}
+     """}
+  end
+
+  # The final answer to an ask to run: the command's own status and output,
+  # or why there is none.
+  defp ran(%Approval{status: :allowed, run: %{state: :done, error: nil} = run}) do
+    note =
+      [
+        run.stopped && "the user stopped it",
+        run.timed_out && "it hit its time limit",
+        run.cut > 0 && "#{run.cut} bytes of output were cut from the middle"
+      ]
+      |> Enum.filter(&is_binary/1)
+      |> case do
+        [] -> ""
+        notes -> "mdt: ran on the user's machine; " <> Enum.join(notes, ", ") <> "."
+      end
+
+    {{:ran, run.exit}, note, String.replace(run.output, <<0>>, "")}
+  end
+
+  defp ran(%Approval{run: %{state: :done, error: error}}) when is_binary(error),
+    do: {@run_not_done, "It couldn't start on the user's machine: #{error}"}
+
+  defp ran(%Approval{status: :denied, decision: :keep_output, run: run}),
+    do:
+      {@run_not_done,
+       "It ran (exit #{run.exit}), but the user kept its output from you. Ask them about it if you need it."}
+
+  defp ran(%Approval{status: :timed_out, stage: :output, run: run}),
+    do:
+      {@run_not_done,
+       "It ran (exit #{run.exit}), but the user didn't release its output in 30 minutes. Ask them about it if you need it."}
+
+  defp ran(%Approval{status: :denied}),
+    do:
+      {@run_not_done,
+       "The user declined to run it. Don't ask again for the same thing unless they say so."}
+
+  defp ran(%Approval{status: :timed_out}),
+    do:
+      {@run_not_done,
+       "The user didn't answer in 30 minutes. Tell them what you need to run, then ask again."}
 
   defp pending(id) do
     {2,
@@ -283,6 +400,23 @@ defmodule MDTClient.Sandbox.Channel do
 
   defp refusal(:too_many, _ask),
     do: "Ten asks already wait for the user. Wait for their answers first (mdt wait ID)."
+
+  defp run_refusal(:no_reason),
+    do:
+      ~s[Say why: --reason "what it does, and why it must run on the user's machine". The user reads it.]
+
+  defp run_refusal(:no_script),
+    do: "Give the command after --, or the script on stdin. See: mdt help"
+
+  defp run_refusal(:script_too_long),
+    do:
+      "The script is over #{div(HostCommand.max_script(), 1024)} KiB. Put the long part in a file in a shared folder, and say so in the reason."
+
+  defp run_refusal(:bad_timeout),
+    do: "--timeout is from 1 to #{elem(HostCommand.timeouts(), 1)} seconds."
+
+  defp run_refusal(:too_many),
+    do: "Ten commands already wait for the user. Wait for their answers first (mdt wait ID)."
 
   defp wait(ask) do
     case ask["wait"] do

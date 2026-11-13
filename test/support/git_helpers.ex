@@ -7,11 +7,16 @@ defmodule MDTClient.GitHelpers do
   alias MDTClient.Git.Core
 
   def initialized_repository(_context) do
+    # unique_integer starts over in every run, so the OS pid keeps a folder a
+    # failed or interrupted run left behind from being reused. Cleanup comes
+    # first, so a failing setup doesn't leave one either.
     base =
       Path.join(
         System.tmp_dir!(),
-        "mdt-git-test-#{System.unique_integer([:positive, :monotonic])}"
+        "mdt-git-test-#{System.pid()}-#{System.unique_integer([:positive, :monotonic])}"
       )
+
+    on_exit(fn -> File.rm_rf!(base) end)
 
     path = Path.join(base, "worktree")
     File.mkdir_p!(path)
@@ -23,8 +28,6 @@ defmodule MDTClient.GitHelpers do
     File.write!(Path.join(path, "README.md"), "initial\n")
     git!(path, ["add", "README.md"])
     git!(path, ["commit", "-m", "initial commit"])
-
-    on_exit(fn -> File.rm_rf!(base) end)
 
     {:ok, repository} = Core.open(path)
 

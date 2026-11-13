@@ -15,9 +15,13 @@ defmodule MDTClient.Sandbox.Server do
   allowance covers it: the caller is held, and answered when you decide or
   when the hold runs out.
 
-  `MDTClient.Sandbox.Channel` brings agents' asks from the VM
-  (`request_access`), which wait for you as activation approvals, and waits
-  on your answer (`await`) for a while before telling the agent to come back.
+  `MDTClient.Sandbox.Channel` brings agents' asks from the VM: for a grant
+  (`request_access`), which waits for you as an activation approval, and to
+  run a command on the host (`request_command`), which waits as a command
+  approval. It waits on your answer (`await`) for a while before telling the
+  agent to come back. An approved command runs in a task
+  (`MDTClient.Sandbox.HostRun`), and its output goes back to the agent, or
+  first to you when you chose to see it; `stop_command` kills it.
 
   It also keeps the image's builds (the current one and the two before it),
   the snapshots of the VM's Home, and how far the VM's memory was seeded and
@@ -47,6 +51,9 @@ defmodule MDTClient.Sandbox.Server do
     Event,
     Folders,
     Grant,
+    HostCommand,
+    HostInfo,
+    HostRun,
     Image,
     Inbox,
     Instructions,
@@ -73,6 +80,11 @@ defmodule MDTClient.Sandbox.Server do
   # comes back with `mdt wait`.
   @activation_hold_seconds 30 * 60
   @max_waiting_activations 10
+  # A command waits as long for your go-ahead, and once it ran with its
+  # output for you, as long again for you to release it.
+  @command_hold_seconds 30 * 60
+  @max_waiting_commands 10
+  @kill_after_ms 5_000
   @tasks MDTClient.Sandbox.TaskSupervisor
 
   ## Client
@@ -154,6 +166,8 @@ defmodule MDTClient.Sandbox.Server do
       minting: %{},
       leaves: %{},
       tasks: %{},
+      running: %{},
+      host: %{facts: HostInfo.facts(), tools: nil, probed_at: nil, probing?: false},
       build: nil,
       vm: %VM{name: vm_name(username), msb: Msb.executable()},
       image: %{
@@ -170,6 +184,7 @@ defmodule MDTClient.Sandbox.Server do
 
     state = write_inbox(state)
     if is_nil(saved[:ca]), do: persist(state)
+    state = if external?(), do: probe_host(state), else: state
     Enum.each(state.grants, &schedule_expiry/1)
     # After a restart of this process, the proxy tells it again how it is.
     MDTClient.Sandbox.Egress.report_again(username)
@@ -202,7 +217,8 @@ defmodule MDTClient.Sandbox.Server do
 
   @impl true
   def handle_call(:snapshot, _from, state) do
-    {waiting, history} = Enum.split_with(state.approvals, &(&1.status == :waiting))
+    {waiting, decided} = Enum.split_with(state.approvals, &(&1.status == :waiting))
+    {running, history} = Enum.split_with(decided, &Approval.running?/1)
 
     {:reply,
      %{
@@ -211,6 +227,7 @@ defmodule MDTClient.Sandbox.Server do
        grants: state.grants,
        values: Map.new(state.grants, &{&1.id, Map.has_key?(state.values, &1.id)}),
        waiting: Enum.sort_by(waiting, & &1.requested_at, DateTime),
+       running: Enum.sort_by(running, & &1.run.started_at, DateTime),
        history: history,
        image: state.image,
        builds: state.builds,
@@ -220,8 +237,17 @@ defmodule MDTClient.Sandbox.Server do
        folders: state.folders,
        proxy: Map.update!(state.proxy, :port, &(&1 || state.settings.proxy_port)),
        tools: %{msb: Msb.executable(), podman: Image.podman?()},
-       inbox: inbox_dir(state)
+       inbox: inbox_dir(state),
+       host: Map.put(state.host, :text, host_text(state))
      }, state}
+  end
+
+  def handle_call(:host_text, _from, state), do: {:reply, host_text(state), state}
+
+  def handle_call(:probe_host, _from, state) do
+    if state.host.probing?,
+      do: {:reply, {:error, :busy}, state},
+      else: {:reply, :ok, probe_host(state)}
   end
 
   def handle_call(:waiting_count, _from, state), do: {:reply, waiting_count(state), state}
@@ -471,18 +497,46 @@ defmodule MDTClient.Sandbox.Server do
     end
   end
 
+  def handle_call({:request_command, ask}, _from, state) do
+    with {:ok, checked} <- HostCommand.check(ask, state.settings.shares, state.grants),
+         {:ok, approval} <- command_approval(state, checked) do
+      {state, held} = hold_command(state, approval)
+      {:reply, {:ok, held}, state}
+    else
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call({:stop_command, approval_id}, _from, state) do
+    case Enum.find(state.approvals, &(&1.id == approval_id)) do
+      %Approval{run: %{state: :running}} = approval ->
+        state =
+          state
+          |> replace_approval(%{approval | run: %{approval.run | stopped: true}})
+          |> stop_group(approval_id, "TERM")
+          |> log(command_event(approval, "you stopped it"))
+
+        Process.send_after(self(), {:kill_command, approval_id}, @kill_after_ms)
+        {:reply, :ok, state}
+
+      _other ->
+        {:reply, {:error, :not_running}, state}
+    end
+  end
+
   def handle_call({:await, approval_id, ms}, from, state) do
     case Enum.find(state.approvals, &(&1.id == approval_id)) do
       nil ->
         {:reply, {:error, :not_found}, state}
 
-      %Approval{status: :waiting} ->
-        ref = make_ref()
-        Process.send_after(self(), {:stop_waiting, approval_id, ref}, ms)
-        {:noreply, add_waiter(state, approval_id, {from, {:await, ref}})}
-
       approval ->
-        {:reply, {:ok, approval, grant_of(state, approval)}, state}
+        if Approval.final?(approval) do
+          {:reply, {:ok, approval, grant_of(state, approval)}, state}
+        else
+          ref = make_ref()
+          Process.send_after(self(), {:stop_waiting, approval_id, ref}, ms)
+          {:noreply, add_waiter(state, approval_id, {from, {:await, ref}})}
+        end
     end
   end
 
@@ -492,7 +546,7 @@ defmodule MDTClient.Sandbox.Server do
     case cast_settings(state.settings, attrs) do
       {:ok, settings} ->
         port_changed? = settings.proxy_port != state.settings.proxy_port
-        state = state |> change(:settings, fn _ -> settings end) |> changed()
+        state = state |> change(:settings, fn _ -> settings end) |> write_host() |> changed()
         if port_changed?, do: MDTClient.Sandbox.Egress.rebind(state.username)
         {:reply, {:ok, settings}, state}
 
@@ -505,7 +559,9 @@ defmodule MDTClient.Sandbox.Server do
     case Shares.validate(path, mode, state.settings.shares) do
       {:ok, share} ->
         settings = %{state.settings | shares: state.settings.shares ++ [share]}
-        {:reply, {:ok, share}, state |> change(:settings, fn _ -> settings end) |> changed()}
+
+        {:reply, {:ok, share},
+         state |> change(:settings, fn _ -> settings end) |> write_host() |> changed()}
 
       {:error, reason} ->
         {:reply, {:error, reason}, state}
@@ -514,7 +570,7 @@ defmodule MDTClient.Sandbox.Server do
 
   def handle_call({:remove_share, path}, _from, state) do
     settings = %{state.settings | shares: Enum.reject(state.settings.shares, &(&1.path == path))}
-    {:reply, :ok, state |> change(:settings, fn _ -> settings end) |> changed()}
+    {:reply, :ok, state |> change(:settings, fn _ -> settings end) |> write_host() |> changed()}
   end
 
   def handle_call({:set_share_mode, path, mode}, _from, state) when mode in [:rw, :ro] do
@@ -522,7 +578,7 @@ defmodule MDTClient.Sandbox.Server do
       Enum.map(state.settings.shares, &if(&1.path == path, do: %{&1 | mode: mode}, else: &1))
 
     settings = %{state.settings | shares: shares}
-    {:reply, :ok, state |> change(:settings, fn _ -> settings end) |> changed()}
+    {:reply, :ok, state |> change(:settings, fn _ -> settings end) |> write_host() |> changed()}
   end
 
   ## The proxy's questions
@@ -681,22 +737,31 @@ defmodule MDTClient.Sandbox.Server do
     end
   end
 
-  def handle_info({:give_up, approval_id}, state) do
+  # Each timer names the deadline it was set for: a command waiting a second
+  # time, with its output, has a later one, which its first timer must not
+  # end.
+  def handle_info({:give_up, approval_id, deadline}, state) do
     case Enum.find(state.approvals, &(&1.id == approval_id and &1.status == :waiting)) do
-      nil ->
-        {:noreply, state}
-
-      approval ->
-        minutes =
-          approval.deadline |> DateTime.diff(approval.requested_at) |> div(60) |> max(1)
-
-        {:noreply,
-         state
-         |> settle(approval, :timed_out, nil)
-         |> answer_waiters(approval, {:deny, :timed_out})
-         |> log(event_for(approval, :timed_out, "gave up after #{minutes} min"))}
+      %Approval{deadline: ^deadline} = approval -> {:noreply, give_up(state, approval)}
+      _settled_or_moved -> {:noreply, state}
     end
   end
+
+  def handle_info({:command_started, approval_id, group}, state) do
+    case state.running do
+      %{^approval_id => :stop} ->
+        HostRun.stop(group, "TERM")
+        Process.send_after(self(), {:kill_command, approval_id}, @kill_after_ms)
+        {:noreply, put_in(state.running[approval_id], group)}
+
+      _ ->
+        {:noreply, put_in(state.running[approval_id], group)}
+    end
+  end
+
+  # Stopping sent TERM; whatever still runs gets KILL.
+  def handle_info({:kill_command, approval_id}, state),
+    do: {:noreply, stop_group(state, approval_id, "KILL")}
 
   # An agent waited as long as it said it would: it hears "still waiting",
   # and the ask stays for you.
@@ -706,7 +771,8 @@ defmodule MDTClient.Sandbox.Server do
       |> Map.get(approval_id, [])
       |> Enum.split_with(&match?({_from, {:await, ^ref}}, &1))
 
-    Enum.each(mine, fn {from, _} -> GenServer.reply(from, :pending) end)
+    approval = Enum.find(state.approvals, &(&1.id == approval_id))
+    Enum.each(mine, fn {from, _} -> GenServer.reply(from, {:pending, approval}) end)
 
     waiters =
       if others == [],
@@ -765,7 +831,7 @@ defmodule MDTClient.Sandbox.Server do
   def handle_info({:EXIT, _pid, _reason}, state), do: {:noreply, state}
 
   # Crash reports print the state; the vault key, real values, minted
-  # tokens and private keys must never reach a log.
+  # tokens, private keys and commands' output must never reach a log.
   @impl true
   def format_status(status) do
     Map.update(status, :state, nil, fn
@@ -781,15 +847,25 @@ defmodule MDTClient.Sandbox.Server do
         |> Map.replace(:leaves, :redacted)
         |> Map.replace(:ca, :redacted)
         |> Map.replace(:waiters, :redacted)
+        |> Map.replace(:approvals, Enum.map(Map.get(state, :approvals, []), &redact_output/1))
 
       other ->
         other
     end)
   end
 
+  # A command's output can hold anything it printed, secrets included.
+  defp redact_output(%Approval{run: %{output: _} = run} = approval),
+    do: %{approval | run: %{run | output: :redacted}}
+
+  defp redact_output(approval), do: approval
+
   @impl true
   def terminate(_reason, state) do
     persist(state)
+
+    # A command runs for the VM, which stops with MDT, so it stops too.
+    for {_id, group} <- state.running, is_integer(group), do: HostRun.stop(group, "KILL")
 
     # Locking MDT or quitting it leaves no VM running without the proxy.
     if state.vm.exists? and state.vm.status in [:running, :starting] do
@@ -883,7 +959,7 @@ defmodule MDTClient.Sandbox.Server do
       nil ->
         Process.send_after(
           self(),
-          {:give_up, approval.id},
+          {:give_up, approval.id, approval.deadline},
           max(DateTime.diff(approval.deadline, now(), :millisecond), 0)
         )
 
@@ -958,7 +1034,10 @@ defmodule MDTClient.Sandbox.Server do
   end
 
   defp mint(command) do
-    case System.cmd("timeout", ["30", "bash", "-lc", command], stderr_to_stdout: false) do
+    case System.cmd("timeout", ["30", "bash", "-lc", command],
+           stderr_to_stdout: false,
+           env: HostRun.home_env()
+         ) do
       {output, 0} ->
         case String.trim(output) do
           "" -> {:error, "the command printed nothing"}
@@ -1055,6 +1134,17 @@ defmodule MDTClient.Sandbox.Server do
     end
   end
 
+  defp fits?(%Approval{kind: :command, stage: :run}, decision, _state) do
+    case decision do
+      {:run, output_to} -> output_to in [:send, :review]
+      :decline -> true
+      _other -> false
+    end
+  end
+
+  defp fits?(%Approval{kind: :command, stage: :output}, decision, _state),
+    do: decision in [:send_output, :keep_output]
+
   defp fits?(%Approval{}, decision, _state) do
     case decision do
       :allow_once -> true
@@ -1088,6 +1178,48 @@ defmodule MDTClient.Sandbox.Server do
     |> settle(approval, :allowed, {:set_up, grant_id})
     |> turn_on(grant, minutes, :ask, " · asked by #{approval.agent}")
     |> answer_waiters(approval, :allow)
+  end
+
+  defp decide(state, approval, {:run, output_to}) do
+    run = %{
+      state: :running,
+      output_to: output_to,
+      started_at: now(),
+      finished_at: nil,
+      exit: nil,
+      output: "",
+      bytes: 0,
+      cut: 0,
+      stopped: false,
+      timed_out: false,
+      error: nil
+    }
+
+    approval = %{approval | run: run}
+    server = self()
+    id = approval.id
+    job = %{script: approval.script, dir: approval.dir, timeout: approval.timeout}
+
+    state
+    |> settle(approval, :allowed, {:run, output_to})
+    |> log(command_event(approval, "you ran it" <> output_words(output_to)))
+    |> task({:command, id}, fn ->
+      HostRun.run(job, fn group -> send(server, {:command_started, id, group}) end)
+    end)
+  end
+
+  defp decide(state, approval, :send_output) do
+    state
+    |> settle(approval, :allowed, :send_output)
+    |> answer_waiters(approval, :allow)
+    |> log(command_event(approval, "you sent its output to the agent"))
+  end
+
+  defp decide(state, approval, :keep_output) do
+    state
+    |> settle(approval, :denied, :keep_output)
+    |> answer_waiters(approval, {:deny, :by_you})
+    |> log(command_event(approval, "you kept its output from the agent"))
   end
 
   defp decide(state, approval, :decline) do
@@ -1362,7 +1494,7 @@ defmodule MDTClient.Sandbox.Server do
       nil ->
         Process.send_after(
           self(),
-          {:give_up, approval.id},
+          {:give_up, approval.id, approval.deadline},
           @activation_hold_seconds * 1_000
         )
 
@@ -1371,6 +1503,191 @@ defmodule MDTClient.Sandbox.Server do
   end
 
   defp grant_of(state, %Approval{grant_id: id}), do: Enum.find(state.grants, &(&1.id == id))
+
+  defp give_up(state, %Approval{kind: :command, stage: :output} = approval) do
+    state
+    |> settle(approval, :timed_out, nil)
+    |> answer_waiters(approval, {:deny, :timed_out})
+    |> log(command_event(approval, "output kept: you didn't release it in time"))
+  end
+
+  defp give_up(state, approval) do
+    minutes = approval.deadline |> DateTime.diff(approval.requested_at) |> div(60) |> max(1)
+
+    state
+    |> settle(approval, :timed_out, nil)
+    |> answer_waiters(approval, {:deny, :timed_out})
+    |> log(event_for(approval, :timed_out, "gave up after #{minutes} min"))
+  end
+
+  ## Host commands
+
+  defp command_approval(state, checked) do
+    waiting =
+      Enum.filter(state.approvals, &(&1.status == :waiting and &1.kind == :command))
+
+    if length(waiting) >= @max_waiting_commands and
+         not Enum.any?(waiting, &(&1.pattern == checked.pattern)) do
+      {:error, :too_many}
+    else
+      {:ok,
+       %Approval{
+         id: "run-" <> unique(),
+         kind: :command,
+         title: checked.title,
+         agent: checked.agent,
+         reason: checked.reason,
+         script: checked.script,
+         dir: checked.dir,
+         timeout: checked.timeout,
+         pattern: checked.pattern,
+         facts: checked.facts,
+         hints: checked.hints,
+         claims: [{"Reason", checked.reason}],
+         requested_at: now(),
+         deadline: DateTime.add(now(), @command_hold_seconds, :second)
+       }}
+    end
+  end
+
+  # The same script, directory and limit as one waiting for its go-ahead
+  # joins it.
+  defp hold_command(state, approval) do
+    case Enum.find(state.approvals, fn other ->
+           other.status == :waiting and other.kind == :command and other.stage == :run and
+             other.pattern == approval.pattern
+         end) do
+      %Approval{} = waiting ->
+        joined = %{waiting | retries: waiting.retries + 1}
+        {replace_approval(state, joined), joined}
+
+      nil ->
+        Process.send_after(
+          self(),
+          {:give_up, approval.id, approval.deadline},
+          @command_hold_seconds * 1_000
+        )
+
+        {change(state, :approvals, &[approval | &1.approvals]), approval}
+    end
+  end
+
+  defp finished_command(state, approval_id, result) do
+    state = %{state | running: Map.delete(state.running, approval_id)}
+
+    case Enum.find(state.approvals, &(&1.id == approval_id)) do
+      %Approval{run: %{state: :running} = run} = approval ->
+        run =
+          Map.merge(run, %{
+            state: :done,
+            finished_at: now(),
+            exit: result[:exit],
+            output: result[:output] || "",
+            bytes: result[:bytes] || 0,
+            cut: result[:cut] || 0,
+            timed_out: result[:timed_out] || false,
+            error: result[:error]
+          })
+
+        approval = %{approval | run: run}
+        state = log(state, command_event(approval, ended_words(run)))
+
+        # A command that couldn't start has no output worth holding.
+        case if(run.error, do: :send, else: run.output_to) do
+          :send ->
+            state
+            |> replace_approval(approval)
+            |> answer_waiters(approval, :allow)
+
+          :review ->
+            deadline = DateTime.add(now(), @command_hold_seconds, :second)
+
+            Process.send_after(
+              self(),
+              {:give_up, approval.id, deadline},
+              @command_hold_seconds * 1_000
+            )
+
+            state
+            |> replace_approval(%{
+              approval
+              | status: :waiting,
+                stage: :output,
+                deadline: deadline,
+                decided_at: nil
+            })
+        end
+
+      _gone ->
+        state
+    end
+  end
+
+  defp stop_group(state, approval_id, signal) do
+    case state.running do
+      %{^approval_id => group} when is_integer(group) ->
+        HostRun.stop(group, signal)
+        state
+
+      %{^approval_id => :stop} ->
+        state
+
+      _not_started when signal == "TERM" ->
+        # Not reported yet: stopped as soon as it is.
+        if Enum.any?(state.approvals, &(&1.id == approval_id and Approval.running?(&1))),
+          do: put_in(state.running[approval_id], :stop),
+          else: state
+
+      _ended ->
+        state
+    end
+  end
+
+  defp command_event(approval, how) do
+    %{outcome: :command, summary: "#{approval.title} · #{how}"}
+  end
+
+  defp output_words(:send), do: ", output to the agent"
+  defp output_words(:review), do: ", output to you first"
+
+  defp ended_words(%{error: error}) when is_binary(error),
+    do: "couldn't start: #{String.slice(error, 0, 120)}"
+
+  defp ended_words(run) do
+    seconds = DateTime.diff(run.finished_at, run.started_at)
+
+    cond do
+      run.stopped -> "stopped by you after #{seconds} s (exit #{run.exit})"
+      run.timed_out -> "hit its time limit (exit #{run.exit})"
+      true -> "exit #{run.exit} after #{seconds} s"
+    end
+  end
+
+  ## The host's description
+
+  defp host_text(state),
+    do:
+      HostInfo.text(
+        state.host.facts,
+        state.host.tools,
+        state.settings.shares,
+        state.settings.host_notes
+      )
+
+  defp write_host(state) do
+    Inbox.write_host(inbox_dir(state), host_text(state))
+    state
+  rescue
+    error ->
+      Logger.error("could not write host.md: #{Exception.message(error)}", system: :sandbox)
+      state
+  end
+
+  defp probe_host(state) do
+    state
+    |> change(:host, &%{&1.host | probing?: true})
+    |> task(:probe_host, &HostInfo.probe_tools/0)
+  end
 
   ## The VM
 
@@ -1680,6 +1997,21 @@ defmodule MDTClient.Sandbox.Server do
     Enum.reduce(continuations, state, fn k, acc -> k.(acc, result) end)
   end
 
+  defp finished(state, {:command, approval_id}, %{} = result),
+    do: finished_command(state, approval_id, result)
+
+  defp finished(state, {:command, approval_id}, {:error, message}),
+    do: finished_command(state, approval_id, %{error: message})
+
+  defp finished(state, :probe_host, tools) when is_list(tools) do
+    state
+    |> change(:host, &%{&1.host | tools: tools, probed_at: now(), probing?: false})
+    |> write_host()
+  end
+
+  defp finished(state, :probe_host, _crashed),
+    do: change(state, :host, &%{&1.host | probing?: false})
+
   defp finished(state, :env, _result), do: state
   defp finished(state, :delete_builds, _result), do: state
 
@@ -1974,7 +2306,8 @@ defmodule MDTClient.Sandbox.Server do
       {:hold_seconds, attrs["hold_seconds"], &cast_int(&1, 30, 600)},
       {:proxy_port, attrs["proxy_port"], &cast_int(&1, 1024, 65_535)},
       {:containerfile, attrs["containerfile"], &cast_containerfile/1},
-      {:image_name, attrs["image_name"], &cast_image_name/1}
+      {:image_name, attrs["image_name"], &cast_image_name/1},
+      {:host_notes, attrs["host_notes"], &cast_notes/1}
     ]
 
     {changes, errors} =
@@ -1996,6 +2329,14 @@ defmodule MDTClient.Sandbox.Server do
     if Regex.match?(~r/^\s*FROM\s+\S+/mi, value),
       do: {:ok, String.replace(value, "\r\n", "\n")},
       else: {:error, "A Containerfile needs a FROM line."}
+  end
+
+  defp cast_notes(value) do
+    notes = value |> String.replace("\r\n", "\n") |> String.trim()
+
+    if String.length(notes) <= 4_000,
+      do: {:ok, notes},
+      else: {:error, "Keep notes under 4,000 characters."}
   end
 
   defp cast_image_name(value) do
@@ -2046,12 +2387,16 @@ defmodule MDTClient.Sandbox.Server do
     approval = %{approval | status: status, decision: decision, decided_at: now()}
 
     change(state, :approvals, fn state ->
-      {waiting, history} =
+      {waiting, decided} =
         state.approvals
         |> Enum.map(&if(&1.id == approval.id, do: approval, else: &1))
         |> Enum.split_with(&(&1.status == :waiting))
 
+      # A running command stays whatever is decided meanwhile.
+      {running, history} = Enum.split_with(decided, &Approval.running?/1)
+
       waiting ++
+        running ++
         Enum.take(Enum.sort_by(history, & &1.decided_at, {:desc, DateTime}), @history_limit)
     end)
   end
@@ -2091,6 +2436,9 @@ defmodule MDTClient.Sandbox.Server do
     %{state | events: Enum.take([event | state.events], @event_limit)}
   end
 
+  defp event_for(%Approval{kind: :command} = approval, _outcome, how),
+    do: command_event(approval, how)
+
   defp event_for(approval, outcome, how) do
     %{
       outcome: outcome,
@@ -2117,7 +2465,7 @@ defmodule MDTClient.Sandbox.Server do
 
   defp write_inbox(state) do
     Inbox.write(inbox_dir(state), state.grants, state.values, ca_pem(state))
-    state
+    write_host(state)
   rescue
     error ->
       Logger.error("could not write the sandbox inbox: #{Exception.message(error)}",

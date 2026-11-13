@@ -2,7 +2,8 @@ defmodule MDTClient.Sandbox.Settings do
   @moduledoc """
   How the VM is built. Changing the image, resources or shared folders of a VM
   that exists means recreating it: microsandbox cannot change mounts live.
-  `image_name` only names the next build.
+  `image_name` only names the next build. `host_notes` is your own text
+  about this machine, which agents read with the rest of `mdt host`.
   """
 
   alias MDTClient.Sandbox.Share
@@ -14,7 +15,8 @@ defmodule MDTClient.Sandbox.Settings do
             proxy_port: 18080,
             hold_seconds: 180,
             shares: [],
-            optmem_path: nil
+            optmem_path: nil,
+            host_notes: ""
 
   @type t :: %__MODULE__{
           containerfile: String.t() | nil,
@@ -24,6 +26,7 @@ defmodule MDTClient.Sandbox.Settings do
           proxy_port: pos_integer(),
           hold_seconds: pos_integer(),
           shares: [Share.t()],
-          optmem_path: String.t() | nil
+          optmem_path: String.t() | nil,
+          host_notes: String.t()
         }
 end

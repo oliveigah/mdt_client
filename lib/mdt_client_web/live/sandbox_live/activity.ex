@@ -13,7 +13,8 @@ defmodule MDTClientWeb.SandboxLive.Activity do
     {"traffic", "Passed"},
     {"credentials", "Credentials"},
     {"blocked", "Blocked"},
-    {"changes", "Changes"}
+    {"changes", "Changes"},
+    {"commands", "Host commands"}
   ]
 
   attr :streams, :any, required: true

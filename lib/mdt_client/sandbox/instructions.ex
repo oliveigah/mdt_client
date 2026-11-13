@@ -1,8 +1,9 @@
 defmodule MDTClient.Sandbox.Instructions do
   @moduledoc """
   What agents in the VM are told: access comes only from MDT's grants, what
-  MDT's answers mean, how to use mise and their own memory
-  (`priv/sandbox/agents.md`), and which grants exist right now (`grants/2`).
+  MDT's answers mean, how to ask for a command on the host as a last resort,
+  how to use mise and their own memory (`priv/sandbox/agents.md`), and which
+  grants exist right now (`grants/2`).
 
   The instructions reach Claude Code and Codex through their global files in
   the VM's Home, `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md`, as a block
@@ -94,6 +95,8 @@ defmodule MDTClient.Sandbox.Instructions do
     Written by MDT whenever a grant changes. To use one that is off, ask the
     user with: mdt request GRANT_ID --reason "what you are about to do"
     For access no grant gives: mdt request --need "what, and for which host" --reason "why"
+    For a job no grant can do, as a last resort, ask to run it on the user's
+    machine: mdt run --reason "why" -- COMMAND (see mdt host first)
 
     #{body}
     """

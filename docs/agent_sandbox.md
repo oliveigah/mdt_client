@@ -3,8 +3,12 @@
 Status (2026-11-12): the first slice is built and was tried live with a real
 VM: the image build, the VM's lifecycle, the egress proxy (tunnels, TLS
 interception, placeholder swaps, approvals), grants with values in the
-vault, and every screen. Not built yet: host commands, export, and the live
-VPN check. See [Built so far](#built-so-far) and [Next](#next).
+vault, and every screen. Not built yet: export, and the live VPN check. See
+[Built so far](#built-so-far) and [Next](#next).
+
+Built later on 2026-11-12: host commands, the escape hatch for what no
+grant can express, and a description of your machine for agents. See
+[Host commands](#host-commands).
 
 Built and tried live (2026-11-12): the image and the VM's state. See
 [Image and VM state](#image-and-vm-state).
@@ -32,7 +36,9 @@ folders with it, and sits between it and the network.
   an agent can upload anything in a shared folder.
 - **Code you run on the host from a shared folder.** A VM can plant git hooks,
   `core.fsmonitor` in `.git/config`, build scripts. Running git, mix or npm on
-  that folder on the host runs them. MDT's own Git tool does this too.
+  that folder on the host runs them. MDT's own Git tool does this too, and
+  so does a host command you approve there; its card says so when it can
+  tell, but the hints are not a review.
 - **File grants after they are handed over.** See [Grant kinds](#grant-kinds).
 - **Data sent out through DNS.** DNS never goes through MDT. Microsandbox
   answers port 53 to any address itself (`dig @8.8.8.8` works from the VM),
@@ -66,6 +72,11 @@ folders with it, and sits between it and the network.
 | 2026-11-12 | Two types of approval in one queue: agents asking for a grant (activation), and uses of a grant (requests, connections).                                         |
 | 2026-11-12 | Agents ask with the `mdt` command over vsock, not MCP: any agent or script can run it with no setup. MCP can come later on the same socket.                      |
 | 2026-11-12 | A held request shows in full (headers, body) and copies as curl, as HTTP or just its body. It stays in memory only.                                              |
+| 2026-11-12 | Host commands: an agent asks to run one command on your machine. It runs once per approval, as you, outside the VM. No allowance ever covers one.                |
+| 2026-11-12 | A command's text travels in the ask and is exactly what runs. The card shows it in full, with hints such as "runs files the VM can write".                       |
+| 2026-11-12 | Per command, you choose whether its output goes straight back to the agent or waits for you to release it.                                                       |
+| 2026-11-12 | MDT describes your machine to agents (`mdt host`, `/mnt/mdt/host.md`): OS, architecture, shell, shares, tools, your notes. Agents never probe it themselves.     |
+| 2026-11-12 | Host commands cover most of what file grants were for (move the work to the value, not the value to the VM). File grants stay for long-lived processes in the VM. |
 
 ## Built so far
 
@@ -80,7 +91,8 @@ folders with it, and sits between it and the network.
 | Agent channel        | `MDTClient.Sandbox.Channel`                      | A Unix socket per identity, joined to the VM's vsock port 5000. Speaks the `mdt` command's one-line protocol.                                                                                            |
 | VM                   | `MDTClient.Sandbox.Msb`                          | `msb create --replace --proxy … --net public,private --vsock …`, one `--volume` per share, `/mnt/mdt` read-only, the VM's OptMem, placeholders as `--env`. Stopped when the identity locks or MDT quits.   |
 | Image                | `MDTClient.Sandbox.Image`                        | See [The image](#the-image).                                                                                                                                                                              |
-| Inbox                | `MDTClient.Sandbox.Inbox`                        | `/mnt/mdt/env.sh`, `bin/mdt`, `git/<host>` for the credential helper, `tokens/<grant>` for every token grant, `files/` for file grants that are on.                                                       |
+| Inbox                | `MDTClient.Sandbox.Inbox`                        | `/mnt/mdt/env.sh`, `bin/mdt`, `git/<host>` for the credential helper, `tokens/<grant>` for every token grant, `files/` for file grants that are on, `host.md`.                                           |
+| Host commands        | `…HostCommand`, `…HostRun`, `…HostInfo`          | Checking and describing an ask (place, facts, hints); running it under `timeout` with capped output and a killable process group; the machine's description. See [Host commands](#host-commands).      |
 
 Tried live on 2026-11-12: build, create, lock (VM stopped), unlock, start;
 inside the VM `gh api user` went out with the swapped value, git's helper
@@ -110,27 +122,15 @@ it can put on the wire, and give the VM only a placeholder.
 | A token or API key                                                         | token, stored                   | Paste it once; it lives in your vault.                                                                                                                                                                                                                                   |
 | A CLI login on the host (`gcloud auth login`, `gh auth login`, `az login`) | token, minted                   | The grant holds a command that prints a short-lived token, run on the host when needed (`gcloud auth print-access-token`, `gh auth token`, `az account get-access-token --query accessToken -o tsv`). The login never leaves the host; tokens are cached for 10 minutes. |
 | Something only reachable from here (VPN, a database through a tunnel)      | network                         | List the destinations; for a database, run the tunnel on the host and list its exact address.                                                                                                                                                                            |
-| Something a tool must read itself (signing keys, client certificates)      | file                            | Last resort, labelled: the VM holds the value while the grant is on.                                                                                                                                                                                                     |
-| Something none of these covers                                             | host command (next)             | Run one command on the host, with your approval each time.                                                                                                                                                                                                               |
+| A key or file a tool reads for one job (SSH keys, a kubeconfig, signing)   | host command                    | The job runs here, with your approval each time, and only its output goes back. The value never reaches the VM.                                                                                                                                                         |
+| Something a process in the VM must read for long (a client certificate)    | file                            | Last resort, labelled: the VM holds the value while the grant is on.                                                                                                                                                                                                     |
+| Something none of these covers                                             | host command                    | Run one command on the host, with your approval each time.                                                                                                                                                                                                               |
 
 Agents in the VM don't see the guides. They see each grant's own words for
 what it is for (`mdt grants`), and describe what's missing in their own
 (`mdt request --need`).
 
 ## Next
-
-### Host commands
-
-The escape hatch for anything a grant cannot express. An agent asks, through
-the agent channel, to run one command on the host, with a reason. It shows as
-an approval like any other, with the exact command as the fact and the reason
-as the agent's claim. Only "allow once" and "deny": no rule or allowance ever
-lets a host command through unattended, since it runs as you, outside the VM.
-
-On approval MDT runs it with `bash -lc` in a directory you approve (default:
-the matching shared folder), with a timeout, and returns exit status and
-output to the agent. Output can contain anything the command printed,
-secrets included, so the card says so, and long output is cut.
 
 ### Export
 
@@ -149,9 +149,11 @@ VM ──all TCP──▶ msb ──HTTP CONNECT ip:port──▶ MDT egress pro
                                                │     read request → placeholder? → allowance or approve → swap → forward
                                                └─ anything else → blind byte tunnel (log host, bytes, duration)
 
-VM ──vsock:5000──▶ $XDG_RUNTIME_DIR/mdt/mdt-sandbox-<id>.sock ──▶ agent channel (`mdt grants`, `mdt request`, `mdt wait`)
+VM ──vsock:5000──▶ $XDG_RUNTIME_DIR/mdt/mdt-sandbox-<id>.sock ──▶ agent channel (`mdt grants`, `mdt request`, `mdt run`, `mdt host`, `mdt wait`)
+                                                                   │
+                                                                   └─ `mdt run`, once you approve it ──▶ bash -lc on the host, as you
 
-/mnt/mdt (read-only, from host): CA certificate, placeholder env file, the `mdt` command, git credential helper, file grants
+/mnt/mdt (read-only, from host): CA certificate, placeholder env file, the `mdt` command, git credential helper, file grants, host.md
 /root/.optmem (read-write, from host): the VM's own OptMem
 ```
 
@@ -260,11 +262,15 @@ Their rules are dropped, so uses that went through silently now ask.
 }
 
 %Approval{
-  kind: :activation,                 # :activation | :request | :connection
-  grant_id: "github-personal",       # nil for an ask no grant meets yet
+  kind: :activation,                 # :activation | :request | :connection | :command
+  grant_id: "github-personal",       # nil for an ask no grant meets yet, and for commands
   agent: "claude", minutes: 60, reason: "…", need: nil,   # activations
   request: %{method: …, headers: …, body: …},             # requests, in memory only
-  facts: […], claims: […], pattern: "…",
+  script: "kubectl get pods", dir: "/home/me/projects/x", timeout: 120,  # commands
+  stage: :run,                       # commands: :run, then :output when you see it first
+  run: %{state: :running | :done, output_to: :send | :review, exit: 0,
+         output: "…", bytes: 512, cut: 0, stopped: false, timed_out: false},
+  facts: […], claims: […], hints: […], pattern: "…",
   status: :waiting,                  # :waiting | :allowed | :denied | :timed_out
   decision: nil
 }
@@ -598,6 +604,8 @@ mdt grants                                   every grant: id, what it is for, ho
 mdt request GRANT --reason "…" [--minutes 60] [--wait 60]
 mdt request --need "the access, and the host" --reason "…"
 mdt wait ASK_ID [--wait 60]
+mdt run --reason "…" -- COMMAND              see Host commands
+mdt host                                     see Host commands
 ```
 
 - `request` asks you to turn a grant on, by id or name. It shows as an
@@ -621,6 +629,130 @@ in the VM can ask; that is accepted, since all it can do is ask.
 Checked on 2026-11-12 with a throwaway VM from the current image: socat
 over msb's vsock held an ask for 75 s and got the answer and exit status;
 with nothing listening, or no socket, `mdt` exits 4 at once.
+
+<a id="host-commands"></a>
+
+## Host commands
+
+The escape hatch for anything no grant can express. An agent asks to run
+one command on your machine; it runs only after you approve that exact
+text, once.
+
+It also moves work to where a value is, instead of the value to the VM. A
+job that needs your SSH keys, a kubeconfig, a signing key or your VPN runs
+here, and only its output goes back. That covers most of what file grants
+were for. File grants stay for a process in the VM that needs a secret for
+a long time, where an approval per use would be too many.
+
+Agents are told to use a grant first: a request through a grant shows what
+it does (the describers, the full request), and a shell line shows only
+its text.
+
+### Asking
+
+```
+mdt host                                       your machine, as agents see it
+mdt run --reason "…" [--dir DIR] [--timeout 120] [--wait 60] -- COMMAND [ARG…]
+mdt run --reason "…" [options] <<'EOF'         the script from stdin
+…
+EOF
+mdt wait RUN_ID [--wait 60]
+```
+
+- **The script travels in the ask.** Arguments after `--` are quoted for
+  the shell and joined; a single argument is taken as a shell line as it
+  is. With no arguments, the script is read from stdin. At most 16 KiB.
+  What you read on the card is what runs. A script in a file the VM can
+  write could change between your click and the run, so
+  `mdt run -- ./deploy.sh` is flagged.
+- **Where it runs:** `--dir`, by default the agent's current directory.
+  Shared folders sit at the same path on both sides, so a directory inside
+  one is used as it is, after resolving symlinks on the host. A directory
+  that isn't in a share, or whose real path leaves it, falls back to your
+  home folder, and the card says so.
+- **Time limit:** `--timeout`, 1 to 3600 seconds, 120 by default.
+- The same script, directory and limit as an ask already waiting joins it.
+  At most ten wait at once.
+- Like grant asks, the agent waits up to `--wait` seconds (60 by default),
+  then hears the ask is still pending and comes back with `mdt wait`. The
+  ask waits 30 minutes for you.
+
+### Approving
+
+A command is an approval of its own kind, in the same queue, drawn apart
+from the others (red, a terminal icon):
+
+- **Facts:** the script in full, with a copy button; where it runs, and
+  whether the VM can write there; the time limit; who it runs as.
+- **Hints,** worked out from the script's text and marked as hints, not a
+  review: it runs build tools, scripts or git in a folder the VM can write;
+  it names files the VM can write; it downloads code and runs it; it uses
+  `sudo`; a grant already covers a host or tool it uses.
+- **The agent's reason,** as a claim.
+- **Choices:** run it, with the output sent straight back or shown to you
+  first; or decline. No "allow similar", no "allow every use": each command
+  runs once, as you, outside the VM.
+
+### Running
+
+- `bash -lc SCRIPT` as you, in the directory, with stdin from `/dev/null`,
+  under `timeout`: TERM at the limit, KILL 5 seconds later, to its whole
+  process group.
+- The environment is MDT's own, without MDT's and the BEAM's variables
+  (`RELEASE_*`, `ERL_*`, `MIX_*`, `PHX_*`, `MDT_*`, `SECRET_KEY_BASE`,
+  `PORT`…). The login shell then sets up your usual tools. SIGPIPE, which
+  the BEAM ignores, is back to its default (`env --default-signal`, where
+  `env` has it), so `cmd | head` ends quietly, as in a terminal.
+- Output, stdout and stderr together, keeps its first and last 32 KiB.
+  What's between is cut, and the agent is told how much.
+- Running commands show at the top of the approvals page with a Stop
+  button, which kills the process group. Locking or quitting MDT stops them
+  too.
+- **Output shown first:** when the command ends, its card comes back to
+  the queue with the exit status and the output, to send or keep. Not
+  deciding within 30 minutes keeps it.
+- On the overview a waiting command can be declined, but running it takes
+  the full card, so the script is always read in full first.
+- The output stays in memory with the approval (the latest 100 decisions)
+  and is never written to disk. The activity log records the ask's fate
+  and the exit status, never the output; crash reports leave it out too.
+- Some versions of `timeout` exit 124 when stopped from outside as well, so
+  MDT counts a run as timed out only when it lasted its whole limit, and
+  tells the agent when you stopped it.
+
+### What the agent hears
+
+`mdt run` (and `mdt wait` on a run) exits with the command's own status
+when it ran and its output came back: 124 when it hit the time limit, as
+with `timeout`. MDT's own outcomes use codes commands rarely use, with a
+line on stderr saying which:
+
+| Status | Meaning                                                    |
+| ------ | ---------------------------------------------------------- |
+| 120    | Still waiting for you. Come back with `mdt wait RUN_ID`.    |
+| 121    | It didn't run, or its output didn't come back: declined, not answered in 30 minutes, couldn't start, or you kept the output. |
+| 122    | The ask was wrong.                                         |
+| 123    | MDT isn't answering: locked or closed.                     |
+
+### Checked
+
+Built and tried on 2026-11-12, from inside the VM, against MDT's dev server
+running there (no KVM in the VM, so no nested VM): the real `mdt` command
+and socat on the channel socket; `mdt host` with the tools found and your
+notes; a run with the output sent straight back; a script from stdin with
+the output shown first, then kept (the agent got 121 and no output); a long
+run stopped from the overview (the output so far came back, no process
+left); a decline. Not yet tried through a real VM's vsock, which carries
+the same bytes as the `grants` and `request` asks already checked there.
+
+### Your machine, as agents see it
+
+`mdt host` prints, and `/mnt/mdt/host.md` holds: OS and version,
+architecture, kernel, login shell, home folder, the shared folders and
+their modes, and which of a fixed list of command-line tools are on your
+login shell's `PATH`, with their versions. Then your own notes about the
+machine, from Settings. MDT collects it when it unlocks, and when you ask
+from Settings; agents never probe the host to find out.
 
 ## VM
 
@@ -810,11 +942,13 @@ The tool is an entry in `MDTClient.Tools`.
     - adding a grant: a type, or a preset that fills the form;
     - per grant: what the VM gets, "allow every use for…", its allowances,
       its own activity.
-- **Approvals:** waiting cards of both types, with facts and the agent's
-  claims kept apart, and held requests in full with copy buttons; history
-  below.
+- **Approvals:** waiting cards of all three types, with facts and the
+  agent's claims kept apart, and held requests in full with copy buttons;
+  commands running on this machine above them, with Stop; history below,
+  where a command opens to its script and output.
 - **Activity:** the log, filterable by grant, host and outcome.
-- **Settings:** image, CPU and memory, shared folders, private ranges.
+- **Settings:** image, CPU and memory, shared folders, private ranges, and
+  this machine as agents see it, with your notes for them.
   Changing folders, network or vsock recreates the VM; MDT says so before
   applying.
 
@@ -846,6 +980,9 @@ Each has one job. Proposed modules sit under `lib/mdt_client/sandbox/`.
 | `Approvals`            | Waiting requests and connections, timeouts, decisions, PubSub                          |
 | `Activity`             | The append-only log                                                                    |
 | `Channel`              | The vsock socket behind the `mdt` command                                              |
+| `HostCommand`          | Checks an ask to run a command and describes it: where it runs, facts, hints           |
+| `HostRun`              | Runs an approved command on the host: time limit, capped output, process group         |
+| `HostInfo`             | What agents are told about this machine (`mdt host`, `host.md`)                        |
 | `VMMemory`             | The OptMem folder and its Transfer participant                                         |
 
 ## Guarantees to test
@@ -862,8 +999,11 @@ Each has one job. Proposed modules sit under `lib/mdt_client/sandbox/`.
    network grant off closes its open connections.
 6. A locked MDT swaps nothing. A stopped MDT leaves the VM without internet.
 7. Nothing in the VM can reach MDT's web server. The agent channel offers only
-   reading the grants (never values) and asking for one.
+   reading the grants (never values) and the host's description, asking for
+   a grant, and asking to run a command.
 8. Nothing in the VM can approve its own requests.
+9. Nothing runs on the host for the VM without your approval of its exact
+   text, each time. What runs is the text on the card.
 
 ## Checks (2026-11-11)
 

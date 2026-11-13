@@ -56,7 +56,8 @@ defmodule MDTClientWeb.SandboxLive do
      |> refresh()
      |> assign_vm_form()
      |> assign_containerfile_form()
-     |> assign_name_form()}
+     |> assign_name_form()
+     |> assign_host_form()}
   end
 
   @impl true
@@ -109,6 +110,7 @@ defmodule MDTClientWeb.SandboxLive do
                   grants={@grants}
                   grant_map={@grant_map}
                   waiting={@waiting}
+                  running={@running}
                   recent={@recent}
                   stats={@stats}
                   now={@now}
@@ -116,6 +118,7 @@ defmodule MDTClientWeb.SandboxLive do
               <% :approvals -> %>
                 <Approvals.page
                   waiting={@waiting}
+                  running={@running}
                   history={@history}
                   grants={@grant_map}
                   marks={@marks}
@@ -173,6 +176,9 @@ defmodule MDTClientWeb.SandboxLive do
                   vm_errors={@vm_errors}
                   share_form={@share_form}
                   share_error={@share_error}
+                  host={@host}
+                  host_form={@host_form}
+                  host_error={@host_error}
                 />
             <% end %>
           </div>
@@ -615,9 +621,50 @@ defmodule MDTClientWeb.SandboxLive do
         "deny" -> :deny
         "deny_and_turn_off" -> :deny_and_turn_off
         "decline" -> :decline
+        "send_output" -> :send_output
+        "keep_output" -> :keep_output
       end
 
     {:noreply, socket |> decide(id, decision) |> refresh()}
+  end
+
+  # A command, run once from its full card, with its output going to the
+  # agent or to you first.
+  def handle_event("run_command", %{"run" => %{"id" => id} = params}, socket) do
+    output_to = if params["output"] == "review", do: :review, else: :send
+    {:noreply, socket |> decide(id, {:run, output_to}) |> refresh()}
+  end
+
+  def handle_event("stop_command", %{"id" => id}, socket) do
+    socket =
+      case Sandbox.stop_command(socket.assigns.username, id) do
+        :ok -> socket
+        {:error, :not_running} -> put_notice(socket, :info, "It had already ended")
+      end
+
+    {:noreply, refresh(socket)}
+  end
+
+  def handle_event("save_host_notes", %{"host" => %{"notes" => notes}}, socket) do
+    case Sandbox.update_settings(socket.assigns.username, %{"host_notes" => notes}) do
+      {:ok, _settings} ->
+        {:noreply,
+         socket
+         |> refresh()
+         |> assign_host_form()
+         |> put_notice(:info, "Notes saved; agents see them with mdt host")}
+
+      {:error, errors} ->
+        {:noreply,
+         socket
+         |> assign(:host_form, to_form(%{"notes" => notes}, as: :host))
+         |> assign(:host_error, errors[:host_notes])}
+    end
+  end
+
+  def handle_event("probe_host", _params, socket) do
+    _ = Sandbox.probe_host(socket.assigns.username)
+    {:noreply, refresh(socket)}
   end
 
   # An agent's ask, answered from its card: for how long, and whether each
@@ -960,6 +1007,12 @@ defmodule MDTClientWeb.SandboxLive do
         as: :vm
       )
     )
+  end
+
+  defp assign_host_form(socket) do
+    socket
+    |> assign(:host_form, to_form(%{"notes" => socket.assigns.settings.host_notes}, as: :host))
+    |> assign(:host_error, nil)
   end
 
   defp assign_name_form(socket) do

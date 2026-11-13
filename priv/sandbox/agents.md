@@ -63,7 +63,42 @@ retry in a loop.
 - Private addresses (10.x, 172.16-31.x, 192.168.x, VPN ranges) and the user's
   machine are refused unless a network grant lists them.
 - Nothing you run reaches the user's machine, except `mdt`, which can only
-  read the grants and ask.
+  read the grants and the machine's description, and ask: for a grant, or
+  to run a command there.
+
+## Running a command on the user's machine
+
+The last resort, for what no grant can do: a job that needs the user's SSH
+keys, a kubeconfig, a signing key, their VPN, or tools only their machine
+has. Use a grant whenever one fits: through a grant the user sees what
+each request does, while a command shows only its text.
+
+1. Run `mdt host` (or read `/mnt/mdt/host.md`) first: OS, architecture,
+   shell, shared folders and tools there. Don't probe the machine with
+   commands to find out.
+2. Ask: `mdt run --reason "what it does, and why it must run there" -- COMMAND ARGS`,
+   or pass a script on stdin (`mdt run --reason "..." <<'EOF' ... EOF`).
+   Options go before the command. The user approves the exact text, once,
+   and it runs as them with `bash -lc`. Keep it short and readable: they
+   read every line.
+3. Where it runs: `--dir`, by default your current directory. Shared folders
+   are at the same path there, so files you leave in one can be read, and
+   results written back. Anything else runs in the user's home folder.
+4. Prefer text the user can read to a script file: `mdt run -- ./x.sh` runs
+   whatever the file holds when they click, and the card says so. Same for
+   `make`, `mix`, `npm` or git in a folder you can write: say so in the
+   reason.
+5. `--timeout` is the time limit in seconds (120 by default, 3600 at most).
+   `mdt` waits up to `--wait` seconds (60) for it to be approved and run;
+   if it says it is still waiting, keep working on what doesn't need it and
+   run `mdt wait RUN_ID` later.
+
+`mdt run` exits with the command's own status once it ran and its output
+came back (124 if it hit the time limit). Otherwise, with a line on stderr:
+120 still waiting, 121 it didn't run or the user kept its output, 122 the
+ask was wrong, 123 MDT isn't answering. The user may choose to see the
+output before you get it, or keep it. Don't ask again for something they
+declined unless they say so.
 
 ## Tools
 
