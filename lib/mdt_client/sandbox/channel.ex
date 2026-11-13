@@ -347,8 +347,56 @@ defmodule MDTClient.Sandbox.Channel do
   def answer("wait", %{"id" => id} = ask, username) when is_binary(id),
     do: await(username, id, wait(ask))
 
+  # Which VM is asking, against the one MDT runs: an old VM, still running
+  # after a recreate or a move, looks like this one from inside.
+  def answer("vm", ask, username) do
+    %{name: name, status: status, record: record} = Server.call(username, :vm_record)
+    mine = if is_binary(ask["id"]), do: String.trim(ask["id"]), else: ""
+
+    cond do
+      is_nil(record) ->
+        {1, "MDT has no record of its VM yet. Ask the user to stop and start it once in MDT."}
+
+      mine == "" ->
+        {1,
+         "This VM has no record of which it is: its boot script hasn't written one. " <>
+           "MDT runs #{vm_words(name, record)}. Ask the user to stop and start the VM in MDT."}
+
+      mine == record.id and status == :running ->
+        {0, "This is the VM MDT runs: #{vm_words(name, record)}."}
+
+      true ->
+        {3,
+         "This is NOT the VM MDT runs. This one is vm #{mine}; MDT runs #{vm_words(name, record)}" <>
+           if(status == :running, do: ".", else: ", and it is #{status}.") <>
+           " Work here isn't where the user's MDT looks: tell them to reconnect to the VM."}
+    end
+  end
+
   def answer(_command, _ask, _username),
-    do: {1, "MDT knows these commands: grants, host, request, run, wait. Run mdt help."}
+    do:
+      {1,
+       "MDT knows these commands: grants, host, request, run, wait, sync, handoff, handoffs, vm. Run mdt help."}
+
+  defp vm_words(name, record) do
+    created =
+      case record.created_at do
+        nil ->
+          "created before MDT kept records"
+
+        at ->
+          minutes = max(DateTime.diff(DateTime.utc_now(), at, :minute), 0)
+          "created #{ago(minutes)} (#{Calendar.strftime(at, "%Y-%m-%d %H:%M")} UTC)"
+      end
+
+    image = if record.image, do: ", image #{record.image}", else: ""
+    "#{name} (vm #{record.id}), #{created}#{image}"
+  end
+
+  defp ago(minutes) when minutes < 1, do: "just now"
+  defp ago(minutes) when minutes < 60, do: "#{minutes} min ago"
+  defp ago(minutes) when minutes < 48 * 60, do: "#{div(minutes, 60)} h ago"
+  defp ago(minutes), do: "#{div(minutes, 1440)} days ago"
 
   defp await(username, id, seconds) do
     ms = seconds * 1_000

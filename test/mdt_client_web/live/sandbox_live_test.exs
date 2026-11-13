@@ -95,6 +95,19 @@ defmodule MDTClientWeb.SandboxLiveTest do
     assert has_element?(view, "#setup-start[disabled]")
   end
 
+  test "the overview shows which VM MDT runs, as `mdt vm` names it", %{
+    conn: conn,
+    username: username
+  } do
+    server = MDTClient.Vault.Store.whereis(Server, username)
+    record = %{id: "3f2a9c1e", created_at: DateTime.utc_now(), image: "img:1"}
+    :sys.replace_state(server, &%{&1 | vm_record: record, vm: %{&1.vm | exists?: true}})
+
+    {:ok, view, _html} = live(conn, ~p"/tools/sandbox")
+    assert has_element?(view, "#vm-record", "vm 3f2a9c1e")
+    assert has_element?(view, "#vm-record", "mdt vm")
+  end
+
   test "setup spells out how to open this VM in Zed", %{conn: conn, username: username} do
     {:ok, overview, _html} = live(conn, ~p"/tools/sandbox")
     refute has_element?(overview, "#connect-zed")

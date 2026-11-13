@@ -87,6 +87,64 @@ defmodule MDTClient.Sandbox.Msb do
       else: [path]
   end
 
+  @doc """
+  The command `ssh` runs to reach `host`, read from the text of an SSH
+  config: the first `ProxyCommand` in a `Host` block that names `host`, as
+  ssh itself takes the first value it finds. Nil when there is none.
+  `Include` and `Match` are not followed.
+
+      iex> config = "Host other\\n  ProxyCommand nc a 22\\nHost mdt-sandbox\\n  User root\\n  ProxyCommand /x/msb ssh serve vm --stdio\\n"
+      iex> MDTClient.Sandbox.Msb.proxy_command(config, "mdt-sandbox")
+      "/x/msb ssh serve vm --stdio"
+
+      iex> MDTClient.Sandbox.Msb.proxy_command("Host *\\n  ProxyCommand=/y/msb ssh\\n", "mdt-sandbox")
+      nil
+  """
+  @spec proxy_command(String.t(), String.t()) :: String.t() | nil
+  def proxy_command(text, host) do
+    text
+    |> String.split(["\r\n", "\n"])
+    |> Enum.reduce_while(false, fn line, in_block? ->
+      case Regex.run(~r/\A\s*([A-Za-z]+)\s*(?:=|\s)\s*(.*?)\s*\z/, line) do
+        [_, keyword, value] ->
+          case String.downcase(keyword) do
+            "host" -> {:cont, host in String.split(value)}
+            "match" -> {:cont, false}
+            "proxycommand" when in_block? -> {:halt, {:found, value}}
+            _other -> {:cont, in_block?}
+          end
+
+        nil ->
+          {:cont, in_block?}
+      end
+    end)
+    |> case do
+      {:found, command} -> command
+      _none -> nil
+    end
+  end
+
+  @doc """
+  How your SSH config (`~/.ssh/config`) reaches `host`: `:ok` through this
+  identity's launcher, `{:other, command}` through something else, or
+  `:missing`. Something else is how Zed ends up in a VM MDT no longer runs:
+  a launcher of an older MDT, say, which runs another microsandbox home.
+  Tests point `config :mdt_client, MDTClient.Sandbox.Msb, ssh_config:`
+  elsewhere.
+  """
+  @spec ssh_entry(String.t(), String.t()) :: :ok | :missing | {:other, String.t()}
+  def ssh_entry(username, host) do
+    path = Keyword.get_lazy(config(), :ssh_config, fn -> Path.expand("~/.ssh/config") end)
+
+    with {:ok, text} <- File.read(path),
+         command when is_binary(command) <- proxy_command(text, host) do
+      program = command |> String.split() |> List.first("") |> Path.expand()
+      if program == launcher(username), do: :ok, else: {:other, command}
+    else
+      _none -> :missing
+    end
+  end
+
   @doc "Where `write_launcher/1` puts an identity's launcher."
   @spec launcher(String.t()) :: Path.t()
   def launcher(username), do: Path.join([Accounts.dir(username), "sandbox", "bin", "msb"])

@@ -96,6 +96,13 @@ defmodule MDTClientWeb.SandboxLive do
         :projects ->
           assign(socket, :handoff_id, params["handoff"])
 
+        :setup ->
+          assign(
+            socket,
+            :ssh_entry,
+            MDTClient.Sandbox.Msb.ssh_entry(socket.assigns.username, Setup.ssh_host())
+          )
+
         :settings ->
           assign(socket,
             settings_tab: Settings.tab(params["tab"]),
@@ -234,7 +241,13 @@ defmodule MDTClientWeb.SandboxLive do
                   now={@now}
                 />
               <% :setup -> %>
-                <Setup.page vm={@vm} image={@image} settings={@settings} tools={@tools} />
+                <Setup.page
+                  vm={@vm}
+                  image={@image}
+                  settings={@settings}
+                  tools={@tools}
+                  ssh_entry={@ssh_entry}
+                />
             <% end %>
           </div>
         </div>

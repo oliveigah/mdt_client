@@ -148,6 +148,13 @@ defmodule MDTClient.Sandbox.Disks do
 
   defp snapshot_path(paths, id), do: Path.join(paths.snapshots, id <> ".img")
 
+  @doc """
+  Whether the copy `snapshot` stands for is there. Copies of Home recorded
+  before Home was a disk (2026-11-13) have none.
+  """
+  @spec snapshot?(paths(), Snapshot.t()) :: boolean()
+  def snapshot?(paths, %Snapshot{id: id}), do: File.regular?(snapshot_path(paths, id))
+
   # A sparse file, then a file system in it, owned by root as the VM sees it.
   defp make!(path, bytes) do
     run!("truncate", ["--size=#{bytes}", path])

@@ -220,6 +220,32 @@ defmodule MDTClient.Sandbox.GuaranteesTest do
     end
   end
 
+  describe "copies of Home across the switch to disks" do
+    test "a copy recorded with no file is forgotten when MDT starts; one with a file stays", %{
+      username: username,
+      key: key
+    } do
+      path = MDTClient.Accounts.store_path(username, "sandbox.bin")
+      copies = Path.join([MDTClient.Accounts.dir(username), "sandbox", "disk-snapshots"])
+      File.mkdir_p!(copies)
+      File.write!(Path.join(copies, "kept.img"), "")
+
+      :ok = Store.close(username)
+      {:ok, saved} = Vault.open(key, File.read!(path))
+      at = ~U[2026-11-13 04:16:41Z]
+
+      snapshots = [
+        %MDTClient.Sandbox.Snapshot{id: "20261113T041641-205ba8", tag: "old", taken_at: at},
+        %MDTClient.Sandbox.Snapshot{id: "kept", tag: "new", taken_at: at}
+      ]
+
+      File.write!(path, Vault.seal(key, Map.put(saved, :snapshots, snapshots)))
+      :ok = Store.open(username, key)
+
+      assert [%{id: "kept"}] = Sandbox.snapshot(username).snapshots
+    end
+  end
+
   describe "expiry across a restart" do
     test "a grant whose time ran out while MDT was closed is off when it starts", %{
       username: username,

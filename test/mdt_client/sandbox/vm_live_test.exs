@@ -339,8 +339,11 @@ defmodule MDTClient.Sandbox.VMLiveTest do
     exec = fn script -> Msb.run(username, ["exec", name, "--", "sh", "-c", script], 120) end
 
     assert :ok = Sandbox.start_vm(username)
-    assert %{exists?: true} = wait_vm(username, :running)
+    assert %{exists?: true, record: %{id: first}} = wait_vm(username, :running)
     assert Bubble.status(username) == :running
+    # The VM knows which it is.
+    assert {:ok, "id=" <> rest} = exec.("cat /etc/mdt-vm")
+    assert String.starts_with?(rest, first <> "\n")
     assert {:ok, "ext4\n"} = exec.("stat -f -c %T /work | sed 's#ext2/ext3#ext4#'")
     assert {:ok, _} = exec.("echo mine > /work/marker; echo mine > /root/marker")
 
@@ -358,6 +361,11 @@ defmodule MDTClient.Sandbox.VMLiveTest do
 
     assert {:ok, "mine\nhome is new\n"} =
              exec.("cat /work/marker; test -e /root/marker || echo home is new")
+
+    # A new VM, a new record, in MDT and in the VM.
+    assert %{record: %{id: second}} = Sandbox.snapshot(username).vm
+    assert second != first
+    assert {:ok, "id=" <> ^second <> _} = exec.("cat /etc/mdt-vm")
 
     assert [%{id: _}] = Sandbox.snapshot(username).snapshots
 
@@ -383,6 +391,12 @@ defmodule MDTClient.Sandbox.VMLiveTest do
     git.(["commit", "-q", "-m", "first"])
 
     assert {:ok, _} = exec.("apk add --no-cache git bash socat >/dev/null 2>&1; git --version")
+
+    # `mdt vm`, and the line an interactive login shell prints.
+    assert {:ok, said} = exec.("/mnt/mdt/bin/mdt vm")
+    assert said =~ "This is the VM MDT runs" and said =~ "vm #{second}"
+    assert {:ok, login} = exec.("bash -lic true 2>&1")
+    assert login =~ "This is the VM MDT runs"
     assert {:ok, %Project{name: project}} = Projects.add(username, repo)
     assert {:ok, %{followed: :updated}} = Projects.sync(username, project)
 

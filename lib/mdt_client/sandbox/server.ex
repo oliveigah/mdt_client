@@ -173,8 +173,10 @@ defmodule MDTClient.Sandbox.Server do
       settings: settings,
       created_spec: saved[:created_spec],
       created_ref: saved[:created_ref],
+      vm_record: saved[:vm_record],
       builds: builds,
-      snapshots: saved[:snapshots] || [],
+      # A copy whose file is gone can't be brought back: it isn't listed.
+      snapshots: Enum.filter(saved[:snapshots] || [], &Disks.snapshot?(folders, &1)),
       handoffs: saved[:handoffs] || [],
       memory: saved[:memory] || %{seed_count: nil, seeded_at: nil, reviewed: 0},
       folders: folders,
@@ -235,7 +237,10 @@ defmodule MDTClient.Sandbox.Server do
 
     {:reply,
      %{
-       vm: %{state.vm | stale?: Machine.stale?(state)},
+       vm:
+         state.vm
+         |> Map.put(:stale?, Machine.stale?(state))
+         |> Map.put(:record, State.vm_record(state)),
        settings: state.settings,
        grants: state.grants,
        values: Map.new(state.grants, &{&1.id, Map.has_key?(state.values, &1.id)}),
@@ -262,6 +267,12 @@ defmodule MDTClient.Sandbox.Server do
   end
 
   def handle_call(:host_text, _from, state), do: {:reply, State.host_text(state), state}
+
+  # Which VM MDT runs, for `mdt vm` in a VM to compare itself with.
+  def handle_call(:vm_record, _from, state),
+    do:
+      {:reply, %{name: state.vm.name, status: state.vm.status, record: State.vm_record(state)},
+       state}
 
   def handle_call(:probe_host, _from, state) do
     if state.host.probing?,

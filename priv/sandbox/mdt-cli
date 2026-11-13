@@ -6,6 +6,8 @@
 set -u
 
 channel=${MDT_CHANNEL:-VSOCK-CONNECT:2:5000}
+vm_file=${MDT_VM_FILE:-/etc/mdt-vm}
+unreachable="MDT isn't answering. It may be locked or closed: tell the user."
 max_script=16384
 
 usage() {
@@ -58,10 +60,17 @@ mdt - ask MDT, the user's control panel, for access
       Your project's handoffs: waiting, taken, sent back (with the user's
       note), declined.
 
+  mdt vm
+      Which VM this is, and whether it is the one MDT runs. When the network
+      or mdt stops answering, this says whether you are in an old VM: then
+      tell the user to reconnect.
+
 Exit status of grants, request and wait on an ask: 0 the grant is on, 1 the
 ask was wrong, 2 still waiting for the user, 3 declined or given up, 4 MDT
 isn't answering (locked or closed). Of sync, handoff and handoffs: 0 done,
-1 not done (the reason is printed), 4 MDT isn't answering.
+1 not done (the reason is printed), 4 MDT isn't answering. Of vm: 0 this is
+the VM MDT runs, 1 there is no record to compare, 3 this is not the VM MDT
+runs, 4 MDT isn't answering.
 
 Exit status of run, and wait on a run: the command's own status when it ran
 and its output came back (124 if it hit its time limit). Otherwise, with a
@@ -182,7 +191,7 @@ exchange() {
   # ignoreeof: the ask stays open until MDT answers and closes.
   reply=$(printf '%s\n' "$1" | socat -t 1 -,ignoreeof "$channel" 2>/dev/null)
   if [ -z "$reply" ]; then
-    echo "mdt: MDT isn't answering. It may be locked or closed: tell the user." >&2
+    echo "mdt: $unreachable" >&2
     exit "$2"
   fi
 }
@@ -361,6 +370,12 @@ case $command in
     ;;
   handoffs)
     send "{\"command\":\"handoffs\",\"cwd\":$(json "$(pwd -P)")}"
+    ;;
+  vm)
+    vm_id=""
+    [ -r "$vm_file" ] && vm_id=$(sed -n 's/^id=//p' "$vm_file" | head -n 1)
+    unreachable="MDT isn't answering. It is locked or closed, or this VM is no longer the one MDT runs: tell the user."
+    send "{\"command\":\"vm\",\"id\":$(json "$vm_id")}"
     ;;
   help | -h | --help)
     usage

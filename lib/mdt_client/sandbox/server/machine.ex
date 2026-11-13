@@ -60,6 +60,14 @@ defmodule MDTClient.Sandbox.Server.Machine do
   """
   def vm_task(state, action, busy) do
     state = state |> State.write_inbox() |> State.change(:vm, &%{&1.vm | busy: busy, error: nil})
+
+    # A VM made before MDT kept records gets one now, for its boot to write.
+    state =
+      if action == :start and is_nil(State.vm_record(state)),
+        do: State.changed(Map.put(state, :vm_record, record(nil, state.created_ref))),
+        else: state
+
+    record = State.vm_record(state)
     name = state.vm.name
     username = state.username
     folders = state.folders
@@ -72,7 +80,7 @@ defmodule MDTClient.Sandbox.Server.Machine do
           fn ->
             with :ok <- prepare(folders, sizes),
                  {:ok, output} <- Bubble.start(bubble, ["start", name], 120) do
-              boot(username, name)
+              boot(username, name, record)
               {:ok, output}
             end
           end
@@ -111,6 +119,7 @@ defmodule MDTClient.Sandbox.Server.Machine do
         snapshots: state.snapshots,
         snapshot_tag: tag_of(state.created_ref),
         ref: state.image.tag,
+        record: record(State.now(), state.image.tag),
         spec: :erlang.phash2(spec),
         args: args,
         options: options
@@ -172,7 +181,7 @@ defmodule MDTClient.Sandbox.Server.Machine do
 
         with :ok <- prepare(job.folders, job.sizes),
              {:ok, output} <- Bubble.start(job.bubble, job.args, 300) do
-          boot(job.username, job.name)
+          boot(job.username, job.name, job.record)
           {{:ok, output}, seed}
         else
           error -> {error, seed}
@@ -189,6 +198,7 @@ defmodule MDTClient.Sandbox.Server.Machine do
       result: result,
       spec: job.spec,
       ref: job.ref,
+      record: job.record,
       snapshots: kept,
       taken: taken,
       seed: seed,
@@ -210,8 +220,21 @@ defmodule MDTClient.Sandbox.Server.Machine do
   # After every boot, in the VM: it copies for itself what MDT has for it in
   # /mnt/mdt (the agents' instructions, the memo tool). A VM whose image
   # can't run the script still runs; the same text is at /mnt/mdt/AGENTS.md.
-  defp boot(username, name) do
-    case Msb.run(username, ["exec", name, "--", "/mnt/mdt/bin/mdt-boot"], 60) do
+  # Which VM this is, for the boot script to write into it: a new id each
+  # time MDT creates one.
+  defp record(created_at, image) do
+    %{
+      id: :crypto.strong_rand_bytes(4) |> Base.encode16(case: :lower),
+      created_at: created_at,
+      image: image
+    }
+  end
+
+  defp boot(username, name, record) do
+    created = if record.created_at, do: DateTime.to_iso8601(record.created_at), else: ""
+    args = [record.id, created, record.image || "", name]
+
+    case Msb.run(username, ["exec", name, "--", "/mnt/mdt/bin/mdt-boot" | args], 60) do
       {:ok, _output} ->
         :ok
 
@@ -359,7 +382,7 @@ defmodule MDTClient.Sandbox.Server.Machine do
     case done.result do
       {:ok, _output} ->
         state
-        |> Map.merge(%{created_spec: done.spec, created_ref: done.ref})
+        |> Map.merge(%{created_spec: done.spec, created_ref: done.ref, vm_record: done.record})
         |> State.change(
           :vm,
           &%{

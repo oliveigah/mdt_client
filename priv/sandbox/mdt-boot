@@ -1,5 +1,6 @@
-#!/bin/bash
-# Run by MDT inside the VM after every boot, as root, from /mnt/mdt/bin.
+#!/bin/sh
+# Run by MDT inside the VM after every boot, as root, from /mnt/mdt/bin. POSIX
+# sh, so it runs in an image without bash.
 #
 # MDT never writes into anything the VM can write: what it has for the VM is
 # in /mnt/mdt, read-only, and this script, running in the VM, copies the
@@ -9,9 +10,12 @@
 #     top of ~/.claude/CLAUDE.md and ~/.codex/AGENTS.md. The rest of each
 #     file is left alone;
 #   - the memo tool, into the VM's own memory folder, with an empty memory
-#     when there is none.
+#     when there is none;
+#   - which VM this is, when MDT names it: `mdt-boot ID CREATED IMAGE NAME`
+#     writes /etc/mdt-vm, which `mdt vm` sends MDT to compare with the VM it
+#     runs, and a line every interactive login shell prints with the answer.
 #
-# MDT_INBOX and HOME can be set to try it outside a VM.
+# MDT_INBOX, HOME and MDT_ETC (for /etc) can be set to try it outside a VM.
 set -u
 inbox=${MDT_INBOX:-/mnt/mdt}
 block=$inbox/agents-block.md
@@ -47,6 +51,40 @@ put_block() {
 }
 
 status=0
+etc=${MDT_ETC:-/etc}
+
+if [ -n "${1:-}" ]; then
+  {
+    printf 'id=%s\n' "$1"
+    printf 'created=%s\n' "${2:-}"
+    printf 'image=%s\n' "${3:-}"
+    printf 'name=%s\n' "${4:-}"
+  } > "$etc/mdt-vm.new" && mv "$etc/mdt-vm.new" "$etc/mdt-vm" ||
+    { echo "mdt-boot: could not write $etc/mdt-vm" >&2; status=1; }
+
+  mkdir -p "$etc/profile.d" && {
+    echo "# Written by MDT's boot script: which VM this is, in every interactive"
+    echo "# login shell (Zed's terminals). \`mdt vm\` says it again."
+    printf "mdt_vm_cli='%s'\n" "$inbox/bin/mdt"
+    cat <<'PROFILE'
+case $- in
+  *i*)
+    if [ -x "$mdt_vm_cli" ]; then
+      mdt_vm_said=$(timeout 3 "$mdt_vm_cli" vm 2>&1)
+      if [ $? -eq 0 ]; then
+        printf '\033[2m%s\033[0m\n' "$mdt_vm_said"
+      else
+        printf '\033[1;31m%s\033[0m\n' "$mdt_vm_said"
+      fi
+      unset mdt_vm_said
+    fi
+    ;;
+esac
+unset mdt_vm_cli
+PROFILE
+  } > "$etc/profile.d/mdt-vm.sh" ||
+    { echo "mdt-boot: could not write $etc/profile.d/mdt-vm.sh" >&2; status=1; }
+fi
 
 if [ -r "$block" ]; then
   for file in "$HOME/.claude/CLAUDE.md" "$HOME/.codex/AGENTS.md"; do

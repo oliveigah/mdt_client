@@ -29,16 +29,61 @@ defmodule MDTClient.Sandbox.InstructionsTest do
       File.mkdir_p!(home)
       File.write!(Path.join(inbox, "agents-block.md"), Instructions.block())
 
-      boot = fn ->
+      etc = Path.join(base, "etc")
+      File.mkdir_p!(etc)
+
+      boot = fn args ->
+        # POSIX sh, as in an image without bash.
         System.cmd(
-          "bash",
-          [Path.join([:code.priv_dir(:mdt_client), "sandbox", "mdt-boot"])],
-          env: [{"MDT_INBOX", inbox}, {"HOME", home}],
+          "sh",
+          [Path.join([:code.priv_dir(:mdt_client), "sandbox", "mdt-boot"]) | args],
+          env: [{"MDT_INBOX", inbox}, {"HOME", home}, {"MDT_ETC", etc}],
           stderr_to_stdout: true
         )
       end
 
-      %{inbox: inbox, home: home, boot: boot}
+      %{inbox: inbox, home: home, etc: etc, boot: fn -> boot.([]) end, boot_as: boot}
+    end
+
+    test "writes which VM this is, and a line for every interactive login shell", %{
+      inbox: inbox,
+      etc: etc,
+      boot_as: boot_as
+    } do
+      assert {"", 0} =
+               boot_as.(["3f2a9c1e", "2026-11-13T20:29:32Z", "img:2026-11-13.4", "mdt-4790"])
+
+      assert File.read!(Path.join(etc, "mdt-vm")) ==
+               "id=3f2a9c1e\ncreated=2026-11-13T20:29:32Z\nimage=img:2026-11-13.4\nname=mdt-4790\n"
+
+      # The line asks `mdt vm`: dim when this is MDT's VM, red when it isn't.
+      fake = Path.join(inbox, "bin/mdt")
+      File.mkdir_p!(Path.dirname(fake))
+      profile = Path.join(etc, "profile.d/mdt-vm.sh")
+
+      shell = fn mode, status ->
+        File.write!(fake, "#!/bin/sh\necho \"answer for $1\"\nexit #{status}\n")
+        File.chmod!(fake, 0o755)
+        # An interactive bash with no terminal complains about job control on
+        # stderr; only what the line prints counts.
+        System.cmd("sh", [
+          "-c",
+          ~S(exec bash --norc "$0" -c '. "$1"' shell "$1" 2>/dev/null),
+          mode,
+          profile
+        ])
+      end
+
+      assert {"\e[2manswer for vm\e[0m\n", 0} = shell.("-i", 0)
+      assert {"\e[1;31manswer for vm\e[0m\n", 0} = shell.("-i", 3)
+      # Agents' shells aren't interactive: they hear nothing.
+      assert {"", 0} = shell.("+m", 3)
+    end
+
+    test "writes no record when MDT names no VM", %{etc: etc, boot: boot} do
+      assert {"", 0} = boot.()
+      refute File.exists?(Path.join(etc, "mdt-vm"))
+      refute File.exists?(Path.join(etc, "profile.d/mdt-vm.sh"))
     end
 
     test "Claude Code and Codex both get the block in Home", %{home: home, boot: boot} do

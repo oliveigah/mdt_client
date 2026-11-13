@@ -284,6 +284,7 @@ defmodule MDTClient.Sandbox.Server.State do
         ca: state.ca,
         created_spec: state.created_spec,
         created_ref: state.created_ref,
+        vm_record: vm_record(state),
         builds: state.builds,
         current: state.image.tag,
         snapshots: state.snapshots,
@@ -351,6 +352,13 @@ defmodule MDTClient.Sandbox.Server.State do
   def duration_words(minutes) when rem(minutes, 60) == 0, do: "for #{div(minutes, 60)} h"
 
   def duration_words(minutes), do: "for #{minutes} min"
+
+  @doc """
+  Which VM MDT runs (`MDTClient.Sandbox.VM`'s `record`), or nil. A sandbox
+  process started by code from before records has none in its state until
+  it restarts, so it is read with a default.
+  """
+  def vm_record(state), do: Map.get(state, :vm_record)
 
   @doc """
   A short id not used before in this run.

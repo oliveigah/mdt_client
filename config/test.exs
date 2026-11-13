@@ -20,9 +20,10 @@ config :mdt_client, MDTClient.Sandbox.Server,
   channel_dir: Path.join(System.tmp_dir!(), "mdt-test-channels")
 
 # A runtime built into priv/microsandbox stays out of tests; the ones about
-# msb make their own.
+# msb make their own. So does your ~/.ssh/config.
 config :mdt_client, MDTClient.Sandbox.Msb,
-  runtime_dir: Path.join(System.tmp_dir!(), "mdt_client_test_msb_#{System.pid()}")
+  runtime_dir: Path.join(System.tmp_dir!(), "mdt_client_test_msb_#{System.pid()}"),
+  ssh_config: Path.join(System.tmp_dir!(), "mdt_client_test_no_ssh_config")
 
 # Tests never show desktop notifications; the service only keeps track of
 # what it would show. The D-Bus tests start their own bus.

@@ -107,6 +107,10 @@ retry in a loop.
     now. Tell the user.
 - Private addresses (10.x, 172.16-31.x, 192.168.x, VPN ranges) and the user's
   machine are refused unless a network grant lists them.
+- When the network or `mdt` stops answering ("connection refused" from
+  everything), run `mdt vm`. It says whether this VM is still the one MDT
+  runs. If it isn't, nothing you do in here fixes it: tell the user to
+  reconnect.
 - Nothing you run reaches the user's machine, except `mdt`, which can only
   read the grants and the machine's description, and ask: for a grant, or
   to run a command there.

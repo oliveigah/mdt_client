@@ -10,10 +10,17 @@ defmodule MDTClientWeb.SandboxLive.Setup do
 
   @ssh_host "mdt-sandbox"
 
+  @doc "The host name the VM has in your SSH config."
+  def ssh_host, do: @ssh_host
+
   attr :vm, :any, required: true
   attr :image, :map, required: true
   attr :settings, :any, required: true
   attr :tools, :map, required: true
+
+  attr :ssh_entry, :any,
+    default: :missing,
+    doc: "how ~/.ssh/config reaches the VM (`MDTClient.Sandbox.Msb.ssh_entry/2`)"
 
   def page(assigns) do
     ~H"""
@@ -123,7 +130,12 @@ defmodule MDTClientWeb.SandboxLive.Setup do
       </.step>
     </ol>
 
-    <.connect_card vm={@vm} settings={@settings} launcher={@tools.launcher} />
+    <.connect_card
+      vm={@vm}
+      settings={@settings}
+      launcher={@tools.launcher}
+      ssh_entry={@ssh_entry}
+    />
     """
   end
 
@@ -176,16 +188,19 @@ defmodule MDTClientWeb.SandboxLive.Setup do
   attr :vm, :any, required: true
   attr :settings, :any, required: true
   attr :launcher, :string, required: true
+  attr :ssh_entry, :any, required: true
 
   # Everything needed to open the VM in Zed, filled in for this VM. The
-  # launcher runs MDT's own msb with MDT's microsandbox home.
+  # launcher runs MDT's own msb with this identity's microsandbox home, and
+  # reaches the VM only while MDT runs it.
   defp connect_card(assigns) do
     msb = assigns.launcher
 
     folders =
-      case assigns.settings.shares do
-        [] -> ["/root"]
-        shares -> Enum.map(shares, & &1.path)
+      case Enum.map(assigns.settings.projects, &"/work/#{&1.name}") ++
+             Enum.map(assigns.settings.shares, & &1.path) do
+        [] -> ["/work"]
+        folders -> folders
       end
 
     assigns =
@@ -243,6 +258,17 @@ defmodule MDTClientWeb.SandboxLive.Setup do
             Microsandbox keeps its own list of keys; this adds your public key to MDT's. The command is MDT's own msb, which MDT keeps at this path across updates.
           </:help>
         </.connect_step>
+        <li :if={match?({:other, _}, @ssh_entry)} id="connect-ssh-stale">
+          <div class="rounded-lg border border-bad/40 bg-bad-soft/30 px-3 py-2.5 text-xs leading-5 text-bad">
+            <p class="flex items-center gap-1.5 font-medium">
+              <.icon name="hero-exclamation-triangle-micro" class="size-3.5" />
+              Your ~/.ssh/config reaches {ssh_host()} another way
+            </p>
+            <p class="mt-1">
+              It runs <code class="font-mono break-all">{elem(@ssh_entry, 1)}</code>, not this VM's launcher. Zed would open a VM MDT doesn't run, which has no internet. Replace that entry with the one in step 2, then reconnect.
+            </p>
+          </div>
+        </li>
         <.connect_step
           n={2}
           title="Add the VM to ~/.ssh/config"
@@ -250,7 +276,7 @@ defmodule MDTClientWeb.SandboxLive.Setup do
           text={@ssh_config}
         >
           <:help>
-            The connection is a local process, not the network, so host keys aren't checked (they change when the VM is recreated). Your SSH agent is not forwarded. Connecting boots the VM if it's stopped; without MDT running it has no internet.
+            The connection is a local process, not the network, so host keys aren't checked (they change when the VM is recreated). Your SSH agent is not forwarded. The launcher reaches the VM only while MDT runs it: with MDT stopped or the VM down, connecting fails instead of finding another one.
           </:help>
         </.connect_step>
         <.connect_step
@@ -264,10 +290,10 @@ defmodule MDTClientWeb.SandboxLive.Setup do
             It starts terminals in Bash and keeps your host MCP servers out. Zed's own Claude Code and Codex agents install inside the VM, in its Home, so they survive recreating it.
           </:help>
         </.connect_step>
-        <.connect_step n={4} title="Open a shared folder" id="connect-open" text={@open}>
+        <.connect_step n={4} title="Open a project" id="connect-open" text={@open}>
           Then sign the agents in from a Zed terminal: <code class="font-mono">claude auth login</code>, <code class="font-mono">codex login --device-auth</code>.
           <:help>
-            Shared folders keep their paths from this machine; in the VM, ~ is /root, so they are not under ~/projects there. A folder shared after the VM was created appears once it is recreated. Logins live in the VM's Home and survive recreating it.
+            A project is a copy in /work, synced from the Projects page; a shared folder keeps its path from this machine. A folder shared after the VM was created appears once it is recreated. Logins live in the VM's Home disk and survive recreating it.
           </:help>
         </.connect_step>
       </ol>

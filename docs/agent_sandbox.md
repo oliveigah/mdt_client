@@ -107,6 +107,7 @@ folders with it, and sits between it and the network.
 | 2026-11-13 | Intercepted hosts keep MDT's own strict reader for the first release. Bandit and Finch were tried and not taken (see [step 5](#step-5)). Narrows the plan made the same day. |
 | 2026-11-13 | On Ubuntu the bubble is made with MDT's own copy of the system's bwrap, at `/usr/lib/mdt/bwrap`, under an AppArmor profile the deb installs: what runs inside may hold the two capabilities the relay uses, and no other. See [step 6](#step-6). |
 | 2026-11-13 | The folders above msb's store are yours alone (`0700`), whatever umask made them. |
+| 2026-11-13 | Every VM says which it is: MDT records an id for each VM it creates, the VM gets it at boot, and `mdt vm` and every login shell say whether this is the VM MDT runs. The Setup page warns when `~/.ssh/config` reaches the VM through anything but this identity's launcher. |
 
 <a id="first-release"></a>
 
@@ -1457,8 +1458,20 @@ mdt host                                     see Host commands
 mdt sync                                     see Projects
 mdt handoff --title "…" [--body FILE]        see Projects
 mdt handoffs                                 see Projects
+mdt vm                                       which VM this is, and whether MDT runs it
 ```
 
+- `vm` tells an old VM from the one MDT runs. MDT gives each VM it creates
+  an id and records when, and from which image (`VM`'s `record`; a VM made
+  before records gets one at its next start). The boot script writes the
+  same into the VM, at `/etc/mdt-vm`, and `mdt vm` sends that id for MDT to
+  compare: 0 this is the VM MDT runs, 3 it isn't (or MDT's is stopped), 1
+  there is no record to compare, 4 MDT doesn't answer. Every interactive
+  login shell (Zed's terminals) prints the answer in a line, dim, or red
+  when it isn't 0; agents' shells, which aren't interactive, print nothing.
+  The Overview shows the same id. Added 2026-11-13, after a Zed window
+  stayed connected to a VM MDT no longer ran and its agents saw only
+  "connection refused".
 - `request` asks you to turn a grant on, by id or name. It shows as an
   activation approval with the agent's reason, marked unverified, and who
   asked (read from the processes above `mdt`, so also a claim).

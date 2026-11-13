@@ -63,6 +63,18 @@ defmodule MDTClientWeb.SandboxLive.Overview do
               @settings.shares
             )} shared folders
           </p>
+          <p :if={@vm.exists? and @vm.record} id="vm-record" class="mt-1 text-[11px] text-muted">
+            <span class="font-mono text-ink">vm {@vm.record.id}</span>
+            <span :if={@vm.record.created_at}>
+              · created
+              <.clock
+                id="vm-created"
+                since={@vm.record.created_at}
+                now={@now}
+              /> · in the VM, <code class="font-mono">mdt vm</code>
+              says if you're in this one
+            </span>
+          </p>
           <p
             :if={@vm.exists? and @created_ref != @image.tag}
             id="vm-next-image"

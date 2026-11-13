@@ -34,6 +34,67 @@ defmodule MDTClient.Sandbox.ChannelTest do
     "channel" |> MDTClient.VaultHelpers.unlocked_identity() |> Map.put(:bin, bin)
   end
 
+  describe "mdt vm" do
+    defp record(context, record, status) do
+      server = MDTClient.Vault.Store.whereis(MDTClient.Sandbox.Server, context.username)
+      :sys.replace_state(server, &%{&1 | vm_record: record, vm: %{&1.vm | status: status}})
+    end
+
+    @made %{id: "3f2a9c1e", created_at: ~U[2026-11-13 20:29:00Z], image: "img:2026-11-13.4"}
+
+    test "says this is the VM MDT runs when the ids match", context do
+      record(context, @made, :running)
+      assert {0, text} = Channel.answer("vm", %{"id" => "3f2a9c1e"}, context.username)
+      assert text =~ "This is the VM MDT runs"
+      assert text =~ "vm 3f2a9c1e" and text =~ "2026-11-13 20:29 UTC" and text =~ "2026-11-13.4"
+    end
+
+    test "says this is not the VM MDT runs when they don't, or MDT's isn't running", context do
+      record(context, @made, :running)
+      assert {3, text} = Channel.answer("vm", %{"id" => "00000000"}, context.username)
+      assert text =~ "NOT the VM MDT runs" and text =~ "vm 00000000" and text =~ "reconnect"
+
+      record(context, @made, :stopped)
+      assert {3, text} = Channel.answer("vm", %{"id" => "3f2a9c1e"}, context.username)
+      assert text =~ "it is stopped"
+    end
+
+    test "says when there is nothing to compare", context do
+      assert {1, text} = Channel.answer("vm", %{"id" => "3f2a9c1e"}, context.username)
+      assert text =~ "no record of its VM"
+
+      record(context, %{@made | created_at: nil}, :running)
+      assert {1, text} = Channel.answer("vm", %{}, context.username)
+      assert text =~ "stop and start the VM" and text =~ "created before MDT kept records"
+    end
+
+    test "the mdt command sends the id the boot script wrote", context do
+      record(context, @made, :running)
+      file = Path.join(context.bin, "mdt-vm")
+      File.write!(file, "id=3f2a9c1e\ncreated=2026-11-13T20:29:00Z\n")
+
+      assert {out, 0} = mdt(context, ["vm"], [{"MDT_VM_FILE", file}])
+      assert out =~ "This is the VM MDT runs"
+
+      File.write!(file, "id=0badc0de\n")
+      assert {out, 3} = mdt(context, ["vm"], [{"MDT_VM_FILE", file}])
+      assert out =~ "NOT the VM MDT runs"
+    end
+
+    test "the mdt command says what an unanswered check can mean", context do
+      file = Path.join(context.bin, "mdt-vm")
+      File.write!(file, "id=3f2a9c1e\n")
+
+      assert {out, 4} =
+               mdt(context, ["vm"], [
+                 {"MDT_VM_FILE", file},
+                 {"MDT_CHANNEL", "UNIX-CONNECT:/nonexistent/channel.sock"}
+               ])
+
+      assert out =~ "no longer the one MDT runs"
+    end
+  end
+
   defp github(username) do
     {:ok, grant} =
       Sandbox.create_grant(username, %{

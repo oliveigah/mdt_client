@@ -5,6 +5,8 @@ defmodule MDTClient.Sandbox.MsbTest do
   alias MDTClient.Accounts
   alias MDTClient.Sandbox.{Msb, Sockets}
 
+  doctest MDTClient.Sandbox.Msb
+
   # Only paths are made from it: no identity needs to exist.
   @user "msb-tester"
 
@@ -90,6 +92,44 @@ printf 'home=%s path=%s args=%s\n' "$MSB_HOME" "$MSB_PATH" "$*"
     for folder <- [Accounts.root() | above] do
       assert Bitwise.band(File.stat!(folder).mode, 0o777) == 0o700, folder
     end
+  end
+
+  test "an SSH entry is told apart when it reaches the VM through something else", %{dir: dir} do
+    config = Path.join(dir, "ssh_config")
+
+    Application.put_env(
+      :mdt_client,
+      Msb,
+      Keyword.put(Application.get_env(:mdt_client, Msb), :ssh_config, config)
+    )
+
+    entry = fn command ->
+      "Host mdt-sandbox\n  User root\n  ProxyCommand #{command} ssh serve vm --stdio\n"
+    end
+
+    File.mkdir_p!(dir)
+
+    assert Msb.ssh_entry(@user, "mdt-sandbox") == :missing
+
+    File.write!(config, entry.(Msb.launcher(@user)))
+    assert Msb.ssh_entry(@user, "mdt-sandbox") == :ok
+
+    # The launcher of the MDT before 2026-11-13, which ran a shared home.
+    File.write!(config, entry.("/home/me/.mdt_client/bin/msb"))
+
+    assert Msb.ssh_entry(@user, "mdt-sandbox") ==
+             {:other, "/home/me/.mdt_client/bin/msb ssh serve vm --stdio"}
+
+    # ssh takes the first ProxyCommand it finds for the host.
+    File.write!(
+      config,
+      "Host mdt-sandbox other\n  ProxyCommand=nc x 22\n" <> entry.(Msb.launcher(@user))
+    )
+
+    assert Msb.ssh_entry(@user, "mdt-sandbox") == {:other, "nc x 22"}
+
+    File.write!(config, "Host something-else\n  ProxyCommand nc x 22\n")
+    assert Msb.ssh_entry(@user, "mdt-sandbox") == :missing
   end
 
   test "the launcher runs MDT's msb in the identity's home, whatever the caller's environment",
