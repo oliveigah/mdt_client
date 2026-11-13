@@ -8,6 +8,10 @@
           "xdg-utils",
           "pkexec",
           "git",
+          "bubblewrap",
+          "e2fsprogs",
+          "podman",
+          "util-linux",
           "openssh-client",
           "libssl3",
           "libncurses6",
@@ -15,7 +19,9 @@
           "zlib1g"
         ],
         "section": "devel",
-        "priority": "optional"
+        "priority": "optional",
+        "postInstallScript": "../scripts/deb/postinst.sh",
+        "postRemoveScript": "../scripts/deb/postrm.sh"
       },
       "rpm": {
         "release": "5",
@@ -23,6 +29,10 @@
           "xdg-utils",
           "polkit",
           "git",
+          "bubblewrap",
+          "e2fsprogs",
+          "podman",
+          "util-linux",
           "openssh-clients",
           "openssl-libs",
           "ncurses-libs",

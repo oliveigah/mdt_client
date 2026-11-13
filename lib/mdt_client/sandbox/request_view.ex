@@ -14,9 +14,14 @@ defmodule MDTClient.Sandbox.RequestView do
   Bodies are shown for what they are (`body/1`): JSON pretty-printed with
   its keys in order, a GraphQL document with its variables, form fields,
   git's pkt-lines, text, or a hex dump of binary data.
+
+  Everything that comes out of here is text that shows all it holds
+  (`MDTClient.Sandbox.Shown`): a character that doesn't show is written out,
+  on the page and in what you copy, so what you paste into a terminal is
+  what you read.
   """
 
-  alias MDTClient.Sandbox.Grant
+  alias MDTClient.Sandbox.{Grant, Shown}
 
   @type request :: MDTClient.Sandbox.Approval.request()
   @type mark :: %{placeholder: String.t(), variable: String.t(), label: String.t()}
@@ -50,7 +55,7 @@ defmodule MDTClient.Sandbox.RequestView do
 
   @doc "The address the request went to."
   @spec url(request()) :: String.t()
-  def url(request), do: "https://" <> request.host <> request.path
+  def url(request), do: Shown.text("https://" <> request.host <> request.path)
 
   @doc """
   The headers as the page shows them: each value split where a placeholder
@@ -74,7 +79,7 @@ defmodule MDTClient.Sandbox.RequestView do
   defp join_text([segment | rest]), do: [segment | join_text(rest)]
   defp join_text([]), do: []
 
-  defp segments(value, []), do: [{:text, value}]
+  defp segments(value, []), do: [{:text, Shown.text(value)}]
 
   defp segments(value, [mark | rest]) do
     value
@@ -114,7 +119,13 @@ defmodule MDTClient.Sandbox.RequestView do
           {:binary, hexdump(data)}
       end
 
-    %{format: format, text: text, kept: byte_size(data), size: size, complete?: complete?}
+    %{
+      format: format,
+      text: Shown.text(text),
+      kept: byte_size(data),
+      size: size,
+      complete?: complete?
+    }
   end
 
   @doc """
@@ -149,7 +160,9 @@ defmodule MDTClient.Sandbox.RequestView do
           ["", variables(raw_text(request), marks)]
       end
 
-    Enum.join(["#{request.method} #{request.path} HTTP/1.1" | head] ++ tail, "\n") <> "\n"
+    Shown.text(
+      Enum.join(["#{request.method} #{request.path} HTTP/1.1" | head] ++ tail, "\n") <> "\n"
+    )
   end
 
   @doc """
@@ -207,7 +220,7 @@ defmodule MDTClient.Sandbox.RequestView do
         " \\\n  "
       )
 
-    if note, do: note <> "\n" <> command <> "\n", else: command <> "\n"
+    Shown.text(if note, do: note <> "\n" <> command <> "\n", else: command <> "\n")
   end
 
   ## Bodies

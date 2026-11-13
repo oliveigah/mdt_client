@@ -7,8 +7,9 @@ defmodule MDTClient.Sandbox.Instructions do
 
   The instructions reach Claude Code and Codex through their global files in
   the VM's Home, `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md`, as a block
-  MDT rewrites before every start (`put_block/2`). The rest of each file is
-  left alone. Agents may edit the block meanwhile; the next start undoes it.
+  (`block/0`) that a script run in the VM after every boot puts there. The
+  rest of each file is left alone. Agents may edit the block meanwhile; the
+  next boot undoes it.
   """
 
   alias MDTClient.Sandbox.{Grant, Presets}
@@ -25,25 +26,13 @@ defmodule MDTClient.Sandbox.Instructions do
   @spec home_files() :: [String.t()]
   def home_files, do: @home_files
 
-  @doc "Writes the block into each of `home_files/0` under `home`."
-  @spec write_home!(Path.t(), String.t()) :: :ok
-  def write_home!(home, text) do
-    for relative <- @home_files do
-      path = Path.join(home, relative)
-      File.mkdir_p!(Path.dirname(path))
-
-      existing =
-        case File.read(path) do
-          {:ok, content} -> content
-          {:error, _} -> ""
-        end
-
-      updated = put_block(existing, text)
-      if updated != existing, do: File.write!(path, updated)
-    end
-
-    :ok
-  end
+  @doc """
+  The standing instructions as the block the VM puts in `home_files/0`
+  itself, after every boot (`priv/sandbox/mdt-boot`, at `/mnt/mdt/bin`). MDT
+  writes it to `/mnt/mdt/agents-block.md` and never into the VM's Home.
+  """
+  @spec block() :: String.t()
+  def block, do: put_block("", text())
 
   @doc """
   `content` with MDT's block holding `text`: replaced where it was, or put at
@@ -95,8 +84,8 @@ defmodule MDTClient.Sandbox.Instructions do
     Written by MDT whenever a grant changes. To use one that is off, ask the
     user with: mdt request GRANT_ID --reason "what you are about to do"
     For access no grant gives: mdt request --need "what, and for which host" --reason "why"
-    For a job no grant can do, as a last resort, ask to run it on the user's
-    machine: mdt run --reason "why" -- COMMAND (see mdt host first)
+    A command grant, when there is one below, lets you ask to run a command
+    on the user's machine: mdt run GRANT_ID --reason "why" (see mdt host first)
 
     #{body}
     """
@@ -143,7 +132,16 @@ defmodule MDTClient.Sandbox.Instructions do
   def usage(%Grant{kind: :file} = grant),
     do: "use: the real value is the file #{grant.path} while the grant is on."
 
+  def usage(%Grant{kind: :command, script: nil} = grant),
+    do:
+      ~s(use: mdt run #{grant.id} --reason "why it must run there" -- COMMAND. It runs on the user's machine, as them.)
+
+  def usage(%Grant{kind: :command} = grant),
+    do:
+      ~s(use: mdt run #{grant.id} --reason "why now". It runs the user's own script on their machine; you send no command.)
+
   defp approval(%Grant{kind: :file}), do: "uses: the file is readable while on"
+  defp approval(%Grant{kind: :command}), do: "uses: the user approves every run"
 
   defp approval(%Grant{} = grant) do
     what = if grant.kind == :network, do: "connection", else: "request"

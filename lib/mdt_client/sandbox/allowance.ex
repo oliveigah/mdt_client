@@ -16,11 +16,21 @@ defmodule MDTClient.Sandbox.Allowance do
 
   @type t :: %__MODULE__{id: String.t(), pattern: String.t() | :all, until: DateTime.t() | nil}
 
-  @doc "Whether this allowance covers a use with this pattern."
-  @spec covers?(t(), String.t()) :: boolean()
-  def covers?(%__MODULE__{pattern: :all}, _pattern), do: true
-  def covers?(%__MODULE__{pattern: pattern}, pattern), do: true
-  def covers?(%__MODULE__{}, _pattern), do: false
+  @doc """
+  Whether this allowance covers a use with this pattern at `now`. One past
+  its `until` covers nothing: the clock decides, not a timer, so an
+  allowance also ends across a restart or a suspend.
+  """
+  @spec covers?(t(), String.t(), DateTime.t()) :: boolean()
+  def covers?(%__MODULE__{} = allowance, pattern, now \\ DateTime.utc_now()) do
+    not ended?(allowance, now) and allowance.pattern in [:all, pattern]
+  end
+
+  @doc "Whether the allowance's time has run out at `now`."
+  @spec ended?(t(), DateTime.t()) :: boolean()
+  def ended?(allowance, now \\ DateTime.utc_now())
+  def ended?(%__MODULE__{until: nil}, _now), do: false
+  def ended?(%__MODULE__{until: until}, now), do: DateTime.compare(now, until) != :lt
 
   @doc false
   def upgrade(%{} = saved), do: struct(__MODULE__, Map.delete(saved, :__struct__))

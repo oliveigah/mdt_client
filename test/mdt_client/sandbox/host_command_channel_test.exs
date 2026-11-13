@@ -39,9 +39,21 @@ defmodule MDTClient.Sandbox.HostCommandChannelTest do
     File.chmod!(Path.join(bin, "socat"), 0o755)
     on_exit(fn -> File.rm_rf!(base) end)
 
-    "commands"
-    |> MDTClient.VaultHelpers.unlocked_identity()
-    |> Map.merge(%{bin: bin, project: project})
+    context =
+      "commands"
+      |> MDTClient.VaultHelpers.unlocked_identity()
+      |> Map.merge(%{bin: bin, project: project})
+
+    # Commands go through a command grant: here one that takes any text.
+    {:ok, grant} =
+      Sandbox.create_grant(context.username, %{
+        "kind" => "command",
+        "name" => "shell",
+        "purpose" => "Run commands on this machine"
+      })
+
+    {:ok, _} = Sandbox.turn_on(context.username, grant.id, :until_off, :ask)
+    context
   end
 
   defp mdt(context, args, opts \\ []) do
@@ -118,7 +130,9 @@ defmodule MDTClient.Sandbox.HostCommandChannelTest do
 
     asking =
       Task.async(fn ->
-        mdt(context, ["run", "--reason", "read the input", "--", "cat input.txt; pwd; exit 7"],
+        mdt(
+          context,
+          ["run", "shell", "--reason", "read the input", "--", "cat input.txt; pwd; exit 7"],
           stderr: false
         )
       end)
@@ -145,7 +159,9 @@ defmodule MDTClient.Sandbox.HostCommandChannelTest do
        context do
     asking =
       Task.async(fn ->
-        mdt(context, ["run", "--reason", "r", "printf", "%s|", "a b", "c;d", "$HOME"],
+        mdt(
+          context,
+          ["run", "shell", "--reason", "r", "--", "printf", "%s|", "a b", "c;d", "$HOME"],
           stderr: false
         )
       end)
@@ -155,7 +171,9 @@ defmodule MDTClient.Sandbox.HostCommandChannelTest do
     assert {"a b|c;d|$HOME|", 0} = Task.await(asking, 10_000)
 
     asking =
-      Task.async(fn -> mdt(context, ["run", "--reason", "r"], input: "echo one\necho two\n") end)
+      Task.async(fn ->
+        mdt(context, ["run", "shell", "--reason", "r"], input: "echo one\necho two\n")
+      end)
 
     approval = command(context.username)
     assert approval.script == "echo one\necho two"
@@ -165,7 +183,9 @@ defmodule MDTClient.Sandbox.HostCommandChannelTest do
     # Output keeps its trailing newlines, or their absence.
     asking =
       Task.async(fn ->
-        mdt(context, ["run", "--reason", "r", "--", "printf 'x\\n\\n\\n'"], stderr: false)
+        mdt(context, ["run", "shell", "--reason", "r", "--", "printf 'x\\n\\n\\n'"],
+          stderr: false
+        )
       end)
 
     approval = command(context.username)
@@ -175,7 +195,9 @@ defmodule MDTClient.Sandbox.HostCommandChannelTest do
 
   test "outside a share it runs in the home folder", context do
     asking =
-      Task.async(fn -> mdt(context, ["run", "--reason", "r", "--", "pwd"], stderr: false) end)
+      Task.async(fn ->
+        mdt(context, ["run", "shell", "--reason", "r", "--", "pwd"], stderr: false)
+      end)
 
     approval = command(context.username)
     assert approval.dir == System.user_home!()
@@ -185,7 +207,9 @@ defmodule MDTClient.Sandbox.HostCommandChannelTest do
   end
 
   test "the output can wait for you, who send it or keep it", context do
-    {output, 120} = mdt(context, ["run", "--reason", "r", "--wait", "0", "--", "echo secret"])
+    {output, 120} =
+      mdt(context, ["run", "shell", "--reason", "r", "--wait", "0", "--", "echo secret"])
+
     [_, id] = Regex.run(~r/mdt wait (run-\S+)/, output)
 
     :ok = Sandbox.decide(context.username, id, {:run, :review})
@@ -204,7 +228,9 @@ defmodule MDTClient.Sandbox.HostCommandChannelTest do
 
     # Kept: the agent hears it ran, not what it printed.
     asking =
-      Task.async(fn -> mdt(context, ["run", "--reason", "r", "--", "echo hidden; exit 3"]) end)
+      Task.async(fn ->
+        mdt(context, ["run", "shell", "--reason", "r", "--", "echo hidden; exit 3"])
+      end)
 
     approval = command(context.username)
     :ok = Sandbox.decide(context.username, approval.id, {:run, :review})
@@ -218,7 +244,10 @@ defmodule MDTClient.Sandbox.HostCommandChannelTest do
   test "an output nobody releases is kept; the first wait's timer doesn't end the second",
        context do
     server = MDTClient.Vault.Store.whereis(MDTClient.Sandbox.Server, context.username)
-    {_, 120} = mdt(context, ["run", "--reason", "r", "--wait", "0", "--", "echo private"])
+
+    {_, 120} =
+      mdt(context, ["run", "shell", "--reason", "r", "--wait", "0", "--", "echo private"])
+
     asked = command(context.username)
     :ok = Sandbox.decide(context.username, asked.id, {:run, :review})
     card = output_card(context.username)
@@ -240,7 +269,9 @@ defmodule MDTClient.Sandbox.HostCommandChannelTest do
     marker = Path.join(context.project, "ran")
 
     asking =
-      Task.async(fn -> mdt(context, ["run", "--reason", "r", "--", "touch #{marker}"]) end)
+      Task.async(fn ->
+        mdt(context, ["run", "shell", "--reason", "r", "--", "touch #{marker}"])
+      end)
 
     approval = command(context.username)
     :ok = Sandbox.decide(context.username, approval.id, :decline)
@@ -251,7 +282,7 @@ defmodule MDTClient.Sandbox.HostCommandChannelTest do
   end
 
   test "commands accept only their own decisions", context do
-    {_, 120} = mdt(context, ["run", "--reason", "r", "--wait", "0", "--", "true"])
+    {_, 120} = mdt(context, ["run", "shell", "--reason", "r", "--wait", "0", "--", "true"])
     approval = command(context.username)
 
     for decision <- [
@@ -266,11 +297,22 @@ defmodule MDTClient.Sandbox.HostCommandChannelTest do
   end
 
   test "the same command asked again joins the waiting one", context do
-    {_, 120} = mdt(context, ["run", "--reason", "r", "--wait", "0", "--", "date"])
-    {_, 120} = mdt(context, ["run", "--reason", "again", "--wait", "0", "--", "date"])
+    {_, 120} = mdt(context, ["run", "shell", "--reason", "r", "--wait", "0", "--", "date"])
+    {_, 120} = mdt(context, ["run", "shell", "--reason", "again", "--wait", "0", "--", "date"])
 
     {_, 120} =
-      mdt(context, ["run", "--reason", "r", "--wait", "0", "--timeout", "5", "--", "date"])
+      mdt(context, [
+        "run",
+        "shell",
+        "--reason",
+        "r",
+        "--wait",
+        "0",
+        "--timeout",
+        "5",
+        "--",
+        "date"
+      ])
 
     waiting = Sandbox.snapshot(context.username).waiting
     assert [%{retries: 1}, %{retries: 0}] = Enum.sort_by(waiting, & &1.retries, :desc)
@@ -279,7 +321,16 @@ defmodule MDTClient.Sandbox.HostCommandChannelTest do
   test "a running command can be stopped", context do
     asking =
       Task.async(fn ->
-        mdt(context, ["run", "--reason", "r", "--wait", "30", "--", "echo started; sleep 60"])
+        mdt(context, [
+          "run",
+          "shell",
+          "--reason",
+          "r",
+          "--wait",
+          "30",
+          "--",
+          "echo started; sleep 60"
+        ])
       end)
 
     approval = command(context.username)
@@ -304,26 +355,33 @@ defmodule MDTClient.Sandbox.HostCommandChannelTest do
   end
 
   test "wrong asks and an unreachable MDT have their own statuses", context do
-    assert {output, 122} = mdt(context, ["run", "--", "true"])
+    assert {output, 122} = mdt(context, ["run", "shell", "--", "true"])
     assert output =~ "Say why"
-    assert {_, 122} = mdt(context, ["run", "--reason", "r", "--timeout", "0", "--", "true"])
-    assert {_, 122} = mdt(context, ["run", "--reason", "r", "--timeout", "x", "--", "true"])
-    assert {_, 122} = mdt(context, ["run", "--reason", "r", "--bogus", "--", "true"])
+
+    assert {_, 122} =
+             mdt(context, ["run", "shell", "--reason", "r", "--timeout", "0", "--", "true"])
+
+    assert {_, 122} =
+             mdt(context, ["run", "shell", "--reason", "r", "--timeout", "x", "--", "true"])
+
+    assert {_, 122} = mdt(context, ["run", "shell", "--reason", "r", "--bogus", "--", "true"])
 
     assert {output, 122} =
-             mdt(context, ["run", "--reason", "r", "--", String.duplicate("x", 16_385)])
+             mdt(context, ["run", "shell", "--reason", "r", "--", String.duplicate("x", 16_385)])
 
     assert output =~ "16 KiB"
 
     unreachable = %{context | username: "nobody-#{System.unique_integer([:positive])}"}
-    assert {_, 123} = mdt(unreachable, ["run", "--reason", "r", "--", "true"])
+    assert {_, 123} = mdt(unreachable, ["run", "shell", "--reason", "r", "--", "true"])
     assert {_, 123} = mdt(unreachable, ["wait", "run-abc"])
     assert {_, 4} = mdt(unreachable, ["wait", "ask-abc"])
   end
 
   test "status dumps and crash reports never carry a command's output", context do
     asking =
-      Task.async(fn -> mdt(context, ["run", "--reason", "r", "--", "echo dump-$((6 * 7))"]) end)
+      Task.async(fn ->
+        mdt(context, ["run", "shell", "--reason", "r", "--", "echo dump-$((6 * 7))"])
+      end)
 
     approval = command(context.username)
     :ok = Sandbox.decide(context.username, approval.id, {:run, :send})
@@ -337,7 +395,7 @@ defmodule MDTClient.Sandbox.HostCommandChannelTest do
   test "the activity log says what happened, never the output", context do
     asking =
       Task.async(fn ->
-        mdt(context, ["run", "--reason", "r", "--", "echo top-secret-$((40 + 2))"])
+        mdt(context, ["run", "shell", "--reason", "r", "--", "echo top-secret-$((40 + 2))"])
       end)
 
     approval = command(context.username)
@@ -349,5 +407,107 @@ defmodule MDTClient.Sandbox.HostCommandChannelTest do
     assert Enum.any?(summaries, &(&1 =~ "you ran it, output to the agent"))
     assert Enum.any?(summaries, &(&1 =~ "exit 0"))
     refute Enum.any?(summaries, &(&1 =~ "top-secret-42"))
+  end
+
+  describe "a command grant" do
+    test "is what lets an agent ask: with none, nothing runs and the agent is told how to ask",
+         context do
+      Sandbox.delete_grant(context.username, "shell")
+      assert Sandbox.snapshot(context.username).grants == []
+
+      assert {output, 122} = mdt(context, ["run", "shell", "--reason", "r", "--", "true"])
+      assert output =~ "No grant lets you run a command"
+      assert output =~ "mdt request --need"
+      assert Sandbox.snapshot(context.username).waiting == []
+    end
+
+    test "must be named, exist and be on", context do
+      assert {output, 122} = mdt(context, ["run", "--reason", "r", "--", "true"])
+      assert output =~ "Name the command grant" and output =~ "shell"
+
+      assert {output, 122} = mdt(context, ["run", "nope", "--reason", "r", "--", "true"])
+      assert output =~ "No command grant by that name"
+
+      assert {output, 122} = mdt(context, ["run", "shell", "extra", "--reason", "r"])
+      assert output =~ "put the command after --"
+
+      {:ok, _} = Sandbox.turn_off(context.username, "shell")
+      assert {output, 122} = mdt(context, ["run", "shell", "--reason", "r", "--", "true"])
+      assert output =~ "shell is off" and output =~ "mdt request shell"
+      assert Sandbox.snapshot(context.username).waiting == []
+    end
+
+    test "never lets a run through unasked", context do
+      assert Sandbox.allow_all(context.username, "shell", 10) == {:error, :every_run_asks}
+      {:ok, _} = Sandbox.turn_off(context.username, "shell")
+      {:ok, grant} = Sandbox.turn_on(context.username, "shell", 60, :all)
+      assert grant.allowances == []
+
+      asking =
+        Task.async(fn -> mdt(context, ["run", "shell", "--reason", "r", "--", "echo hi"]) end)
+
+      approval = command(context.username)
+      assert approval.grant_id == "shell"
+      assert {"Grant", "shell"} in approval.facts
+      assert {"Script", "The agent's, exactly as shown"} in approval.facts
+      :ok = Sandbox.decide(context.username, approval.id, :decline)
+      assert {_, 121} = Task.await(asking)
+    end
+
+    test "with a script of yours runs only that, in its folder, and takes no text", context do
+      File.write!(Path.join(context.project, "marker.txt"), "in the grant's folder\n")
+
+      {:ok, grant} =
+        Sandbox.create_grant(context.username, %{
+          "kind" => "command",
+          "name" => "show",
+          "purpose" => "Show the marker",
+          "script" => "cat marker.txt; pwd",
+          "dir" => context.project
+        })
+
+      assert %{script: "cat marker.txt; pwd", kind: :command} = grant
+      {:ok, _} = Sandbox.turn_on(context.username, "show", :until_off, :ask)
+
+      assert {output, 122} = mdt(context, ["run", "show", "--reason", "r", "--", "rm -rf /"])
+      assert output =~ "runs the user's own script: send no command"
+
+      # Asked from another folder: it still runs where you said.
+      asking =
+        Task.async(fn ->
+          mdt(context, ["run", "show", "--reason", "see it"],
+            cd: System.tmp_dir!(),
+            stderr: false
+          )
+        end)
+
+      approval = command(context.username)
+      assert approval.script == "cat marker.txt; pwd"
+      assert {"Script", "Yours, as set on the grant"} in approval.facts
+      assert {"Where that is", "The folder you set on the grant."} in approval.facts
+      :ok = Sandbox.decide(context.username, approval.id, {:run, :send})
+      assert {output, 0} = Task.await(asking)
+      assert output =~ "in the grant's folder"
+      assert output =~ Path.basename(context.project)
+    end
+
+    test "with a script needs a folder that exists", context do
+      assert {:error, %{dir: "Say which folder your script runs in."}} =
+               Sandbox.create_grant(context.username, %{
+                 "kind" => "command",
+                 "name" => "deploy",
+                 "purpose" => "Deploy",
+                 "script" => "./deploy.sh"
+               })
+
+      assert {:error, %{dir: "That folder does not exist on this machine."}} =
+               Sandbox.create_grant(context.username, %{
+                 "kind" => "command",
+                 "name" => "deploy",
+                 "purpose" => "Deploy",
+                 "script" => "./deploy.sh",
+                 "dir" => "/no/such/folder"
+               })
+    end
   end
 end

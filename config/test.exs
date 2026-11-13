@@ -13,10 +13,10 @@ config :mdt_client,
   # Tests add remotes that do not exist; the ones about fetching turn it on.
   git_auto_fetch: false
 
-# The sandbox never calls msb in tests, and its proxy takes any free port.
+# The sandbox never calls msb in tests, and its sockets sit in a folder of
+# their own.
 config :mdt_client, MDTClient.Sandbox.Server,
   external: false,
-  proxy_port: 0,
   channel_dir: Path.join(System.tmp_dir!(), "mdt-test-channels")
 
 # A runtime built into priv/microsandbox stays out of tests; the ones about

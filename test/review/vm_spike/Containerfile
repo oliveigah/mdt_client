@@ -1,0 +1,4 @@
+# Guest userland for the spike: a stock distro image plus the few tools the
+# checks use. No msb, no agent of MDT's.
+FROM docker.io/library/alpine:3.22
+RUN apk add --no-cache python3 git curl iproute2 nftables ca-certificates

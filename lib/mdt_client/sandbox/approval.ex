@@ -20,8 +20,10 @@ defmodule MDTClient.Sandbox.Approval do
   `facts` are what MDT worked out itself. `claims` are text the agent wrote,
   such as commit messages; they are shown apart and never taken as facts.
   `hints` (commands only) are what MDT guessed from a command's text, shown
-  as hints. `pattern` is what "allow similar" would let through, or what a
-  second identical ask joins. `request` is the request exactly as MDT
+  as hints. `pattern` is what "allow similar" would let through. `join` is
+  what a second ask must share to wait on this approval instead of getting
+  one of its own: for a request, a digest of everything MDT read of it, so
+  only a client's retry of the same request joins. `request` is the request exactly as MDT
   received it, kept in memory only, for the full view and copying
   (`MDTClient.Sandbox.RequestView`).
   """
@@ -36,6 +38,7 @@ defmodule MDTClient.Sandbox.Approval do
     :host,
     :path,
     :pattern,
+    :join,
     :request,
     :agent,
     :thread,
@@ -204,6 +207,7 @@ defmodule MDTClient.Sandbox.Approval do
       text when is_binary(text) ->
         text
         |> String.replace(~r/[\x00-\x1f\x7f]+/, " ")
+        |> MDTClient.Sandbox.Shown.text()
         |> String.trim()
         |> String.slice(0, limit)
         |> case do

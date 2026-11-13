@@ -2,16 +2,18 @@ defmodule MDTClient.Sandbox.Egress do
   @moduledoc """
   The proxy every byte the VM sends goes through.
 
-  The VM is created with `--proxy http://127.0.0.1:<port>`, so microsandbox
+  The VM is created with `--proxy http://127.0.0.1:3128`, a port that exists
+  only in the VM's bubble, where the relay joins it to this proxy's Unix
+  socket (`proxy.sock`, see `MDTClient.Sandbox.Sockets`). So microsandbox
   opens an HTTP CONNECT here for each TCP connection the VM makes; the VM
-  cannot opt out the way it could ignore `HTTPS_PROXY`. When this is not
-  listening, the VM has no internet.
+  cannot opt out the way it could ignore `HTTPS_PROXY`, and the bubble has
+  no network of its own to go around it. When this is not listening, the VM
+  has no internet. No other program reaches it through a port.
 
-  One listener per unlocked identity, on the port its settings name. Each
-  connection runs in its own process under
-  `MDTClient.Sandbox.TaskSupervisor`; see `MDTClient.Sandbox.Egress.Connection`.
-  A port it cannot bind is reported to the sandbox and retried, rather than
-  failing the unlock.
+  One listener per unlocked identity. Each connection runs in its own
+  process under `MDTClient.Sandbox.TaskSupervisor`; see
+  `MDTClient.Sandbox.Egress.Connection`. A socket it cannot bind is reported
+  to the sandbox and retried, rather than failing the unlock.
   """
 
   use GenServer
@@ -20,6 +22,7 @@ defmodule MDTClient.Sandbox.Egress do
 
   alias MDTClient.Sandbox.Egress.Connection
   alias MDTClient.Sandbox.Server
+  alias MDTClient.Sandbox.Sockets
   alias MDTClient.Vault.Store
 
   @retry_after 5_000
@@ -35,13 +38,9 @@ defmodule MDTClient.Sandbox.Egress do
     %{id: {__MODULE__, Keyword.fetch!(opts, :username)}, start: {__MODULE__, :start_link, [opts]}}
   end
 
-  @doc "Listens again, on the port the settings name now."
-  def rebind(username) do
-    case Store.whereis(__MODULE__, username) do
-      nil -> :ok
-      pid -> GenServer.cast(pid, :rebind)
-    end
-  end
+  @doc "The Unix socket one identity's proxy listens on (`MDTClient.Sandbox.Sockets`)."
+  @spec path(String.t()) :: Path.t()
+  def path(username), do: Sockets.path(username, "proxy.sock")
 
   @doc "Asks the proxy to tell the sandbox again whether it is listening."
   def report_again(username) do
@@ -55,7 +54,7 @@ defmodule MDTClient.Sandbox.Egress do
   def init(username) do
     Process.flag(:trap_exit, true)
     send(self(), :listen)
-    {:ok, %{username: username, socket: nil, acceptor: nil, port: nil}}
+    {:ok, %{username: username, socket: nil, acceptor: nil}}
   end
 
   # A retry scheduled before a rebind succeeded finds the socket open: it
@@ -65,29 +64,25 @@ defmodule MDTClient.Sandbox.Egress do
     do: {:noreply, state}
 
   def handle_info(:listen, state) do
-    port = Server.call(state.username, :proxy_port)
+    Sockets.ensure!(state.username)
+    path = path(state.username)
+    # A socket file left by an MDT that crashed would refuse the bind.
+    File.rm(path)
 
-    case :gen_tcp.listen(port, [
-           :binary,
-           ip: {127, 0, 0, 1},
-           active: false,
-           reuseaddr: true,
-           backlog: 512,
-           nodelay: true
-         ]) do
+    case :gen_tcp.listen(0, [:binary, ifaddr: {:local, path}, active: false, backlog: 512]) do
       {:ok, socket} ->
+        File.chmod(path, 0o600)
         username = state.username
         options = Application.get_env(:mdt_client, __MODULE__, [])
         acceptor = spawn_link(fn -> accept(socket, username, options) end)
-        {:ok, bound} = :inet.port(socket)
-        report(state.username, %{listening?: true, error: nil, port: bound})
-        {:noreply, %{state | socket: socket, acceptor: acceptor, port: port}}
+        report(state.username, %{listening?: true, error: nil, path: path})
+        {:noreply, %{state | socket: socket, acceptor: acceptor}}
 
       {:error, reason} ->
         report(state.username, %{
           listening?: false,
-          error: "Could not listen on 127.0.0.1:#{port}: #{:inet.format_error(reason)}",
-          port: port
+          error: "Could not listen on #{path}: #{:inet.format_error(reason)}",
+          path: path
         })
 
         Process.send_after(self(), :listen, @retry_after)
@@ -105,20 +100,14 @@ defmodule MDTClient.Sandbox.Egress do
   def handle_cast(:report, %{socket: nil} = state), do: {:noreply, state}
 
   def handle_cast(:report, state) do
-    {:ok, bound} = :inet.port(state.socket)
-    report(state.username, %{listening?: true, error: nil, port: bound})
-    {:noreply, state}
-  end
-
-  def handle_cast(:rebind, state) do
-    state = close(state)
-    send(self(), :listen)
+    report(state.username, %{listening?: true, error: nil, path: path(state.username)})
     {:noreply, state}
   end
 
   @impl true
   def terminate(_reason, state) do
     close(state)
+    File.rm(path(state.username))
     :ok
   end
 

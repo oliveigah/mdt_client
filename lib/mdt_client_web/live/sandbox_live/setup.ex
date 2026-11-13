@@ -23,6 +23,20 @@ defmodule MDTClientWeb.SandboxLive.Setup do
       </:help>
     </.page_header>
 
+    <div
+      :if={@tools.needs != []}
+      id="setup-needs"
+      class="mb-4 rounded-lg border border-bad/40 bg-bad-soft/30 px-4 py-3 text-xs leading-5 text-bad"
+    >
+      <p class="flex items-center gap-1.5 font-medium">
+        <.icon name="hero-exclamation-triangle-micro" class="size-3.5" />
+        This machine can't run the VM yet
+      </p>
+      <ul class="mt-1 list-disc space-y-0.5 pl-5">
+        <li :for={need <- @tools.needs}>{need}</li>
+      </ul>
+    </div>
+
     <ol id="setup-steps" class="mb-6 grid gap-3 md:grid-cols-3">
       <.step
         id="setup-step-image"

@@ -1,9 +1,9 @@
 # syntax=docker/dockerfile:1
 
 # MDT ships its own microsandbox runtime: msb from a pinned commit of MDT's
-# fork, and its libkrunfw (see scripts/build-microsandbox.sh). It links only glibc, so
-# it is built once, on the older glibc of the two package targets, and both
-# packages carry the same files.
+# fork, its libkrunfw (see scripts/build-microsandbox.sh), and MDT's relay.
+# They link only glibc, so they are built once, on the older glibc of the two
+# package targets, and both packages carry the same files.
 FROM docker.io/library/ubuntu:22.04 AS microsandbox-build
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -26,6 +26,13 @@ RUN --mount=type=cache,id=mdt-cargo-registry,target=/root/.cargo/registry \
     --mount=type=cache,id=mdt-microsandbox-target-${TARGETARCH},target=/src/tmp/microsandbox-target \
     --mount=type=cache,id=mdt-microsandbox-downloads,target=/src/tmp/microsandbox-downloads \
     bash scripts/build-microsandbox.sh /out/microsandbox
+
+# MDT's relay, the first process in the bubble the VM runs in, goes beside
+# msb in the same runtime folder (see scripts/build-relay.sh).
+COPY scripts/build-relay.sh ./scripts/
+COPY native/mdt_relay ./native/mdt_relay
+RUN --mount=type=cache,id=mdt-relay-target-${TARGETARCH},target=/src/native/mdt_relay/target \
+    bash scripts/build-relay.sh /out/microsandbox
 
 
 # Releases include Erlang native libraries. Build each package on the distro
@@ -73,6 +80,9 @@ COPY assets ./assets
 COPY priv ./priv
 COPY --from=microsandbox-build /out/microsandbox ./priv/microsandbox
 COPY src-tauri ./src-tauri
+# What the deb runs as root when it is installed and removed (AppArmor on
+# Ubuntu: see scripts/deb/postinst.sh).
+COPY scripts/deb ./scripts/deb
 COPY .gitignore ./
 
 RUN --mount=type=cache,id=mdt-cargo-registry,target=/root/.cargo/registry \

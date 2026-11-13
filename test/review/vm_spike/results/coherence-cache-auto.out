@@ -1,0 +1,19 @@
+net=vsock cache=auto confine=False
+  QEMU start to the VM's agent answering over vsock (s)      1.46
+  guest kernel                                               7.2.15-200.fc44.x86_64
+
+Shared folder: the host replaces a file, the VM reads it at once
+  200 replacements: new content / old content / error        0 / 200 / 0
+  longest the old content was served (s)                     1.04
+  100 host `git add`s, VM `git ls-files`: new / an older index / broken 0 / 100 / 0
+  the VM's count 1.2 s after the last one (164 expected)     164
+  VM `git status` lines, `git fsck`                          100
+  inotify in the VM for a file the host creates              no event
+
+File work in a shared folder (s in the VM / s on the host)
+  git status, 10,000 files                                   1.00 / 0.02
+  git status again                                           0.00 / 0.03
+  read every file (tar to /dev/null)                         7.00 / 0.12
+  write 1 GiB and fsync                                      8.00 / 0.79
+  read that 1 GiB back                                       2.00 / 0.34
+  virtiofsd CPU for all of it (s), over wall (s)             1.58 / 18.9

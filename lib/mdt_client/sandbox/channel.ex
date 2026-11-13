@@ -46,8 +46,17 @@ defmodule MDTClient.Sandbox.Channel do
 
   require Logger
 
-  alias MDTClient.Accounts
-  alias MDTClient.Sandbox.{Approval, Grant, HostCommand, Instructions, Server}
+  alias MDTClient.Sandbox.{
+    Approval,
+    Grant,
+    HostCommand,
+    Instructions,
+    Projects,
+    Server,
+    Shown,
+    Sockets
+  }
+
   alias MDTClient.Vault.Store
 
   @port 5000
@@ -65,31 +74,9 @@ defmodule MDTClient.Sandbox.Channel do
   @spec port() :: pos_integer()
   def port, do: @port
 
-  @doc """
-  The host socket of one identity's channel. Unix socket paths are short
-  (108 bytes), so it sits in the runtime directory rather than the
-  identity's folder, named by the start of the identity's id.
-  """
+  @doc "The host socket of one identity's channel (`MDTClient.Sandbox.Sockets`)."
   @spec socket_path(String.t()) :: Path.t()
-  def socket_path(username) do
-    Path.join(
-      runtime_dir(),
-      "mdt-sandbox-" <> String.slice(Accounts.id(username), 0, 12) <> ".sock"
-    )
-  end
-
-  # Where MDT keeps its sockets: `$XDG_RUNTIME_DIR/mdt`, or a folder in the
-  # temporary directory without one. Tests set `:channel_dir`.
-  defp runtime_dir do
-    config = Application.get_env(:mdt_client, Server, [])
-
-    Keyword.get_lazy(config, :channel_dir, fn ->
-      case System.get_env("XDG_RUNTIME_DIR") do
-        runtime when is_binary(runtime) and runtime != "" -> Path.join(runtime, "mdt")
-        _ -> Path.join(System.tmp_dir!(), "mdt-#{System.get_env("USER", "user")}")
-      end
-    end)
-  end
+  def socket_path(username), do: Sockets.path(username, "channel.sock")
 
   @doc "Starts the channel of one unlocked identity."
   def start_link(opts) do
@@ -105,9 +92,8 @@ defmodule MDTClient.Sandbox.Channel do
   @impl true
   def init(username) do
     Process.flag(:trap_exit, true)
+    Sockets.ensure!(username)
     path = socket_path(username)
-    File.mkdir_p!(Path.dirname(path))
-    File.chmod(Path.dirname(path), 0o700)
     File.rm(path)
 
     case :gen_tcp.listen(0, [
@@ -180,14 +166,8 @@ defmodule MDTClient.Sandbox.Channel do
   def serve(client, username) do
     ask =
       case :gen_tcp.recv(client, 0, @read_timeout) do
-        {:ok, line} ->
-          case Jason.decode(line) do
-            {:ok, %{"command" => command} = ask} when is_binary(command) -> ask
-            _ -> :unreadable
-          end
-
-        {:error, _reason} ->
-          :none
+        {:ok, line} -> read(line)
+        {:error, _reason} -> :none
       end
 
     reply =
@@ -207,10 +187,67 @@ defmodule MDTClient.Sandbox.Channel do
     :gen_tcp.close(client)
   end
 
+  @doc """
+  Reads one line from the VM as an ask, or `:unreadable`.
+
+  The line is the VM's, so nothing in it is taken on trust. An ask carries
+  text, whole numbers and yes or no; anything else in it (a list, a map, a
+  fraction) is dropped. Its text is made to show all it holds
+  (`MDTClient.Sandbox.Shown`), since most of it ends on an approval. A
+  script is the exception: it runs as it was sent or not at all, so it is
+  left as it is here and checked in `MDTClient.Sandbox.HostCommand`.
+  """
+  @spec read(binary()) :: map() | :unreadable
+  def read(line) do
+    case Jason.decode(line) do
+      {:ok, %{"command" => command} = ask} when is_binary(command) ->
+        Map.new(ask, fn
+          {"script", value} when is_binary(value) -> {"script", value}
+          {key, value} when is_binary(value) -> {key, Shown.text(value)}
+          {key, value} when is_integer(value) or is_boolean(value) -> {key, value}
+          {key, _other} -> {key, nil}
+        end)
+
+      _other ->
+        :unreadable
+    end
+  end
+
   # The output ends with a dot, so a shell reading it with `$(...)` keeps
   # its trailing newlines; the mdt command takes the dot off.
   defp encode({{:ran, status}, note, output}), do: "ran #{status}\n#{note}\n#{output}."
   defp encode({status, text}), do: "#{status}\n#{String.trim_trailing(text)}\n"
+
+  defp sync_words(project, result) do
+    branch = result.branch
+
+    copy =
+      case result.followed do
+        :updated -> "/work/#{project.name} was brought up to it."
+        :current -> "/work/#{project.name} was up to date already."
+        {:left, why} -> "/work/#{project.name} was left alone: #{why}"
+        :none -> "The user is on no branch, so /work/#{project.name} follows nothing."
+      end
+
+    "Synced #{project.name}. The user's branches, as committed, are host/…" <>
+      if(branch, do: " (they are on #{branch}: host/#{branch}).", else: ".") <> "\n" <> copy
+  end
+
+  defp handoff_words(handoff) do
+    state =
+      case handoff.status do
+        :waiting -> "waiting for the user"
+        :brought -> "taken: the user brought it into their working tree"
+        :sent_back -> "sent back"
+        :declined -> "declined"
+        :replaced -> "replaced by a later handoff of the same branch"
+      end
+
+    note = if handoff.note in [nil, ""], do: "", else: "\n  The user's note: #{handoff.note}"
+
+    "#{handoff.id}  #{state}\n  #{handoff.title} (#{handoff.branch} at #{String.slice(handoff.commit, 0, 10)})" <>
+      note
+  end
 
   defp run?(%{"command" => "run"}), do: true
   defp run?(%{"command" => "wait", "id" => "run-" <> _}), do: true
@@ -229,8 +266,44 @@ defmodule MDTClient.Sandbox.Channel do
 
   def answer("host", _ask, username), do: {0, Server.call(username, :host_text)}
 
+  # A project's sync, asked from a folder of it in the VM: your committed
+  # branches go in. Nothing changes on your machine, so nothing is asked.
+  def answer("sync", ask, username) do
+    case Projects.sync_from(username, ask["cwd"]) do
+      {:ok, project, result} -> {0, sync_words(project, result)}
+      {:error, reason} -> {1, Projects.explain(reason)}
+    end
+  end
+
+  def answer("handoff", ask, username) do
+    case Projects.hand_off(username, %{
+           cwd: ask["cwd"],
+           title: ask["title"],
+           body: ask["body"],
+           agent: ask["agent"]
+         }) do
+      {:ok, handoff} ->
+        {0,
+         "Handed off as #{handoff.id}: the branch #{handoff.branch} at #{String.slice(handoff.commit, 0, 10)}.\n" <>
+           "The user reviews it whole. Later commits are not part of it: hand off again to replace it.\n" <>
+           "See what they decide with: mdt handoffs"}
+
+      {:error, reason} ->
+        {1, Projects.explain(reason)}
+    end
+  end
+
+  def answer("handoffs", ask, username) do
+    case Projects.handoffs_from(username, ask["cwd"]) do
+      {:ok, project, []} -> {0, "No handoffs in #{project.name} yet."}
+      {:ok, _project, handoffs} -> {0, Enum.map_join(handoffs, "\n\n", &handoff_words/1)}
+      {:error, reason} -> {1, Projects.explain(reason)}
+    end
+  end
+
   def answer("run", ask, username) do
     request = %{
+      grant: ask["grant"],
       script: ask["script"],
       dir: ask["dir"],
       timeout: ask["timeout"],
@@ -387,6 +460,7 @@ defmodule MDTClient.Sandbox.Channel do
     do: "until #{Calendar.strftime(at, "%H:%M")} UTC"
 
   defp uses(%Grant{kind: :file}), do: "The file is there while it stays on."
+  defp uses(%Grant{kind: :command}), do: "Each run still waits for the user's approval."
 
   defp uses(%Grant{} = grant) do
     if Enum.any?(grant.allowances, &(&1.pattern == :all)),
@@ -424,8 +498,31 @@ defmodule MDTClient.Sandbox.Channel do
     do:
       "The script is over #{div(HostCommand.max_script(), 1024)} KiB. Put the long part in a file in a shared folder, and say so in the reason."
 
+  defp run_refusal({:hidden, what}),
+    do:
+      "The script has characters that don't show (#{Enum.join(what, ", ")}), so the user can't read what would run. Send it without them: write a control or invisible character as an escape, such as printf '\\033'."
+
   defp run_refusal(:bad_timeout),
     do: "--timeout is from 1 to #{elem(HostCommand.timeouts(), 1)} seconds."
+
+  defp run_refusal(:no_command_grant),
+    do:
+      ~s[No grant lets you run a command on the user's machine. If a job needs one, describe it: mdt request --need "run ... on your machine" --reason "why"]
+
+  defp run_refusal({:name_a_grant, ids}),
+    do:
+      "Name the command grant: mdt run GRANT --reason ... The command grants: #{Enum.join(ids, ", ")}."
+
+  defp run_refusal({:no_such_grant, ids}),
+    do:
+      "No command grant by that name. The command grants: #{Enum.join(ids, ", ")}. See: mdt grants"
+
+  defp run_refusal({:grant_off, id}),
+    do: ~s[#{id} is off. Ask for it with: mdt request #{id} --reason "..."]
+
+  defp run_refusal({:fixed_script, id}),
+    do:
+      ~s[#{id} runs the user's own script: send no command. Run it with: mdt run #{id} --reason "..."]
 
   defp run_refusal(:too_many),
     do: "Ten commands already wait for the user. Wait for their answers first (mdt wait ID)."

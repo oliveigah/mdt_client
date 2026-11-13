@@ -1,0 +1,41 @@
+profile mdt-bwrap loaded
+    its / holds: bin dev home lib lib64 mdt proc run sbin tmp usr
+  FAIL  no /home in its view
+  ok    no /run/user, no docker socket
+  ok    its network cards: lo
+  ok    no TCP socket of its own in the host's network
+
+With the way out closed (proxy socket removed):
+  ok    no MDT, no internet: wget: can't connect to remote host (172.66.147.243): Connection refused |  | done
+
+The relay itself, read from /proc on the host:
+    Uid: 1000 1000 1000 1000
+    Groups: 1000
+    CapEff: 0000000000000000
+    NoNewPrivs: 1
+    Seccomp: 0
+  ok    no capability left, none to regain
+
+A second relay for the same VM
+  ok    refuses to start: the bubble ended: mdt-relay: a relay is already running for this VM
+  ok    the first one still answers: running
+
+2. 128 MiB from the host side into the VM, through msb, the relay and the socket
+  ok    download: 158 MiB/s (0.8 s)
+
+3. Stopped through control.sock, started again in a new bubble
+  ok    stop answered: stopped |   ✓ Stopped             confine-probe
+  ok    the bubble and the VM's process are gone
+  ok    control.sock is: down (FileNotFoundError)
+  ok    msb outside the bubble cannot boot it: error: sandbox still running: cannot start sandbox "confine-probe": previous runtime pid 26 is still alive
+  ok    nor can msb exec, which boots a stopped VM by itself: error: sandbox still running: cannot start sandbox "confine-probe": previous runtime pid 26 is still alive
+  ok    msb start in a new bubble: exit 0 in 1.3 s ✓ Started             confine-probe (1.2s)
+  ok    the disk kept its file; the VM has its address: kept-across-stop | 1
+
+4. The relay is killed outright, like a crash: the bubble's processes end with it
+  ok    the VM's process went with it
+  ok    msb start after that: exit 0 in 1.3 s ✓ Started             confine-probe (1.2s)
+  ok    the synced file survived: before-the-kill
+
+5. Recreated
+  ok    create --replace keeps the disk: kept-across-stop before-the-kill

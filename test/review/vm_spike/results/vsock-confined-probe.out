@@ -1,0 +1,8 @@
+net=vsock cache=auto confine=True
+  QEMU start to the VM's agent answering over vsock (s)      1.44
+  guest kernel                                               7.2.15-200.fc44.x86_64
+
+What the VM has
+  network interfaces in the VM                               dummy0 lo
+  PCI device classes (0x0200 would be a network card)        1 0x010000 1 0x010601 1 0x018000 1 0x060000 1 0x060100 1 0x060400 1 0x078000 1 0x0c0500
+  what QEMU's own sandbox sees (interfaces | / | /home)      lo | bin dev etc lib lib64 proc tmp usr var | ls: cannot access '/home': No such file or directory

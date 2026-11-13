@@ -25,23 +25,43 @@ mdt - ask MDT, the user's control panel, for access
   mdt host
       The user's machine: OS, architecture, shell, shared folders, tools.
 
-  mdt run --reason "why it must run on the user's machine" [--dir DIR] [--timeout 120] [--wait 60] [--] COMMAND [ARG...]
-  mdt run --reason "..." [options] <<'EOF'
+  mdt run GRANT --reason "why it must run on the user's machine" [--dir DIR] [--timeout 120] [--wait 60] [-- COMMAND [ARG...]]
+  mdt run GRANT --reason "..." [options] <<'EOF'
   script
   EOF
       Ask the user to run a command on their machine, as them, outside this
-      VM. Last resort: use a grant when one can do it. The user approves the
-      exact text, once. --dir defaults to the current directory; outside a
-      shared folder it runs in the user's home folder. --timeout is in
-      seconds (1 to 3600). One argument is a shell line as it is; several
-      are quoted and joined; none reads the script from stdin (16 KiB max).
+      VM, through a command grant (mdt grants lists them; there is none
+      until the user adds one). Last resort: use another grant when one can
+      do it. The user approves the exact text, once. A grant with the user's
+      own script runs that, in their folder: send no command. For the
+      others, --dir defaults to the current directory; outside a shared
+      folder it runs in the user's home folder. --timeout is in seconds (1
+      to 3600). After --, one argument is a shell line as it is and several
+      are quoted and joined; with none the script is read from stdin (16
+      KiB max).
 
   mdt wait ID [--wait 60]
       Keep waiting for the answer to an earlier ask or run.
 
+  mdt sync
+      In a project under /work: bring in the user's branches as they are
+      committed now. They arrive as host/BRANCH. The project's own folder
+      follows the user's branch while it is clean; your worktrees don't move.
+
+  mdt handoff --title "what this is" [--body FILE]
+      In a worktree of your own: hand its branch back to the user, like
+      opening a pull request. Everything must be committed. The user reviews
+      it whole and brings it into their working tree, or sends it back with
+      a note. --body takes the description from a file (- for stdin).
+
+  mdt handoffs
+      Your project's handoffs: waiting, taken, sent back (with the user's
+      note), declined.
+
 Exit status of grants, request and wait on an ask: 0 the grant is on, 1 the
 ask was wrong, 2 still waiting for the user, 3 declined or given up, 4 MDT
-isn't answering (locked or closed).
+isn't answering (locked or closed). Of sync, handoff and handoffs: 0 done,
+1 not done (the reason is printed), 4 MDT isn't answering.
 
 Exit status of run, and wait on a run: the command's own status when it ran
 and its output came back (124 if it hit its time limit). Otherwise, with a
@@ -224,12 +244,16 @@ command=${1:-help}
 wrong=1
 [ "$command" = run ] && wrong=122
 
-grant="" need="" reason="" minutes=60 wait=60 id="" dir="" timeout=120
+grant="" need="" reason="" minutes=60 wait=60 id="" dir="" timeout=120 title="" body=""
 words=()
 while [ $# -gt 0 ]; do
   case $1 in
     --reason) reason=${2-}; shift 2 || shift ;;
     --reason=*) reason=${1#*=}; shift ;;
+    --title) title=${2-}; shift 2 || shift ;;
+    --title=*) title=${1#*=}; shift ;;
+    --body) body=${2-}; shift 2 || shift ;;
+    --body=*) body=${1#*=}; shift ;;
     --need) need=${2-}; shift 2 || shift ;;
     --need=*) need=${1#*=}; shift ;;
     --minutes) minutes=$(number --minutes "${2-}" "$wrong") || exit "$wrong"; shift 2 || shift ;;
@@ -252,9 +276,13 @@ while [ $# -gt 0 ]; do
       ;;
     *)
       if [ "$command" = run ]; then
-        # The command starts here; options go before it.
-        words=("$@")
-        break
+        # The one word before -- is the command grant; the command comes
+        # after --, so a typo is never run as a command.
+        if [ -n "$grant" ]; then
+          echo "mdt: put the command after --: mdt run GRANT --reason \"...\" -- COMMAND" >&2
+          exit 122
+        fi
+        grant=$1
       elif [ "$command" = wait ]; then
         id=$1
       else
@@ -286,9 +314,11 @@ case $command in
     elif [ ${#words[@]} -gt 1 ]; then
       script=$(printf '%q ' "${words[@]}")
       script=${script% }
-    elif [ -t 0 ]; then
-      echo "mdt: give the command after --, or the script on stdin. See: mdt help" >&2
-      exit 122
+    elif [ -t 0 ] || ! read -r -t 0; then
+      # No command and nothing waiting on stdin: right for a grant that runs
+      # the user's own script. Stdin is only read when something is there,
+      # so an open pipe with nothing in it is never waited on.
+      script=""
     else
       script=$(cat)
     fi
@@ -300,7 +330,7 @@ case $command in
     identify
     [ -z "$dir" ] && dir=$PWD
     dir=$( (cd "$dir" 2>/dev/null && pwd -P) || printf '%s' "$dir")
-    send_run "{\"command\":\"run\",\"script\":$(json "$script"),\"dir\":$(json "$dir"),\"timeout\":$timeout,\"reason\":$(json "$reason"),\"wait\":$wait,$(identity)}"
+    send_run "{\"command\":\"run\",\"grant\":$(json "$grant"),\"script\":$(json "$script"),\"dir\":$(json "$dir"),\"timeout\":$timeout,\"reason\":$(json "$reason"),\"wait\":$wait,$(identity)}"
     ;;
   wait)
     if [ -z "$id" ]; then
@@ -311,6 +341,26 @@ case $command in
       run-*) send_run "{\"command\":\"wait\",\"id\":$(json "$id"),\"wait\":$wait}" ;;
       *) send "{\"command\":\"wait\",\"id\":$(json "$id"),\"wait\":$wait}" ;;
     esac
+    ;;
+  sync)
+    send "{\"command\":\"sync\",\"cwd\":$(json "$(pwd -P)")}"
+    ;;
+  handoff)
+    if [ -z "$title" ]; then
+      echo "mdt: give it a title: mdt handoff --title \"what this is\"" >&2
+      exit 1
+    fi
+    text=""
+    if [ "$body" = - ]; then
+      text=$(cat)
+    elif [ -n "$body" ]; then
+      text=$(cat -- "$body") || exit 1
+    fi
+    identify
+    send "{\"command\":\"handoff\",\"cwd\":$(json "$(pwd -P)"),\"title\":$(json "$title"),\"body\":$(json "$text"),$(identity)}"
+    ;;
+  handoffs)
+    send "{\"command\":\"handoffs\",\"cwd\":$(json "$(pwd -P)")}"
     ;;
   help | -h | --help)
     usage

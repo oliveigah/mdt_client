@@ -267,7 +267,142 @@ defmodule MDTClient.Sandbox.EgressTest do
     assert %{up: 4, down: 9} = Enum.find(Sandbox.events(username), &(&1.outcome == :tunnel))
   end
 
-  test "each unlocked identity's proxy listens and reports where", %{username: username} do
+  # A proxy with other options than the one `setup` starts.
+  defp proxy_with(username, options) do
+    {:ok, listen} = :gen_tcp.listen(0, [:binary, active: false, ip: {127, 0, 0, 1}])
+    {:ok, port} = :inet.port(listen)
+    spawn_link(fn -> accept(listen, username, options) end)
+    port
+  end
+
+  # A server on this machine, and the network grant that reaches it.
+  defp local_server(username, uses) do
+    {:ok, server} = :gen_tcp.listen(0, [:binary, active: false, ip: {127, 0, 0, 1}])
+    {:ok, port} = :inet.port(server)
+
+    {:ok, grant} =
+      Sandbox.create_grant(username, %{
+        "kind" => "network",
+        "name" => "Local #{port}",
+        "purpose" => "A test server",
+        "destinations" => "127.0.0.1:#{port}"
+      })
+
+    {:ok, _} = Sandbox.turn_on(username, grant.id, 60, uses)
+    {server, port}
+  end
+
+  test "a connection waiting for you is answered before microsandbox gives up; a no closes it",
+       %{username: username} do
+    {server, port} = local_server(username, :ask)
+    proxy = proxy_with(username, answer_within: 50)
+
+    {socket, reply} = connect(proxy, "127.0.0.1:#{port}")
+    assert reply =~ "HTTP/1.1 200"
+    assert [approval] = Sandbox.snapshot(username).waiting
+    # Nothing has reached the destination.
+    assert {:error, :timeout} = :gen_tcp.accept(server, 50)
+
+    :ok = Sandbox.decide(username, approval.id, :deny)
+    assert {:error, :closed} = :gen_tcp.recv(socket, 0, 5_000)
+    assert {:error, :timeout} = :gen_tcp.accept(server, 50)
+  end
+
+  test "a connection waiting for you opens when you allow it", %{username: username} do
+    {server, port} = local_server(username, :ask)
+    proxy = proxy_with(username, answer_within: 50)
+
+    spawn_link(fn ->
+      {:ok, socket} = :gen_tcp.accept(server)
+      {:ok, data} = :gen_tcp.recv(socket, 0, 5_000)
+      :gen_tcp.send(socket, "pong:" <> data)
+      :gen_tcp.close(socket)
+    end)
+
+    {socket, "HTTP/1.1 200" <> _} = connect(proxy, "127.0.0.1:#{port}")
+    :ok = :gen_tcp.send(socket, "ping")
+    assert [approval] = Sandbox.snapshot(username).waiting
+    :ok = Sandbox.decide(username, approval.id, :allow_once)
+    assert read_all(socket, :gen_tcp) == "pong:ping"
+  end
+
+  test "a server that speaks first is heard without the wait for the client", %{
+    username: username,
+    proxy: proxy
+  } do
+    {server, port} = local_server(username, :all)
+
+    spawn_link(fn ->
+      {:ok, socket} = :gen_tcp.accept(server)
+      :gen_tcp.send(socket, "220 ready\r\n")
+      :gen_tcp.recv(socket, 0, 5_000)
+      :gen_tcp.close(socket)
+    end)
+
+    {socket, "HTTP/1.1 200" <> _} = connect(proxy, "127.0.0.1:#{port}")
+    started = System.monotonic_time(:millisecond)
+    assert {:ok, "220 ready\r\n"} = :gen_tcp.recv(socket, 0, 5_000)
+    # It used to sit out 1.5 s waiting for the client to speak.
+    assert System.monotonic_time(:millisecond) - started < 1_000
+  end
+
+  test "a request two parsers could read two ways is refused", %{
+    username: username,
+    proxy: proxy,
+    ca: ca
+  } do
+    grant = github(username)
+    start = "HTTP/1.1\r\nHost: api.github.com\r\nAuthorization: token #{grant.placeholder}\r\n"
+
+    requests = [
+      {"two ways of saying the length",
+       "POST /x #{start}Content-Length: 4\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n"},
+      {"two lengths", "POST /x #{start}Content-Length: 4\r\nContent-Length: 0\r\n\r\nabcd"},
+      {"a length that isn't a number", "POST /x #{start}Content-Length: 4, 4\r\n\r\nabcd"},
+      {"an encoding besides chunked",
+       "POST /x #{start}Transfer-Encoding: gzip, chunked\r\n\r\n0\r\n\r\n"},
+      {"a folded header", "GET /x #{start}X-A: 1\r\n folded\r\n\r\n"},
+      {"a space before the colon",
+       "GET /x HTTP/1.1\r\nHost : api.github.com\r\nAuthorization: token #{grant.placeholder}\r\n\r\n"},
+      {"no Host", "GET /x HTTP/1.1\r\nAuthorization: token #{grant.placeholder}\r\n\r\n"},
+      {"a line that isn't a header", "GET /x #{start}not a header\r\n\r\n"}
+    ]
+
+    for {why, request} <- requests do
+      response = https(proxy, ca, "api.github.com", request)
+      assert response =~ "HTTP/1.1 400", why
+      assert response =~ "mdt_bad_request", why
+      refute response =~ "ghp_real_value", why
+    end
+  end
+
+  test "a small chunked body is not waited on", %{username: username, proxy: proxy, ca: ca} do
+    grant = github(username)
+    body = ~s({"title":"a small change"})
+
+    request =
+      "POST /repos/o/r/issues HTTP/1.1\r\nHost: api.github.com\r\n" <>
+        "Authorization: token #{grant.placeholder}\r\nTransfer-Encoding: chunked\r\n\r\n" <>
+        Integer.to_string(byte_size(body), 16) <> "\r\n" <> body <> "\r\n0\r\n\r\n"
+
+    started = System.monotonic_time(:millisecond)
+    assert https(proxy, ca, "api.github.com", request) =~ "seen=token ghp_real_value"
+    # It used to wait 2 s for more of the body.
+    assert System.monotonic_time(:millisecond) - started < 1_500
+  end
+
+  test "a chunked body is whole at its last chunk" do
+    assert Connection.chunked_whole?("5\r\nhello\r\n0\r\n\r\n")
+    assert Connection.chunked_whole?("5;ext=1\r\nhello\r\n0\r\nTrailer: x\r\n\r\n")
+    refute Connection.chunked_whole?("5\r\nhello\r\n")
+    refute Connection.chunked_whole?("5\r\nhel")
+    refute Connection.chunked_whole?("5\r\nhello\r\n0\r\nTrailer: x\r\n")
+    refute Connection.chunked_whole?("")
+  end
+
+  test "each unlocked identity's proxy listens on its own socket, and reports it", %{
+    username: username
+  } do
     proxy =
       Enum.find_value(1..100, fn _ ->
         case Sandbox.snapshot(username).proxy do
@@ -276,25 +411,54 @@ defmodule MDTClient.Sandbox.EgressTest do
         end
       end)
 
-    {:ok, socket} = :gen_tcp.connect(~c"127.0.0.1", proxy.port, [:binary, active: false])
+    assert proxy.path == MDTClient.Sandbox.Egress.path(username)
+    # Yours only: no other user's program reaches the proxy, and none through a port.
+    assert Bitwise.band(File.stat!(proxy.path).mode, 0o777) == 0o600
+    assert Bitwise.band(File.stat!(Path.dirname(proxy.path)).mode, 0o777) == 0o700
+
+    {:ok, socket} = :gen_tcp.connect({:local, proxy.path}, 0, [:binary, active: false])
     :ok = :gen_tcp.send(socket, "CONNECT 127.0.0.1:1 HTTP/1.1\r\n\r\n")
     assert {:ok, "HTTP/1.1 403" <> _} = :gen_tcp.recv(socket, 0, 5_000)
-
-    # A retry left over from a port that was busy must not report the proxy
-    # down once it listens on a fixed port.
     :gen_tcp.close(socket)
-    {:ok, _} = Sandbox.update_settings(username, %{"proxy_port" => "#{proxy.port}"})
-    egress = MDTClient.Vault.Store.whereis(MDTClient.Sandbox.Egress, username)
-    # The rebind, then the :listen it sends itself, then the report.
-    _ = :sys.get_state(egress)
-    _ = :sys.get_state(egress)
-    _ = :sys.get_state(MDTClient.Vault.Store.whereis(MDTClient.Sandbox.Server, username))
-    assert %{listening?: true, port: port} = Sandbox.snapshot(username).proxy
-    assert port == proxy.port
 
+    # A retry left over from a bind that failed must not report the proxy
+    # down once it listens.
+    egress = MDTClient.Vault.Store.whereis(MDTClient.Sandbox.Egress, username)
     send(egress, :listen)
     _ = :sys.get_state(egress)
     _ = :sys.get_state(MDTClient.Vault.Store.whereis(MDTClient.Sandbox.Server, username))
     assert %{listening?: true, error: nil} = Sandbox.snapshot(username).proxy
+  end
+
+  test "a request is read through the socket as through a port", %{username: username, ca: ca} do
+    grant = github(username)
+    path = MDTClient.Sandbox.Egress.path(username)
+
+    Enum.find_value(1..100, fn _ ->
+      Sandbox.snapshot(username).proxy.listening? || (Process.sleep(10) && nil)
+    end)
+
+    {:ok, socket} = :gen_tcp.connect({:local, path}, 0, [:binary, active: false])
+    :ok = :gen_tcp.send(socket, "CONNECT 140.82.112.3:443 HTTP/1.1\r\n\r\n")
+    {:ok, "HTTP/1.1 200" <> _} = :gen_tcp.recv(socket, 0, 5_000)
+
+    {:ok, tls} =
+      :ssl.connect(socket,
+        verify: :verify_peer,
+        cacerts: [ca],
+        server_name_indication: ~c"api.github.com",
+        active: false,
+        mode: :binary
+      )
+
+    # TRACE is refused by MDT itself, so no upstream is needed to see that
+    # the request was read.
+    :ok =
+      :ssl.send(
+        tls,
+        "TRACE /user HTTP/1.1\r\nHost: api.github.com\r\nAuthorization: token #{grant.placeholder}\r\n\r\n"
+      )
+
+    assert read_all(tls, :ssl) =~ "mdt_method_refused"
   end
 end

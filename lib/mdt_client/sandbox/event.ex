@@ -5,6 +5,7 @@ defmodule MDTClient.Sandbox.Event do
   `outcome` says what happened:
 
     * `:tunnel` - passed through as bytes, unread
+    * `:lookup` - a name the VM looked up (`MDTClient.Sandbox.Dns`)
     * `:swapped` - a placeholder was swapped for the real value
     * `:allowed`, `:denied`, `:timed_out` - an approval was decided or gave up
     * `:refused` - a placeholder arrived while its grant was off
@@ -14,6 +15,9 @@ defmodule MDTClient.Sandbox.Event do
     * `:vm` - the VM started, stopped or was recreated
     * `:command` - a command an agent asked to run on the host: run,
       declined, stopped, ended, its output sent or kept. Never its output.
+    * `:project` - a project was added, removed or synced into the VM
+    * `:handoff` - an agent handed work off, or you brought it in, sent it
+      back or declined it
   """
 
   @enforce_keys [:id, :at, :outcome, :summary]
@@ -34,6 +38,7 @@ defmodule MDTClient.Sandbox.Event do
 
   @type outcome ::
           :tunnel
+          | :lookup
           | :swapped
           | :allowed
           | :denied
@@ -44,6 +49,8 @@ defmodule MDTClient.Sandbox.Event do
           | :grant
           | :vm
           | :command
+          | :project
+          | :handoff
 
   @type t :: %__MODULE__{
           id: String.t(),

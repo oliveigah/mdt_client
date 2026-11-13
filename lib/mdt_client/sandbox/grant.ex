@@ -2,7 +2,7 @@ defmodule MDTClient.Sandbox.Grant do
   @moduledoc """
   One piece of access the VM can be given, and taken back from, on the spot.
 
-  Three types, none tied to a provider:
+  Four types, none tied to a provider:
 
     * `:token` - a secret that travels in HTTP requests: an API key, a bearer
       token, git's password. The VM holds a placeholder, in the `env`
@@ -12,6 +12,11 @@ defmodule MDTClient.Sandbox.Grant do
     * `:network` - reachability to `destinations`; nothing to hold.
     * `:file` - the real value, as a file at `path`; copies outlive turning
       it off.
+    * `:command` - nothing to hold: while it is on, agents may ask MDT to
+      run a command on your machine. With a `script`, only that text, in
+      `dir`; with none, any text they send. Every run waits for you; no
+      allowance covers one. No such grant exists until you add it, so a new
+      identity runs nothing on your machine for the VM.
 
   `purpose` is the user's own words for what the grant is for. Agents read it
   to find the grant they need, so every grant has one. `preset` remembers
@@ -34,6 +39,8 @@ defmodule MDTClient.Sandbox.Grant do
     :expires_at,
     :placeholder,
     :path,
+    :script,
+    :dir,
     :last_used_at,
     purpose: "",
     state: :off,
@@ -47,7 +54,7 @@ defmodule MDTClient.Sandbox.Grant do
     uses: 0
   ]
 
-  @type kind :: :token | :network | :file
+  @type kind :: :token | :network | :file | :command
   @type source :: :stored | {:minted, String.t()}
 
   @type t :: %__MODULE__{
@@ -60,6 +67,8 @@ defmodule MDTClient.Sandbox.Grant do
           expires_at: DateTime.t() | nil,
           placeholder: String.t() | nil,
           path: String.t() | nil,
+          script: String.t() | nil,
+          dir: String.t() | nil,
           last_used_at: DateTime.t() | nil,
           source: source(),
           env: [String.t()],
@@ -71,7 +80,7 @@ defmodule MDTClient.Sandbox.Grant do
           uses: non_neg_integer()
         }
 
-  @kinds [:token, :network, :file]
+  @kinds [:token, :network, :file, :command]
 
   @doc "Every type a grant can have."
   @spec kinds() :: [kind()]
@@ -81,9 +90,15 @@ defmodule MDTClient.Sandbox.Grant do
   @spec exposes_value?(t()) :: boolean()
   def exposes_value?(%__MODULE__{kind: kind}), do: kind == :file
 
-  @doc "Whether the grant is on right now."
-  @spec on?(t()) :: boolean()
-  def on?(%__MODULE__{state: state}), do: state == :on
+  @doc """
+  Whether the grant is on at `now`. One past its `expires_at` is not, even
+  while its `state` still says `:on`: the clock decides, not a timer.
+  """
+  @spec on?(t(), DateTime.t()) :: boolean()
+  def on?(grant, now \\ DateTime.utc_now())
+  def on?(%__MODULE__{state: :on, expires_at: nil}, _now), do: true
+  def on?(%__MODULE__{state: :on, expires_at: at}, now), do: DateTime.compare(now, at) == :lt
+  def on?(%__MODULE__{}, _now), do: false
 
   @doc "Where the VM finds a token grant's placeholder as a file."
   @spec token_file(t()) :: String.t()

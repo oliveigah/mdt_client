@@ -1,0 +1,29 @@
+msb create in the bubble, 0.7 s: exit 0
+
+The VM, driven from outside the bubble (msb exec):
+  ok    exec from the host reaches the VM: 6.12.115 | lo dummy0 eth0
+  ok    shared folder both ways: written on the host | wrote
+  ok    HTTP through the socket: '<!doctype html><html lang=en><head><meta charset=utf-8><link'; host saw ['CONNECT 172.66.147.243:80 HTTP/1.1']
+  ok    HTTPS through the socket: host saw ['CONNECT 172.66.147.243:443 HTTP/1.1']
+  ok    DNS names seen by the host: ['probe-name.example.org']
+  ok    DNS aimed at 8.8.8.8 doesn't go around the host: host saw []; the VM got ';; connection timed out; no servers could be reached'
+  note  resolv.conf and HTTP by address: 'nameserver 172.16.0.5 wget: server returned error: HTTP/1.1 40'; host saw ['CONNECT 172.66.147.243:80 HTTP/1.1']
+  note  relay in the bubble: default route into loopback: exit 0  | dns udp 29 bytes answered | tcp 18999 accepted | dns udp 29 bytes answered | tcp 18999 accepted | dns udp 40 bytes answered | tcp 18999 accepted | 
+  note  msb logs: 6.12.115 | lo dummy0 eth0 written on the host | wrote | <!doctype html><html lang=en><head><meta charset=utf-8><link<!doctype html><html lang=en><head><meta charset=utf-8><link | ** server can't find probe-name.example.org: NXDOMAIN |  |  | ;; connection timed out; no servers could be reached |  | nameserver 172.16.0.5 wget: server returned error: HTTP/1.1 40
+
+The VM process, read from /proc on the host:
+  pid 1715146: /var/tmp/mdt-msb-confine/runtime/bin/msb machine --name confine-probe
+    Uid: 1000 1000 1000 1000
+    Groups: 10 968 1000
+    CapEff: 0000000000000000
+    NoNewPrivs: 1
+    Seccomp: 0
+    own namespaces: user mnt net ipc uts pid cgroup
+    its / holds: bin dev lib lib64 proc run sbin tmp usr var
+  ok    no /home in its view
+  ok    no /run/user, no docker socket
+  ok    its network cards: lo
+  ok    no TCP socket of its own in the host's network
+
+With the way out closed (proxy socket removed):
+  ok    no MDT, no internet: wget: can't connect to remote host (172.66.147.243): Connection refused |  | done

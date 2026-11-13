@@ -91,13 +91,9 @@ defmodule MDTClient.Sandbox.ServerTest do
         image: "box:1",
         cpus: state.settings.cpus,
         memory_gib: state.settings.memory_gib,
-        proxy_port: state.settings.proxy_port,
-        mounts: [
-          {Path.join(state.dir, "inbox"), "/mnt/mdt", :ro},
-          {state.folders.home, "/root", :rw},
-          {state.folders.optmem, "/root/.optmem", :rw},
-          {state.folders.cache, "/cache", :rw}
-        ]
+        disk_gib: state.settings.disk_gib,
+        write_budget_gib: state.settings.write_budget_gib,
+        shares: []
       }
 
       %{
@@ -124,14 +120,7 @@ defmodule MDTClient.Sandbox.ServerTest do
         memory_gib: state.settings.memory_gib,
         disk_gib: state.settings.disk_gib,
         write_budget_gib: state.settings.write_budget_gib,
-        proxy_port: state.settings.proxy_port,
-        vsock: MDTClient.Sandbox.Channel.socket_path(username),
-        mounts: [
-          {Path.join(state.dir, "inbox"), "/mnt/mdt", :ro},
-          {state.folders.home, "/root", :rw},
-          {state.folders.optmem, "/root/.optmem", :rw},
-          {state.folders.cache, "/cache", :rw}
-        ]
+        shares: []
       }
 
       %{
@@ -149,6 +138,38 @@ defmodule MDTClient.Sandbox.ServerTest do
 
     assert {:error, %{write_budget_gib: _}} =
              Sandbox.update_settings(username, %{"write_budget_gib" => "0"})
+  end
+
+  test "a bigger disk the VM keeps needs no recreate: it grows at the next start", %{
+    username: username
+  } do
+    pid = GenServer.whereis(Store.via(Server, username))
+
+    :sys.replace_state(pid, fn state ->
+      spec = %{
+        name: state.vm.name,
+        image: "box:1",
+        shell: "/bin/bash",
+        cpus: state.settings.cpus,
+        memory_gib: state.settings.memory_gib,
+        disk_gib: state.settings.disk_gib,
+        write_budget_gib: state.settings.write_budget_gib,
+        shares: []
+      }
+
+      %{
+        state
+        | vm: %{state.vm | exists?: true},
+          image: %{state.image | tag: "box:1"},
+          created_spec: :erlang.phash2(spec)
+      }
+    end)
+
+    assert {:ok, %{work_gib: 128, home_gib: 16, cache_gib: 64}} =
+             Sandbox.update_settings(username, %{"work_gib" => "128"})
+
+    refute Sandbox.snapshot(username).vm.stale?
+    assert {:error, %{home_gib: _}} = Sandbox.update_settings(username, %{"home_gib" => "0"})
   end
 
   test "creating checks the choices before touching anything", %{username: username} do

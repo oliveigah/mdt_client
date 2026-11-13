@@ -3,8 +3,8 @@ defmodule MDTClient.Sandbox.Memory do
   The VM's own OptMem, kept in a host folder mounted at `/root/.optmem`, and
   its round trip with yours.
 
-    * `prepare!/1` - before each start: copies your `memo` tool in, and
-      creates an empty memory when there is none.
+    * The `memo` tool and an empty memory are put there by the VM itself,
+      after each boot (`priv/sandbox/mdt-boot`), from `/mnt/mdt/bin/memo`.
     * `seed!/1` - replaces the VM's memory with a copy of yours (`LOG.txt`,
       `TREE/`, `config`: what `memo sync` shares), taken under memo's lock.
       The VM's previous memory is moved aside, never deleted.
@@ -36,32 +36,6 @@ defmodule MDTClient.Sandbox.Memory do
   @doc "Whether you have a memory to copy from."
   @spec host_memory?() :: boolean()
   def host_memory?, do: host_memo() != nil and File.regular?(Path.join(host_memory(), "LOG.txt"))
-
-  @doc """
-  Copies `memo` into the VM's OptMem folder and creates an empty memory when
-  it has none. Does nothing without OptMem on this machine.
-  """
-  @spec prepare!(Path.t()) :: :ok
-  def prepare!(optmem) do
-    File.mkdir_p!(optmem)
-
-    with memo when is_binary(memo) <- host_memo() do
-      target = Path.join(optmem, "memo")
-      File.cp!(memo, target)
-      File.chmod!(target, 0o755)
-
-      memory = Path.join(optmem, "memory")
-
-      unless File.regular?(Path.join(memory, "LOG.txt")) do
-        case System.cmd(memo, ["init"], env: [{"MEMORY_DIR", memory}], stderr_to_stdout: true) do
-          {_, 0} -> :ok
-          {output, status} -> raise "memo init failed (#{status}): #{String.trim(output)}"
-        end
-      end
-    end
-
-    :ok
-  end
 
   @doc """
   Replaces the VM's memory with a copy of yours and returns how many memories

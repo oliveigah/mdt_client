@@ -8,12 +8,21 @@ defmodule MDTClient.Sandbox.Describe do
     * `claims` - text the agent wrote (titles, bodies, messages), kept apart
       so it can never read as a fact.
     * `pattern` - what "allow similar" lets through: the same method and
-      endpoint, and for GraphQL the same operation.
+      endpoint, and for GraphQL the same document.
 
   Only the start of the body is looked at, at most what `Egress` reads before
   asking (64 KiB): enough for git's ref updates, which come before the pack,
   and for GraphQL documents.
+
+  The request is the VM's, bytes of its choosing. So every text that comes
+  out shows all it holds (`MDTClient.Sandbox.Shown`), and a request this
+  can't make sense of is described by its method and host instead of
+  failing: the sandbox's own process runs this.
   """
+
+  require Logger
+
+  alias MDTClient.Sandbox.{GraphQL, Shown}
 
   @type request :: %{
           host: String.t(),
@@ -37,14 +46,60 @@ defmodule MDTClient.Sandbox.Describe do
   def request(%{method: method, path: path} = request) do
     {route, query} = split_query(path)
 
-    cond do
-      String.ends_with?(route, "/git-receive-pack") and method == "POST" -> push(request, route)
-      String.ends_with?(route, "/git-upload-pack") and method == "POST" -> fetch(request, route)
-      String.ends_with?(route, "/info/refs") -> refs(request, route, query)
-      route == "/graphql" and method == "POST" -> graphql(request)
-      true -> rest(request, route)
+    described =
+      try do
+        cond do
+          String.ends_with?(route, "/git-receive-pack") and method == "POST" ->
+            push(request, route)
+
+          String.ends_with?(route, "/git-upload-pack") and method == "POST" ->
+            fetch(request, route)
+
+          String.ends_with?(route, "/info/refs") ->
+            refs(request, route, query)
+
+          route == "/graphql" and method == "POST" ->
+            graphql(request)
+
+          true ->
+            rest(request, route)
+        end
+      rescue
+        error ->
+          Logger.warning("a request could not be described: #{Exception.message(error)}",
+            system: :sandbox
+          )
+
+          %{
+            title: "#{method} #{request.host}#{route}",
+            facts: [{"Endpoint", "#{method} #{route}"}],
+            claims: [],
+            pattern: "#{method} #{request.host}#{route}"
+          }
+      end
+
+    %{
+      title: Shown.text(described.title),
+      facts: Enum.map(described.facts, &shown/1),
+      claims: Enum.map(described.claims, &shown/1),
+      pattern: exact(described.pattern)
+    }
+  end
+
+  defp shown({label, value}), do: {Shown.text(label), Shown.text(value)}
+
+  # A pattern is compared, so two that differ must stay different once they
+  # are made safe to show: one that had to change carries a digest of what
+  # it was.
+  defp exact(pattern) do
+    case Shown.text(pattern) do
+      ^pattern -> pattern
+      changed -> changed <> " · " <> short_digest(pattern)
     end
   end
+
+  defp short_digest(text),
+    do: :crypto.hash(:sha256, text) |> Base.encode16(case: :lower) |> binary_part(0, 12)
 
   defp push(request, route) do
     repo = repository(route)
@@ -88,24 +143,39 @@ defmodule MDTClient.Sandbox.Describe do
     }
   end
 
+  # The type and the fields come from the operation a server would run
+  # (`MDTClient.Sandbox.GraphQL`), not from the start of the text. Its name
+  # is the author's, so "allow similar" goes by the whole document: the same
+  # document with other variables is similar, another document with the
+  # same name is not.
   defp graphql(request) do
-    {kind, name, variables} =
+    {label, fields, variables, digest} =
       case Jason.decode(request.body) do
-        {:ok, %{"query" => query} = doc} when is_binary(query) ->
-          {kind, name} = operation(query, doc["operationName"])
-          {kind, name, doc["variables"] || %{}}
+        {:ok, %{"query" => document} = body} when is_binary(document) ->
+          name = if is_binary(body["operationName"]), do: body["operationName"]
+          variables = if is_map(body["variables"]), do: body["variables"], else: %{}
+
+          case GraphQL.selected(document, name) do
+            {:ok, operation} ->
+              shown = operation.name || List.first(operation.fields)
+              label = Enum.join(Enum.reject([operation.kind, shown], &is_nil/1), " ")
+              {label, operation.fields, variables, GraphQL.digest(document)}
+
+            :error ->
+              {"unknown", [], variables, GraphQL.digest(document)}
+          end
 
         _unreadable ->
-          {"unknown", nil, %{}}
+          {"unknown", [], %{}, GraphQL.digest(request.body)}
       end
 
-    label = Enum.join(Enum.reject([kind, name], &is_nil/1), " ")
+    fields = if fields == [], do: [], else: [{"Fields", Enum.join(fields, ", ")}]
 
     %{
       title: "GraphQL #{label} on #{request.host}",
-      facts: [{"Operation", label}] ++ repository_facts(variables) ++ client(request),
+      facts: [{"Operation", label}] ++ fields ++ repository_facts(variables) ++ client(request),
       claims: claims(variables),
-      pattern: "POST #{request.host}/graphql · #{label}"
+      pattern: "POST #{request.host}/graphql · #{label} · #{digest}"
     }
   end
 
@@ -160,23 +230,6 @@ defmodule MDTClient.Sandbox.Describe do
   defp short_ref("refs/heads/" <> branch), do: branch
   defp short_ref("refs/tags/" <> tag), do: "tag #{tag}"
   defp short_ref(ref), do: ref
-
-  defp operation(query, operation_name) do
-    trimmed = String.trim_leading(query)
-
-    case Regex.run(~r/^(query|mutation|subscription)\b\s*([A-Za-z_][A-Za-z0-9_]*)?/, trimmed) do
-      [_, kind, name] -> {kind, operation_name || name}
-      [_, kind] -> {kind, operation_name || first_field(trimmed)}
-      nil -> {"query", operation_name || first_field(trimmed)}
-    end
-  end
-
-  defp first_field(query) do
-    case Regex.run(~r/\{\s*([A-Za-z_][A-Za-z0-9_]*)/, query) do
-      [_, field] -> field
-      nil -> nil
-    end
-  end
 
   defp repository_facts(variables) do
     for key <- ["owner", "name", "repo", "repository", "repositoryId"],

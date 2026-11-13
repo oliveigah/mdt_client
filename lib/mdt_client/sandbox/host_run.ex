@@ -7,6 +7,11 @@ defmodule MDTClient.Sandbox.HostRun do
     * `bash -lc SCRIPT`, so your login profile sets up your usual tools, in
       the approved directory, with stdin from `/dev/null` and SIGPIPE back
       to its default, which the BEAM ignores;
+    * only in the directory you approved: the path on the card is a real
+      path, and the command starts there after `cd -P` and a check that it
+      is still where it leads. A folder the VM can write may have been
+      swapped for a link to another one since you looked; then nothing runs
+      (exit 126);
     * under `timeout`: TERM at the limit, KILL 5 seconds later (exit 124,
       or 137 when it had to be killed). `timeout`
       puts the command in a process group of its own, whose id is the
@@ -32,7 +37,9 @@ defmodule MDTClient.Sandbox.HostRun do
   # (coreutils 8.31 and later) can, and is skipped where it's missing.
   # `env` and then `timeout` run in place of the outer shell, so the port's
   # pid is timeout's, which leads the command's process group.
-  @wrapper "d=; env --default-signal=PIPE true 2>/dev/null && d=--default-signal=PIPE; " <>
+  @wrapper "cd -P -- \"$3\" 2>/dev/null && [ \"$(pwd -P)\" = \"$3\" ] || " <>
+             "{ echo \"MDT: $3 is no longer the folder you approved, so nothing ran.\"; exit 126; }; " <>
+             "d=; env --default-signal=PIPE true 2>/dev/null && d=--default-signal=PIPE; " <>
              ~s(exec env $d timeout --kill-after=#{@kill_after}s "$1" bash -lc "$2" </dev/null)
 
   @scrubbed_prefixes ~w(RELEASE_ ERL_ ELIXIR_ ELIXIRKIT_ MIX_ PHX_ MDT_ __MIX)
@@ -68,9 +75,9 @@ defmodule MDTClient.Sandbox.HostRun do
         :exit_status,
         :stderr_to_stdout,
         :use_stdio,
-        cd: dir,
+        cd: "/",
         env: env(),
-        args: ["-c", @wrapper, "mdt-host-command", "#{timeout}s", script]
+        args: ["-c", @wrapper, "mdt-host-command", "#{timeout}s", script, dir]
       ])
 
     case Port.info(port, :os_pid) do

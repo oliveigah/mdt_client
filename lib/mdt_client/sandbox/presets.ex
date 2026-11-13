@@ -1,10 +1,10 @@
 defmodule MDTClient.Sandbox.Presets do
   @moduledoc """
-  What the add dialog offers: the three grant types, and presets that fill a
+  What the add dialog offers: the four grant types, and presets that fill a
   type's form for tools whose details are known.
 
   A preset only fills fields. The grant it makes is a plain `:token`,
-  `:network` or `:file` grant that you can edit like any other, and nothing
+  `:network`, `:file` or `:command` grant that you can edit like any other, and nothing
   else in MDT looks at which preset made it, apart from its icon.
 
   The VM-side details come from the checks of 2026-11-11: `gh` sends
@@ -65,6 +65,19 @@ defmodule MDTClient.Sandbox.Presets do
         "Use this only when a tool must read the value itself: a key that signs, a kubeconfig with client certificates.",
         "The content is written to /mnt/mdt/files/NAME while the grant is on. Anything that reads it can keep a copy.",
         "Prefer a value that expires, and revoke it at its provider when done."
+      ],
+      fields: %{}
+    },
+    %{
+      id: :command,
+      kind: :command,
+      name: "Command on this machine",
+      icon: "hero-command-line",
+      blurb: "Lets agents ask to run a command here, as you. Each run waits for your approval.",
+      guide: [
+        "Use it for a job that needs something only this machine has: your SSH keys, a kubeconfig, your VPN. The work goes to the value, and only its output goes back.",
+        "With a script of yours, agents can run only that text, in the folder you name. Leave the script empty and they write the text themselves: the widest grant there is.",
+        "Either way, every run shows on a card and waits for you. Nothing lets one through unasked."
       ],
       fields: %{}
     }

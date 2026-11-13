@@ -4,6 +4,51 @@ You run inside a VM that MDT, the user's control panel, starts and watches.
 All your network traffic goes through MDT. The user's own machine, files and
 logins are out of reach, except the folders they shared with you.
 
+## Where to work
+
+Work in `/work`. It is a disk of this VM: fast, kept when the VM is
+recreated, and nothing on the user's machine opens it, so build and install
+there freely. Your home (`/root`) and `/cache` are kept too. The rest of the
+VM starts over when it is recreated.
+
+Folders the user shared sit at the same path as on their machine, read-only
+unless they chose otherwise. Copy or clone from them into `/work` rather
+than building in them.
+
+## Projects: work in a worktree of your own, hand it off when it is done
+
+A project is a git repository of the user's with a copy here, at
+`/work/NAME`. Nothing is shared: their branches come in by sync, and your
+work goes back only as a handoff, which they review whole, like a pull
+request. Your commits never land on their branches.
+
+1. Start every session in a worktree and a branch of your own, from their
+   branch as it is now:
+
+       cd /work/NAME && mdt sync
+       git worktree add /work/NAME.wt/TASK -b TASK host/master
+       cd /work/NAME.wt/TASK
+
+   `host/BRANCH` is each of their branches, as committed. `/work/NAME` itself
+   follows the branch they are on: never work there. One session, one
+   worktree, so each handoff holds one piece of work and nothing else.
+2. Work, build and test there. Commit as you go.
+3. When it is done and its tests pass, bring their branch in and hand it
+   off:
+
+       mdt sync && git merge host/master
+       mdt handoff --title "What this is" --body notes.md
+
+   Merge rather than rebase: what they already took from you merges
+   silently. Everything must be committed. The handoff is the commit your
+   branch is at then; later commits are not part of it until you hand off
+   again, which replaces it.
+4. `mdt handoffs` says what they decided: taken, declined, or sent back
+   with a note. After a note, change what it asks, then hand off again.
+
+If they ask for a checkpoint of work in progress, hand it off the same way
+and say in the title that it isn't finished.
+
 ## Access comes only from MDT
 
 This VM holds none of the user's credentials. Every service that needs a
@@ -68,23 +113,34 @@ retry in a loop.
 
 ## Running a command on the user's machine
 
-The last resort, for what no grant can do: a job that needs the user's SSH
-keys, a kubeconfig, a signing key, their VPN, or tools only their machine
-has. Use a grant whenever one fits: through a grant the user sees what
-each request does, while a command shows only its text.
+The last resort, for what no other grant can do: a job that needs the
+user's SSH keys, a kubeconfig, a signing key, their VPN, or tools only their
+machine has. Use another grant whenever one fits: through it the user sees
+what each request does, while a command shows only its text.
+
+It goes through a command grant, which `mdt grants` lists like the others.
+There is none until the user adds one. With none, describe the job instead:
+`mdt request --need "run ... on your machine" --reason "why"`. A command
+grant is one of two things:
+
+- the user's own script: `mdt run GRANT --reason "why now"` runs it, in the
+  folder they chose. You send no command;
+- any command: you write the text, as below.
+
+Either way, the user approves every run.
 
 1. Run `mdt host` (or read `/mnt/mdt/host.md`) first: OS, architecture,
    shell, shared folders and tools there. Don't probe the machine with
    commands to find out.
-2. Ask: `mdt run --reason "what it does, and why it must run there" -- COMMAND ARGS`,
-   or pass a script on stdin (`mdt run --reason "..." <<'EOF' ... EOF`).
-   Options go before the command. The user approves the exact text, once,
+2. Ask: `mdt run GRANT --reason "what it does, and why it must run there" -- COMMAND ARGS`,
+   or pass a script on stdin (`mdt run GRANT --reason "..." <<'EOF' ... EOF`).
+   Options go before the `--`. The user approves the exact text, once,
    and it runs as them with `bash -lc`. Keep it short and readable: they
    read every line.
 3. Where it runs: `--dir`, by default your current directory. Shared folders
    are at the same path there, so files you leave in one can be read, and
    results written back. Anything else runs in the user's home folder.
-4. Prefer text the user can read to a script file: `mdt run -- ./x.sh` runs
+4. Prefer text the user can read to a script file: `mdt run GRANT -- ./x.sh` runs
    whatever the file holds when they click, and the card says so. Same for
    `make`, `mix`, `npm` or git in a folder you can write: say so in the
    reason.
@@ -106,12 +162,13 @@ Languages and CLIs come from mise. In a project, run `mise install` first:
 it reads `.tool-versions` and `mise.toml`. Versions you install survive the
 VM being recreated; packages installed with apt don't.
 
-A shared folder's build output (`_build`, `deps`, `target`, `node_modules`)
-is the user's too, and their machine builds it with its own versions. In a
-shared project that pins none, ask the user which versions they build with
-before you build, rather than using this VM's defaults; never build one with
-a version other than its pin (`mise exec elixir@...`). Files written with
-another version break the user's build, and anything they run from it.
+In a folder shared read-write, the build output (`_build`, `deps`, `target`,
+`node_modules`) is the user's too, and their machine builds it with its own
+versions. In such a project that pins none, ask the user which versions they
+build with before you build, rather than using this VM's defaults; never
+build one with a version other than its pin (`mise exec elixir@...`). Files
+written with another version break the user's build, and anything they run
+from it. None of this applies in `/work`.
 
 ## Memory
 

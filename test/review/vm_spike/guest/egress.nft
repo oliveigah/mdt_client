@@ -1,0 +1,7 @@
+table ip egress {
+  chain out {
+    type nat hook output priority -100;
+    ip daddr 127.0.0.0/8 return
+    meta l4proto tcp redirect to :15001
+  }
+}

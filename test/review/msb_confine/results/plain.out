@@ -1,0 +1,27 @@
+plain msb create: exit 0 in 0.5 s
+
+
+The VM, driven from outside the bubble (msb exec):
+  ok    exec from the host reaches the VM: 6.12.115 | lo dummy0 eth0
+  ok    shared folder both ways: written on the host | wrote
+  ok    HTTP through the socket: '<!doctype html><html lang=en><head><meta charset=utf-8><link'; host saw ['CONNECT 172.66.147.243:80 HTTP/1.1']
+  ok    HTTPS through the socket: host saw ['CONNECT 172.66.147.243:443 HTTP/1.1']
+  FAIL  DNS names seen by the host: []
+  FAIL  DNS aimed at 8.8.8.8 doesn't go around the host: host saw []; the VM got 'Non-authoritative answer:'
+  note  resolv.conf and HTTP by address: 'nameserver 172.16.0.5 nameserver fd42:6d73:62:1::1 wget: server returned error: HTTP/1.1 40'; host saw ['CONNECT 172.66.147.243:80 HTTP/1.1']
+  note  relay in the bubble logged nothing
+  note  msb logs: 6.12.115 | lo dummy0 eth0 written on the host | wrote | <!doctype html><html lang=en><head><meta charset=utf-8><link<!doctype html><html lang=en><head><meta charset=utf-8><link | ** server can't find probe-name.example.org: NXDOMAIN |  |  | Non-authoritative answer: |  | nameserver 172.16.0.5 nameserver fd42:6d73:62:1::1 wget: server returned error: HTTP/1.1 40
+
+The VM process, read from /proc on the host:
+  pid 1715735: /var/tmp/mdt-msb-confine/runtime/bin/msb machine --name confine-probe
+    Uid: 1000 1000 1000 1000
+    Groups: 10 968 1000
+    CapEff: 0000000000000000
+    NoNewPrivs: 0
+    Seccomp: 0
+    own namespaces: none
+    its / holds: .profile afs bin boot builddir dev etc home lib lib64 media mnt opt proc root run sbin srv sys tmp usr var
+  FAIL  no /home in its view
+  FAIL  no /run/user, no docker socket
+  FAIL  its network cards: lo wlp98s0 br-0cc1e4b2e58b br-2d0ed7dc6354 docker0
+  ok    no TCP socket of its own in the host's network

@@ -146,7 +146,7 @@ defmodule MDTClientWeb.SandboxLive.Settings do
     <div class="space-y-5">
       <.card id="settings-shares" title="Shared folders" body_class="">
         <:help>
-          Each folder appears at the same path in the VM. Never shared: your home folder itself, ~/.ssh, ~/.gnupg, ~/.optmem, cloud CLI logins and MDT's own data. Folders can't sit inside one another, since the VM could unmount the inner one. Anything you later run from a shared folder on this machine runs outside the VM.
+          Each folder appears at the same path in the VM, read-only unless you say otherwise. What the VM writes in a read-write folder can run on your machine when you use that folder: a git hook, a build script, an editor task. The VM's own work belongs on its Work disk (/work), which nothing here opens. Never shared: your home folder itself, ~/.ssh, ~/.gnupg, ~/.optmem, cloud CLI logins and MDT's own data. Folders can't sit inside one another, since the VM could unmount the inner one.
         </:help>
         <:actions>
           <span class="text-[11px] text-faint">{length(@settings.shares)} shared</span>
@@ -177,11 +177,12 @@ defmodule MDTClientWeb.SandboxLive.Settings do
             </div>
             <.segmented
               id={"share-mode-#{index}"}
-              options={[{:rw, "Read-write"}, {:ro, "Read-only"}]}
+              options={[{:ro, "Read-only"}, {:rw, "Read-write"}]}
               value={share.mode}
               event="set_share_mode"
               name="mode"
               values={%{"path" => share.path}}
+              confirm={%{"rw" => read_write_warning()}}
             />
             <button
               type="button"
@@ -208,6 +209,7 @@ defmodule MDTClientWeb.SandboxLive.Settings do
               id="share-pick"
               phx-hook=".PickFolders"
               data-default-path={@pick_from}
+              data-read-write-warning={read_write_warning()}
               class="inline-flex cursor-pointer items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-[13px] font-semibold leading-none text-deep transition-all hover:brightness-110 active:scale-[0.98] active:brightness-95 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
             >
               <.icon name="hero-folder-plus-micro" class="size-3.5" /> Choose folders…
@@ -231,10 +233,14 @@ defmodule MDTClientWeb.SandboxLive.Settings do
               title="How new folders are shared"
               class="rounded-md border border-line bg-deep px-2 py-1.5 text-xs text-ink outline-none focus:border-accent/60"
             >
-              <option value="rw" selected={@share_form[:mode].value != "ro"}>Read-write</option>
-              <option value="ro" selected={@share_form[:mode].value == "ro"}>Read-only</option>
+              <option value="ro" selected={@share_form[:mode].value != "rw"}>Read-only</option>
+              <option value="rw" selected={@share_form[:mode].value == "rw"}>Read-write</option>
             </select>
-            <.button type="submit" id="share-add">
+            <.button
+              type="submit"
+              id="share-add"
+              data-confirm={@share_form[:mode].value == "rw" && read_write_warning()}
+            >
               <.icon name="hero-plus-micro" class="size-3.5" /> Share
             </.button>
           </div>
@@ -252,10 +258,10 @@ defmodule MDTClientWeb.SandboxLive.Settings do
       <.card id="settings-vm" title="Size and timing">
         <:help>
           <span class="block">
-            The root disk holds what the image and the VM write outside its folders (apt packages, /tmp, /var); it takes space on this machine only as it fills, and starts empty when the VM is recreated. Folder writes is how much the VM may add to each read-write folder (Home, Cache, its memory, your shares) per boot, so a runaway agent can't fill your disk. Both need the VM recreated.
+            The root disk holds what the image and the VM write outside its own disks (apt packages, /tmp, /var), and starts empty when the VM is recreated. Home, Cache and Work are the disks the VM keeps. Every disk takes space on this machine only as it fills. A bigger Home, Cache or Work applies at the next start, and none is ever made smaller. Folder writes is how much the VM may add to each read-write folder (its memory, your shares) per boot, so a runaway agent can't fill your disk. The root disk and folder writes need the VM recreated.
           </span>
           <span class="mt-1.5 block">
-            Hold is how long a request waits for your decision before it gives up; the image sets HEX_HTTP_TIMEOUT above it, since Hex otherwise gives up after 15 seconds. A new proxy port needs the VM recreated, since microsandbox pins it at creation.
+            Hold is how long a request waits for your decision before it gives up; the image sets HEX_HTTP_TIMEOUT above it, since Hex otherwise gives up after 15 seconds.
           </span>
         </:help>
         <.form for={@vm_form} id="vm-form" phx-submit="save_settings" class="space-y-4">
@@ -296,11 +302,25 @@ defmodule MDTClientWeb.SandboxLive.Settings do
               error={@vm_errors[:hold_seconds]}
             />
             <.number_field
-              field={@vm_form[:proxy_port]}
-              label="Proxy port"
-              min="1024"
-              max="65535"
-              error={@vm_errors[:proxy_port]}
+              field={@vm_form[:home_gib]}
+              label="Home disk, GiB"
+              min="1"
+              max="4096"
+              error={@vm_errors[:home_gib]}
+            />
+            <.number_field
+              field={@vm_form[:cache_gib]}
+              label="Cache disk, GiB"
+              min="1"
+              max="4096"
+              error={@vm_errors[:cache_gib]}
+            />
+            <.number_field
+              field={@vm_form[:work_gib]}
+              label="Work disk, GiB"
+              min="1"
+              max="4096"
+              error={@vm_errors[:work_gib]}
             />
           </div>
           <div class="flex items-center gap-2 border-t border-line-soft pt-3">
@@ -334,7 +354,7 @@ defmodule MDTClientWeb.SandboxLive.Settings do
           // In a plain browser there is nothing to call, so the path is typed.
           const dialog = window.__TAURI__?.dialog
           const invoke = window.__TAURI_INTERNALS__?.invoke || window.__TAURI__?.core?.invoke
-          const mode = () => document.getElementById("share-mode")?.value || "rw"
+          const mode = () => document.getElementById("share-mode")?.value || "ro"
 
           if (!dialog && !invoke) {
             document.getElementById("share-path")?.focus()
@@ -360,7 +380,10 @@ defmodule MDTClientWeb.SandboxLive.Settings do
               .map((item) => (item && typeof item === "object" ? item.path : item))
               .filter(Boolean)
 
-            if (paths.length) this.pushEvent("add_shares", {paths, mode: mode()})
+            if (!paths.length) return
+            // Read-write is asked about first, like the other ways to choose it.
+            if (mode() === "rw" && !window.confirm(this.el.dataset.readWriteWarning)) return
+            this.pushEvent("add_shares", {paths, mode: mode()})
           } catch (error) {
             this.pushEvent("folder_picker_unavailable", {
               reason: `The folder picker could not be opened: ${error?.message || error}.`,
@@ -387,6 +410,12 @@ defmodule MDTClientWeb.SandboxLive.Settings do
   end
 
   # The picker opens where the latest shared folder sits, or in your home.
+  # Asked before a folder is shared read-write, however that is chosen.
+  defp read_write_warning do
+    "What the VM writes in a read-write folder can run on your machine when you use that " <>
+      "folder: a git hook, a build script, an editor task. Share it read-write anyway?"
+  end
+
   defp pick_from([]), do: System.user_home() || ""
   defp pick_from(shares), do: shares |> List.last() |> Map.fetch!(:path) |> Path.dirname()
 
@@ -704,7 +733,7 @@ defmodule MDTClientWeb.SandboxLive.Settings do
 
       <.card id="settings-folders" title="What the VM keeps">
         <:help>
-          Folders of MDT's, mounted into the VM besides yours. They survive recreating it. Written by the VM, so MDT treats them as data and never runs anything from them. Whatever in Home runs code (agent hooks, MCP servers, shell files) survives a recreate unless you start it empty.
+          The VM's own disks, and two folders of MDT's. The disks survive recreating the VM. They are files on this machine that only the VM opens: nothing here reads what is inside, so nothing in them can run here. Whatever in Home runs code in the VM (agent hooks, MCP servers, shell files) survives a recreate unless you start it empty.
         </:help>
         <dl class="space-y-2.5 text-xs">
           <.kept
@@ -718,6 +747,12 @@ defmodule MDTClientWeb.SandboxLive.Settings do
             path={@folders.cache}
             guest="/cache"
             text="Tool versions installed in the VM and package caches."
+          />
+          <.kept
+            label="Work"
+            path={@folders.work}
+            guest="/work"
+            text="Your projects and everything built in them. Recreating never empties it."
           />
           <.kept
             label="The VM's memory"

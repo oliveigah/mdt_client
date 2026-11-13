@@ -249,6 +249,7 @@ defmodule MDTClientWeb.SandboxLive.Components do
   @doc "The words and colours of each `t:MDTClient.Sandbox.Event.outcome/0`."
   @spec outcome_style(Event.outcome()) :: {String.t(), String.t()}
   def outcome_style(:tunnel), do: {"Passed", "bg-deep text-faint"}
+  def outcome_style(:lookup), do: {"Lookup", "bg-deep text-faint"}
   def outcome_style(:swapped), do: {"Credential", "bg-accent-soft/60 text-accent-strong"}
   def outcome_style(:allowed), do: {"Approved", "bg-ok-soft/60 text-ok-strong"}
   def outcome_style(:denied), do: {"Denied", "bg-bad-soft/60 text-bad"}
@@ -259,6 +260,8 @@ defmodule MDTClientWeb.SandboxLive.Components do
   def outcome_style(:grant), do: {"Grant", "bg-violet/15 text-violet-strong"}
   def outcome_style(:vm), do: {"VM", "bg-hover text-muted"}
   def outcome_style(:command), do: {"Host", "bg-bad-soft/50 text-bad"}
+  def outcome_style(:project), do: {"Project", "bg-hover text-muted"}
+  def outcome_style(:handoff), do: {"Handoff", "bg-accent-soft/60 text-accent-strong"}
 
   @doc "The VM's status as a dot and a word."
   attr :vm, VM, required: true
@@ -470,6 +473,10 @@ defmodule MDTClientWeb.SandboxLive.Components do
   attr :values, :map, default: %{}, doc: "extra phx-value-* pairs, as a map"
   attr :tone, :atom, default: :accent
 
+  attr :confirm, :map,
+    default: %{},
+    doc: "option value (as text) => what to ask before switching to it"
+
   def segmented(assigns) do
     ~H"""
     <div
@@ -484,6 +491,7 @@ defmodule MDTClientWeb.SandboxLive.Components do
         role="radio"
         aria-checked={to_string(to_string(value) == to_string(@value))}
         phx-click={JS.push(@event, value: Map.put(@values, @name, value))}
+        data-confirm={to_string(value) != to_string(@value) && @confirm[to_string(value)]}
         class={[
           "cursor-pointer rounded px-2 py-1 text-[11px] font-medium transition-colors",
           if(to_string(value) == to_string(@value),

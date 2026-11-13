@@ -370,6 +370,113 @@ defmodule MDTClientWeb.SandboxLiveTest do
     assert has_element?(view, "#notices", "Containerfile saved")
   end
 
+  test "a command grant is added with a script of yours or for any command, and no run goes unasked",
+       %{conn: conn, username: username} do
+    folder = Path.join(System.tmp_dir!(), "command-grant-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(folder)
+    on_exit(fn -> File.rm_rf!(folder) end)
+
+    {:ok, view, _html} = live(conn, ~p"/tools/sandbox/grants")
+    view |> element("#add-grant") |> render_click()
+    assert has_element?(view, "#type-command", "Command on this machine")
+    view |> element("#type-command") |> render_click()
+
+    # A script of yours needs the folder it runs in.
+    view
+    |> form("#add-grant-form",
+      grant: %{
+        name: "Deploy docs",
+        purpose: "Deploy the docs site",
+        script: "./deploy.sh staging"
+      }
+    )
+    |> render_submit()
+
+    assert has_element?(view, "#grant-error-dir", "Say which folder")
+
+    view
+    |> form("#add-grant-form",
+      grant: %{
+        name: "Deploy docs",
+        purpose: "Deploy the docs site",
+        script: "./deploy.sh staging",
+        dir: folder
+      }
+    )
+    |> render_submit()
+
+    assert_patch(view, ~p"/tools/sandbox/grants/deploy-docs")
+    assert has_element?(view, "#grant-script", "./deploy.sh staging")
+    assert has_element?(view, "#grant-delivery", "Every run waits for you")
+    assert has_element?(view, "#grant-delivery", "mdt run deploy-docs")
+    refute has_element?(view, "#grant-any-command")
+    # Nothing to paste, and nothing that lets a run through without asking.
+    refute has_element?(view, "#grant-value-card")
+    refute has_element?(view, "#grant-uses")
+
+    assert [%{kind: :command, script: "./deploy.sh staging", dir: ^folder, state: :off}] =
+             Sandbox.snapshot(username).grants
+
+    # With no script, agents write the text: said plainly.
+    {:ok, _} =
+      Sandbox.create_grant(username, %{
+        "kind" => "command",
+        "name" => "Shell",
+        "purpose" => "Anything that needs this machine"
+      })
+
+    {:ok, view, _html} = live(conn, ~p"/tools/sandbox/grants/shell")
+    assert has_element?(view, "#grant-any-command", "The widest grant there is")
+    assert has_element?(view, "#grant-delivery", "-- COMMAND")
+  end
+
+  test "a folder is shared read-only unless read-write is chosen, which asks first", %{
+    conn: conn,
+    username: username
+  } do
+    folder = Path.join(System.tmp_dir!(), "share-mode-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(folder)
+    on_exit(fn -> File.rm_rf!(folder) end)
+
+    {:ok, view, _html} = live(conn, ~p"/tools/sandbox/settings")
+    assert has_element?(view, "#share-mode option[value=ro][selected]")
+    refute has_element?(view, "#share-add[data-confirm]")
+
+    # However the folder arrives, no word about the mode means read-only.
+    render_hook(view, "add_shares", %{"paths" => [folder]})
+    assert [%{path: ^folder, mode: :ro}] = Sandbox.snapshot(username).settings.shares
+
+    # Switching it to read-write asks first, in plain words; back needs no asking.
+    assert has_element?(view, "#share-mode-0-rw[data-confirm*='can run on your machine']")
+    refute has_element?(view, "#share-mode-0-ro[data-confirm]")
+
+    view |> element("#share-mode-0-rw") |> render_click()
+    assert [%{mode: :rw}] = Sandbox.snapshot(username).settings.shares
+    assert has_element?(view, "#share-mode-0-ro")
+    refute has_element?(view, "#share-mode-0-rw[data-confirm]")
+
+    # So does choosing it for a new folder.
+    view |> form("#share-form", share: %{path: "", mode: "rw"}) |> render_change()
+    assert has_element?(view, "#share-add[data-confirm*='can run on your machine']")
+  end
+
+  test "what this machine lacks for a VM is said on the Setup page", %{
+    conn: conn,
+    username: username
+  } do
+    {:ok, view, _html} = live(conn, ~p"/tools/sandbox/setup")
+    refute has_element?(view, "#setup-needs")
+
+    server = MDTClient.Vault.Store.whereis(MDTClient.Sandbox.Server, username)
+    :sys.replace_state(server, &%{&1 | needs: ["bwrap isn't installed (package bubblewrap)."]})
+
+    {:ok, view, _html} = live(conn, ~p"/tools/sandbox/setup")
+    assert has_element?(view, "#setup-needs li", "bwrap isn't installed")
+
+    assert Sandbox.start_vm(username) ==
+             {:error, {:needs, ["bwrap isn't installed (package bubblewrap)."]}}
+  end
+
   test "folders picked in the folder dialog are shared together", %{
     conn: conn,
     username: username

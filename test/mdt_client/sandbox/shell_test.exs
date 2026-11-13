@@ -55,20 +55,38 @@ defmodule MDTClient.Sandbox.ShellTest do
         memory_gib: 8,
         disk_gib: 64,
         write_budget_gib: 32,
-        proxy_port: 18080,
-        mounts: [{"/host/project", "/project", :ro}, {"/host/cache", "/cache", :rw}],
+        shares: [{"/host/project", :ro}, {"/host/notes", :rw}],
         env: [{"GH_TOKEN", "placeholder"}]
       })
 
-    assert ["/bin/bash" | _] = args |> Enum.drop_while(&(&1 != "--shell")) |> tl()
-    assert ["64G" | _] = args |> Enum.drop_while(&(&1 != "--root-disk")) |> tl()
+    after_flag = fn flag -> args |> Enum.drop_while(&(&1 != flag)) |> tl() |> hd() end
+    every = fn flag -> for {^flag, value} <- Enum.zip(args, tl(args)), do: value end
 
-    # Read-only folders take no writes; read-write ones get the write budget
-    # instead of microsandbox's 4 GiB.
-    volumes = for {"--volume", volume} <- Enum.zip(args, tl(args)), do: volume
-    assert volumes == ["/host/project:/project:ro", "/host/cache:/cache:quota=32G"]
+    assert after_flag.("--shell") == "/bin/bash"
+    assert after_flag.("--root-disk") == "64G"
+    assert after_flag.("--env") == "GH_TOKEN=placeholder"
 
-    assert ["GH_TOKEN=placeholder" | _] = args |> Enum.drop_while(&(&1 != "--env")) |> tl()
+    # Everything the VM is made of is named by its path in the bubble, which
+    # the host doesn't have, and the proxy and DNS by the relay's ports.
+    assert after_flag.("--proxy") == "http://127.0.0.1:3128"
+    assert after_flag.("--dns-nameserver") == "127.0.0.1:5353"
+    assert after_flag.("--vsock") == "/mdt/sockets/channel.sock:5000"
+
+    assert every.("--mount-disk") == [
+             "/mdt/disks/home.img:/root",
+             "/mdt/disks/cache.img:/cache",
+             "/mdt/disks/work.img:/work"
+           ]
+
+    # A shared folder keeps its path in the VM. Read-only ones take no
+    # writes; read-write ones get the write budget instead of microsandbox's
+    # 4 GiB.
+    assert every.("--volume") == [
+             "/mdt/inbox:/mnt/mdt:ro",
+             "/mdt/optmem:/root/.optmem:quota=32G",
+             "/mdt/shares/0:/host/project:ro",
+             "/mdt/shares/1:/host/notes:quota=32G"
+           ]
   end
 
   test "commands and login probes find baked, cached and Home tools with empty Home", %{env: env} do

@@ -19,6 +19,7 @@ defmodule MDTClient.Vault.Store do
   # goes down last.
   @stores [
     MDTClient.Sandbox.Channel,
+    MDTClient.Sandbox.Dns,
     MDTClient.Sandbox.Egress,
     MDTClient.Sandbox.Server,
     MDTClient.MCP.Access,

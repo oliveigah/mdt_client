@@ -1,0 +1,20 @@
+msb 0.7.14, Alpine with git 2.54.1, host git 2.56.0, 2026-11-13.
+
+msb exec carrying a two-way conversation
+  plain `msb exec`: output arrives only when the command ends, so git's protocol stalls
+  `msb exec --stream`: output arrives at once (0.03 s); bytes unchanged (sha256 of 256 MiB)
+  256 MiB host to VM: 4.26 s (60 MiB/s); VM to host: 1.86 s (138 MiB/s); one empty exec: 0.03 s
+
+The VM's default checkout following the host branch (receive.denyCurrentBranch=updateInstead)
+  A. VM checkout clean and behind
+        25e0dfa..d48aaa6  master -> master
+        25e0dfa..d48aaa6  master -> host/master
+     VM file now ends with: host line A; status: 0 changed
+  B. VM checkout has an uncommitted edit to the same file
+        d48aaa6..1c5113c  master -> host/master
+      ! [remote rejected] master -> master (Working directory has unstaged changes)
+     VM file still ends with: vm uncommitted; host/master is 1c5113c host: B
+  C. VM committed on its own master (diverged)
+        1c5113c..678b39a  master -> host/master
+      ! [rejected]        master -> master (fetch first)
+     VM master: 47ee685 vm: own commit on master; host/master: 678b39a host: C

@@ -45,6 +45,27 @@ mix setup
 cargo tauri dev
 ```
 
+The Agent Sandbox also needs its VM runtime, built once into
+`priv/microsandbox`, plus `bwrap` (bubblewrap), `podman` and e2fsprogs on
+the machine:
+
+```bash
+./scripts/build-microsandbox.sh   # msb and its guest kernel
+./scripts/build-relay.sh          # MDT's relay, beside them
+```
+
+On Ubuntu (24.04 and later) AppArmor keeps the system's `bwrap` from doing
+what the sandbox needs. MDT's deb sets that up when it is installed; for an
+MDT run from source, once:
+
+```bash
+sudo sh scripts/deb/postinst.sh   # a copy of bwrap at /usr/lib/mdt/bwrap, and its profile
+```
+
+`mix test --only vm` then boots a real VM and checks what only one can
+show: that its process is confined, that it reaches the network only through
+MDT, and that its disks are kept.
+
 ## Connect an agent through MCP
 
 Open **Connect an agent** from the tools page or the title bar, then choose

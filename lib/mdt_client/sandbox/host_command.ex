@@ -21,7 +21,7 @@ defmodule MDTClient.Sandbox.HostCommand do
   Pure apart from reading the filesystem to resolve the directory.
   """
 
-  alias MDTClient.Sandbox.{Approval, Grant, Share, Shares}
+  alias MDTClient.Sandbox.{Approval, Grant, Share, Shares, Shown}
 
   @max_script 16 * 1024
   @default_timeout 120
@@ -64,7 +64,14 @@ defmodule MDTClient.Sandbox.HostCommand do
           hints: [String.t()]
         }
 
-  @type error :: :no_reason | :no_script | :script_too_long | :bad_timeout
+  @type error ::
+          :no_reason | :no_script | :script_too_long | {:hidden, [String.t()]} | :bad_timeout
+
+  @typedoc """
+  Where a command runs: inside a shared folder, in your home folder, or in
+  the folder a command grant names.
+  """
+  @type place :: {:share, String.t(), Share.t()} | {:home, String.t()} | {:grant, String.t()}
 
   @doc "The longest script an ask may carry, in bytes."
   @spec max_script() :: pos_integer()
@@ -82,13 +89,16 @@ defmodule MDTClient.Sandbox.HostCommand do
     * `:home` - where a command runs when its directory isn't shared,
       defaults to the user's home folder
     * `:user` - who it runs as, for the card, defaults to MDT's own user
+    * `:folder` - the folder a command grant with a script of yours names;
+      the command runs there, whatever the ask says
   """
   @spec check(ask(), [Share.t()], [Grant.t()], keyword()) :: {:ok, checked()} | {:error, error()}
   def check(ask, shares, grants, opts \\ []) do
-    home = Keyword.get_lazy(opts, :home, &System.user_home!/0)
+    # A real path, like a share's: the run checks it is still where it leads.
+    home = opts |> Keyword.get_lazy(:home, &System.user_home!/0) |> real()
     user = Keyword.get_lazy(opts, :user, &MDTClient.Sandbox.HostInfo.user/0)
-    reason = ask |> Map.get(:reason) |> text() |> String.trim() |> String.slice(0, 1_000)
-    agent = ask |> Map.get(:agent) |> text() |> String.trim() |> String.slice(0, 60)
+    reason = ask |> Map.get(:reason) |> Shown.text() |> String.trim() |> String.slice(0, 1_000)
+    agent = ask |> Map.get(:agent) |> Shown.text() |> String.trim() |> String.slice(0, 60)
     script = ask |> Map.get(:script) |> text() |> String.replace("\r\n", "\n")
     timeout = Map.get(ask, :timeout) || @default_timeout
 
@@ -102,12 +112,24 @@ defmodule MDTClient.Sandbox.HostCommand do
       byte_size(script) > @max_script ->
         {:error, :script_too_long}
 
+      # What runs is what the card shows, so a script that hides something
+      # is not shown changed: it doesn't run.
+      Shown.hidden(script) != [] ->
+        {:error, {:hidden, Shown.hidden(script)}}
+
       not (is_integer(timeout) and timeout in 1..@max_timeout) ->
         {:error, :bad_timeout}
 
       true ->
         asked = ask |> Map.get(:dir) |> text() |> String.trim()
-        place = place(asked, shares, home)
+
+        # A grant with a script of yours names its own folder.
+        place =
+          case Keyword.get(opts, :folder) do
+            nil -> place(asked, shares, home)
+            folder -> fixed(real(folder), shares)
+          end
+
         dir = elem(place, 1)
 
         {:ok,
@@ -133,7 +155,9 @@ defmodule MDTClient.Sandbox.HostCommand do
 
   @doc """
   Where a command asked to run in `asked` runs: `{:share, dir, share}` when
-  the directory's real path is inside a shared folder and exists, otherwise
+  the directory's real path is inside a shared folder, exists, and has a
+  name that shows all it holds (the VM can name a folder in a share as it
+  likes, and the card says where the command runs), otherwise
   `{:home, home}`.
   """
   @spec place(String.t(), [Share.t()], String.t()) ::
@@ -142,10 +166,26 @@ defmodule MDTClient.Sandbox.HostCommand do
     with "/" <> _ <- asked,
          {:ok, real} <- Shares.realpath(Path.expand(asked)),
          %Share{} = share <- Enum.find(shares, &Shares.within?(real, &1.path)),
-         true <- File.dir?(real) do
+         true <- File.dir?(real),
+         [] <- Shown.hidden(real) do
       {:share, real, share}
     else
       _ -> {:home, home}
+    end
+  end
+
+  # The grant's folder, noted as shared when it is, so the hints see it.
+  defp fixed(folder, shares) do
+    case Enum.find(shares, &Shares.within?(folder, &1.path)) do
+      %Share{} = share -> {:share, folder, share}
+      nil -> {:grant, folder}
+    end
+  end
+
+  defp real(path) do
+    case Shares.realpath(path) do
+      {:ok, real} -> real
+      {:error, _loop} -> path
     end
   end
 
@@ -153,9 +193,7 @@ defmodule MDTClient.Sandbox.HostCommand do
   What deserves a second look in `script`, run at `place`, worked out from
   its text alone.
   """
-  @spec hints(String.t(), {:share, String.t(), Share.t()} | {:home, String.t()}, [Share.t()], [
-          Grant.t()
-        ]) :: [String.t()]
+  @spec hints(String.t(), place(), [Share.t()], [Grant.t()]) :: [String.t()]
   def hints(script, place, shares, grants) do
     writable = for %Share{mode: :rw} = share <- shares, do: share.path
     named = Enum.filter(writable, &String.contains?(script, &1))
@@ -183,6 +221,9 @@ defmodule MDTClient.Sandbox.HostCommand do
         script
       ) && "Downloads code and runs it.",
       Enum.any?(commands, &(hd(&1) == "sudo")) && "Asks for root with sudo.",
+      Shown.mixed(script) != [] &&
+        "Mixes alphabets in #{Enum.join(Shown.mixed(script), ", ")}: " <>
+          "a letter there may not be the one it looks like.",
       Enum.any?(commands, &rm_rf?/1) && "Deletes files recursively without asking (rm -rf)."
     ]
     |> Enum.concat(covered(commands, script, grants))
@@ -271,6 +312,7 @@ defmodule MDTClient.Sandbox.HostCommand do
   defp where({:share, _dir, %Share{mode: :ro, path: path}}, _asked),
     do: "Inside #{path}, shared with the VM read-only."
 
+  defp where({:grant, _dir}, _asked), do: "The folder you set on the grant."
   defp where({:home, _home}, ""), do: "Your home folder: the ask named no directory."
 
   defp where({:home, _home}, asked),

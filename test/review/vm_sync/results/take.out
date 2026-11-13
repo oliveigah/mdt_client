@@ -1,0 +1,42 @@
+merge computed: exit 1 (1 = some file conflicts)
+   c.txt
+   Auto-merging a.txt
+   Auto-merging c.txt
+   CONFLICT (content): Merge conflict in c.txt
+files that would change:
+   M	a.txt
+   M	b.txt
+   M	c.txt
+   D	del.txt
+   A	new.txt
+
+after taking a.txt, c.txt, new.txt, del.txt:
+   before: HEAD d2f35a1 index efc3b15 branches 1
+   after:  HEAD d2f35a1 index efc3b15 branches 1
+   git status:
+       M a.txt
+       M c.txt
+       D del.txt
+      M  s.txt
+      ?? new.txt
+   a.txt, both edits:
+      2:a line 2, from the vm
+      9:a line 9, edited by me
+   c.txt, same line on both sides:
+      <<<<<<< 9e2848e8eb76f8844aa8354521f6ba7b5515e546
+      c line 1, edited by me
+      =======
+      c line 1, from the vm
+      >>>>>>> refs/remotes/vm/task1
+      c line 2
+      c line 3
+   b.txt (not picked) still: b line 5
+   staged by you, still staged: s.txt 
+   commits on master: 1
+
+after undo:
+   state: HEAD d2f35a1 index efc3b15 branches 1
+   git status:
+       M a.txt
+       M c.txt
+      M  s.txt

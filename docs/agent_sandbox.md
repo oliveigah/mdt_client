@@ -19,6 +19,13 @@ approvals. See [Grants and approvals](#grants-and-approvals). The `mdt`
 command was checked over a real VM's vsock; a VM created before this needs
 recreating to get the channel.
 
+Planned (2026-11-13): the first release for other people. msb starts
+confined, work moves to the VM's own disks, host commands become a grant,
+and DNS goes through MDT. See [First release](#first-release), whose
+[order of work](#order-of-work) says which steps are built: the first
+five of seven, uncommitted on the `sandbox-review` branch. Sections further
+down that those steps changed say so where they start.
+
 ## What it is for
 
 LLM agents run inside a microsandbox VM. MDT starts that VM, shares chosen
@@ -34,15 +41,17 @@ folders with it, and sits between it and the network.
 
 - **Leaking shared files.** Outbound traffic is passed through by default, so
   an agent can upload anything in a shared folder.
-- **Code you run on the host from a shared folder.** A VM can plant git hooks,
-  `core.fsmonitor` in `.git/config`, build scripts. Running git, mix or npm on
-  that folder on the host runs them. MDT's own Git tool does this too, and
-  so does a host command you approve there; its card says so when it can
-  tell, but the hints are not a review.
+- **Code you run on the host from a folder shared read-write.** A VM can
+  plant git hooks, `core.fsmonitor` in `.git/config`, build scripts. Running
+  git, mix or npm on that folder on the host runs them. MDT's own Git tool
+  does this too, and so does a host command you approve there; its card
+  says so when it can tell, but the hints are not a review. Folders are
+  shared read-only unless you confirm a warning that says this, and the
+  VM's own work sits on its disks, which nothing on the host opens.
 - **File grants after they are handed over.** See [Grant kinds](#grant-kinds).
-- **Data sent out through DNS.** DNS never goes through MDT. Microsandbox
-  answers port 53 to any address itself (`dig @8.8.8.8` works from the VM),
-  so query names can carry data out.
+- **Data sent out through DNS.** Every lookup goes through MDT and is in
+  the activity log, and a query aimed at another resolver gets no answer.
+  But MDT answers every name, so query names can still carry data out.
 - **VM agents using MDT notes, diagrams, or your host OptMem.**
 
 ## Decisions
@@ -81,6 +90,693 @@ folders with it, and sits between it and the network.
 | 2026-11-13 | MDT ships its own msb (v0.7.14 with the live-sharing patch, and its libkrunfw) and keeps its state in its own microsandbox home. An `msb` you install is never used. Now built from the fork (below). |
 | 2026-11-13 | `msb` is built from MDT's fork (oliveigah/microsandbox, commit `6626e7cb2`: v0.7.15 plus the ESTALE fix) until upstream takes the fix. Replaces the patch file. |
 | 2026-11-13 | Disk is a setting: the root disk (64 GiB, sparse) and a write budget per read-write folder per boot (64 GiB), instead of microsandbox's silent 4 GiB for both. |
+| 2026-11-13 | The first release has one VM backend, microsandbox. A second (stock VMM parts, spiked in `test/review/vm_spike`) is decided after it. macOS is not a target for now. |
+| 2026-11-13 | msb runs inside a bubble (`bwrap`): namespaces of its own, no home folder, no network. Its proxy and DNS reach MDT over Unix sockets. |
+| 2026-11-13 | DNS goes through MDT, which logs every name. Supersedes "DNS never goes through MDT"; names can still carry data out. |
+| 2026-11-13 | Work lives on the VM's own disks: Home, Cache and Work are disk images. Supersedes Home and Cache as host folders (11-12). |
+| 2026-11-13 | Host folders are still shared one by one, but as the exception: read-only unless you confirm a warning. Narrows the 11-11 decision. |
+| 2026-11-13 | A project is a copy of your repository in the VM, not a shared folder. Your branches reach it by sync, as `host/…`, through git over msb's pipe. Shared folders are for what isn't a repository. |
+| 2026-11-13 | The VM's work comes back only as handoffs: a finished piece of work an agent names and describes, fixed to one commit, like a pull request. You review it whole. |
+| 2026-11-13 | Your branches are yours. MDT never commits, stages, or creates, moves or deletes a branch of yours. A handoff you accept arrives in your working tree uncommitted; committing is yours to do. |
+| 2026-11-13 | MDT never writes into storage the VM can write. What it has for the VM goes through `/mnt/mdt`; the VM copies what it needs itself. |
+| 2026-11-13 | Host commands are a grant type, `command`. No such grant exists until you add one, so a new install runs nothing on the host for the VM. Every run still waits for approval. |
+| 2026-11-13 | The image is built on your machine with podman, from the recipe MDT ships. Nothing is published to a registry for now, so podman is required. |
+| 2026-11-13 | The MDT you use every day is the installed package. It loads no code from a folder a VM can write. Agents developing MDT work in the VM and hand over a branch. |
+| 2026-11-13 | Whether a use goes through, asks or is refused is one pure function of the grants, the use and the clock (`Policy.decide/3`). The server acts on its answer and decides nothing itself. |
+| 2026-11-13 | Text the VM chooses is shown with all it holds. Bytes that aren't UTF-8 and characters that don't show are written out where the text enters MDT. A script for your machine that hides anything is refused, not shown changed. |
+| 2026-11-13 | Intercepted hosts keep MDT's own strict reader for the first release. Bandit and Finch were tried and not taken (see [step 5](#step-5)). Narrows the plan made the same day. |
+| 2026-11-13 | On Ubuntu the bubble is made with MDT's own copy of the system's bwrap, at `/usr/lib/mdt/bwrap`, under an AppArmor profile the deb installs: what runs inside may hold the two capabilities the relay uses, and no other. See [step 6](#step-6). |
+| 2026-11-13 | The folders above msb's store are yours alone (`0700`), whatever umask made them. |
+
+<a id="first-release"></a>
+
+## First release
+
+Decided 2026-11-13; nothing here is built. It is the plan for the first MDT
+release that carries the Agent Sandbox to other people, on Linux. Where it
+disagrees with a later section, that section says what runs today and this
+one what it becomes. Each step below updates the sections it changes.
+
+### Who it defends against
+
+Whatever runs in the VM, as root: an agent following instructions planted
+in a web page or a repository, or a package it installed. It can do
+anything inside the VM, and send any bytes to the three things MDT offers
+it: the proxy, DNS and the agent channel.
+
+- It is not assumed to hold a working exploit against KVM or microsandbox.
+  If it does, [the bubble](#the-bubble) decides what it reaches.
+- Not defended: what you approve; leaks of what you gave the VM (see
+  [Not covered by v1](#not-covered-by-v1)); other programs running as you.
+
+### Promises
+
+| Promise                                                         | Kept by                                                                                                               |
+| --------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| The VM never holds a credential (file grants excepted, labeled) | Placeholders, swapped by the proxy                                                                                    |
+| Nothing leaves the VM except through MDT, DNS included          | The process running the VM has no network; its ways out are MDT's sockets                                             |
+| Nothing the VM writes runs on your machine unless you chose it  | The VM's work reaches your files only as a handoff you accepted, uncommitted; shares read-only unless you confirm; no command grant until you add one |
+| A VM escape reaches no home folder and no network               | The bubble                                                                                                            |
+| An approval shows what will happen, with nothing hidden in it   | Facts MDT works out itself, the agent's words kept apart, and text that is written out wherever it hides something ([Text the VM chooses](#text-the-vm-chooses)) |
+
+Each is a numbered line in [Guarantees to test](#guarantees-to-test),
+checked by a test on a real VM before a release.
+
+<a id="the-bubble"></a>
+
+### The VM runs in a bubble
+
+Today the process running the VM (`msb machine`) is an ordinary process of
+yours: it sees `~/.ssh` and the docker socket, has your machine's network,
+and no seccomp filter. MDT will start it with `bwrap` (bubblewrap, which
+Flatpak uses; a package dependency) instead:
+
+```
+bubble: own user, mount, network, PID, IPC, UTS and cgroup namespaces
+  /usr read-only; msb's runtime read-only; no /run; only `lo`
+  of /home, nothing but the path to msb's own store
+  read-write: this identity's microsandbox home, its disks, its shares
+
+  msb ── 127.0.0.1:3128 ────────▶ relay ──▶ proxy.sock ──▶ MDT egress proxy
+  msb ── 127.0.0.1:5353 (DNS) ──▶ relay ──▶ dns.sock ───▶ MDT DNS forwarder
+  msb ── vsock 5000 ───────────────────────▶ channel.sock ▶ MDT agent channel
+```
+
+- **Sockets:** one folder per identity, `$XDG_RUNTIME_DIR/mdt/<id>/`, mode
+  0700: `proxy.sock`, `dns.sock`, `channel.sock` and `control.sock`. The
+  proxy no longer listens on a loopback port, so the port setting goes
+  away, and no other program on the machine can use it as a proxy.
+- **msb is told** `--proxy http://127.0.0.1:3128` and
+  `--dns-nameserver 127.0.0.1:5353`. Those ports exist only inside the
+  bubble; every identity's bubble has its own.
+- **The relay** (`native/mdt_relay`, Rust, no dependencies, built to
+  `bin/mdt-relay` beside `msb`) is the bubble's first process. It does five
+  things:
+    1. adds a default route into loopback, then gives up its capabilities
+       for good. msb gives the VM an IPv4 address only when the kernel can
+       pick a route to a public address (`host_has_ipv4_route`,
+       `crates/network/lib/engine/network.rs`); this route leads nowhere;
+    2. joins the two loopback ports to the two sockets;
+    3. runs the `msb create` or `msb start` MDT gave it, and writes how
+       that went to `start.out`;
+    4. answers `control.sock`: `status`, and `stop`, which runs `msb stop`
+       and then exits;
+    5. exits when the VM's process ends.
+- **The VM runs exactly as long as the relay does.** The relay is process
+  1 of the bubble's PID namespace (`bwrap --as-pid-1`), so when it ends,
+  however that happens, the kernel ends everything else in there. bwrap's
+  own first process doesn't do that: in the check, with it, a killed relay
+  left the VM running with nothing to stop it.
+- **One relay per VM.** It holds `relay.lock`; a second one for the same
+  sockets refuses to start, rather than take over the first one's control
+  socket.
+- **Everything the VM is made of sits under `/mdt`,** a path that exists
+  only in the bubble: `/mdt/runtime`, `/mdt/sockets`, `/mdt/disks`,
+  `/mdt/inbox`, `/mdt/optmem`, `/mdt/shares/N`. msb boots a stopped VM by
+  itself on `exec` and `ssh`, and has no switch for that. Outside the
+  bubble it can't boot this one: its disks aren't there ("disk image host
+  path does not exist: /mdt/disks/work.img").
+- **Stopping and status go through the relay.** msb records the VM's
+  process id as the bubble sees it, so `msb stop` fails from outside, and
+  what it says about a VM running means nothing there. `msb exec`, and so
+  MDT's own calls into a running VM, work from outside: they go through
+  sockets in the microsandbox home.
+- **MDT crashing leaves the bubble running**, with no internet until MDT
+  listens again: it is started detached (`setsid`), tied to nothing. MDT
+  finds it through `control.sock` when it comes back. Quitting or locking
+  stops the VM cleanly, as before.
+- **DNS:** MDT's forwarder (`MDTClient.Sandbox.Dns`) reads each query's
+  name and type, logs them in the activity log (a name again only after 10
+  minutes), passes the query to this machine's resolver (so VPN names keep
+  working) and returns the answer unchanged. A query the VM aims at another
+  resolver gets no answer, since msb has no network to send it.
+- **The microsandbox home is per identity**
+  (`~/.mdt_client/identities/<id>/sandbox/microsandbox`), so one identity's
+  bubble never holds another's VM. Cost: the image is stored once per
+  identity. msb is given a short link to it as its home, beside the
+  sockets: it keeps Unix sockets of its own about 60 bytes below its home,
+  and a socket's path must fit in 108. The bubble has the folder at both
+  paths, since msb records its images by the real one.
+- **The launcher** is per identity too (`…/sandbox/bin/msb`, used by Zed).
+  It only looks at the VM and goes into it: `exec`, `ssh` and `cp` are
+  refused while the VM isn't running (nobody holds `relay.lock`), and what
+  starts, stops or changes a VM is refused always. It says to use MDT.
+- **What the machine lacks** is said on the Setup page and when you start
+  the VM: `bwrap` missing or not allowed to create user namespaces, the
+  relay missing from the build, `mkfs.ext4` and friends missing.
+
+Checked on 2026-11-13 with a throwaway VM (msb 0.7.14, Alpine), the bubble
+beside plain msb. The relay was a Python script then; the Rust one passes
+the same rows, and more (below).
+
+| Check                                      | Plain msb                      | In the bubble                              |
+| ------------------------------------------ | ------------------------------ | ------------------------------------------ |
+| The VM's process sees `/home`, docker's socket | Yes                        | No                                         |
+| Its network                                | This machine's (Wi-Fi, docker) | `lo` only                                  |
+| Namespaces of its own                      | None                           | All seven                                  |
+| `NoNewPrivs`, capabilities                 | 0, none                        | 1, none                                    |
+| HTTP and HTTPS from the VM                 | Through the proxy              | Through the proxy, over the socket         |
+| DNS names the host side saw                | None                           | Every name                                 |
+| `nslookup name 8.8.8.8` in the VM          | Answered, unseen               | No answer                                  |
+| Proxy socket removed                       | Not applicable                 | "Connection refused"                       |
+| `msb exec` from outside, a shared folder   | Work                           | Work                                       |
+| Create and boot                            | 0.4 s                          | 0.7 s                                      |
+
+Scripts and output: `test/review/msb_confine` on the `sandbox-review`
+branch (`run.py`, `inside.py`, `results/`).
+
+### Storage: the VM's own disks
+
+Three ext4 disk images per identity, in `~/.mdt_client/<id>/sandbox/disks`,
+sparse, attached with `--mount-disk`:
+
+| Disk  | In the VM | Holds                                               | Default size | Recreating                                |
+| ----- | --------- | --------------------------------------------------- | ------------ | ----------------------------------------- |
+| Home  | `/root`   | Agent logins and settings, shell history            | 16 GiB       | Keep (default), go back to a snapshot, or start empty |
+| Cache | `/cache`  | Tool versions and package caches                    | 64 GiB       | Keep (default) or clear                   |
+| Work  | `/work`   | Your repositories and everything built in them      | 64 GiB       | Always kept; emptied only when you ask    |
+
+- **Why:**
+    - A folder shared read-write is the easy way out of the VM: a hook or a
+      `.git/config` line the agent writes runs when you use git, mix or npm
+      there. With work on a disk, nothing on the host opens it.
+    - Files are faster. In one VM, creating 10,000 files took 0.85 s on a
+      disk image and 3.51 s in a shared folder; reading them 0.23 s and
+      1.89 s. A Python version of the same steps in your own VM gave 0.46 s
+      on the root disk against 4.58 s in a share.
+    - Host and VM no longer build in the same folder with different tools.
+- **Made with** `mkfs.ext4 -E root_owner=0:0` on a sparse file, which
+  needs no root. Sizes are settings; growing one is offered while the VM
+  is stopped, shrinking isn't.
+- **Snapshots:** before a recreate MDT copies `home.img` (a reflink where
+  the filesystem has them, a sparse copy elsewhere), and keeps 3, as today.
+- **Stops are clean.** MDT stops the VM and waits before removing it. A
+  forced remove is a power cut: in the check, a file written 0.1 s before
+  `msb rm --force` was gone after the recreate, while one written before a
+  plain `msb stop` was there.
+- **The write budget** per folder now applies only to read-write shares;
+  a disk's size is its limit.
+- **Not readable from the host** while the VM is stopped. Files come out
+  through git, or `msb cp` while it runs.
+
+Repositories are not shared at all: see [Projects](#projects).
+
+**Shared host folders** stay for what isn't a repository (a dataset, a
+folder of documents), one by one, at the same path as on the host:
+
+- read-only by default;
+- read-write only after you confirm a warning that says it plainly: what
+  the VM writes there can run on your machine when you use that folder;
+- the VM's OptMem folder stays a host folder, since MDT reads it (as data,
+  while the VM is stopped).
+
+<a id="projects"></a>
+
+### Projects: a copy in the VM, work handed back like a pull request
+
+A project is a git repository on your machine that you add to the VM. MDT
+makes a copy of it on the Work disk, at `/work/<name>`. No folder is
+shared. The two directions are different on purpose:
+
+```
+your repository                               /work/<name> in the VM
+  your branches   ── sync ──▶    arrive as    host/master, host/…
+  a handoff       ◀── mdt handoff ──          one finished piece of work
+     you review it whole; it comes into your working tree uncommitted
+```
+
+- **Your branches are yours.** MDT never commits, never stages, and never
+  creates, moves or deletes a branch of yours. Nothing from the VM lands
+  on them as a commit.
+- **Transport, both ways:** MDT runs git on your machine, and the other
+  end of git's protocol runs in the VM through msb's pipe
+  (`msb exec --stream VM -- git receive-pack /work/<name>`, and
+  `upload-pack`). No network, no SSH, no share. What crosses is git
+  objects, checked on arrival (`fetch.fsckObjects`), and names. No config,
+  hook, index or working file crosses. MDT writes nothing into your
+  repository's config.
+
+#### Sync: your work into the VM
+
+- Your local branches arrive in the VM as `host/<branch>`. Only committed
+  work goes, unless you tick "include what I haven't committed", which
+  adds a snapshot of your working tree as `host-wip/<branch>` (a commit
+  made from a copy of the index, so nothing in your tree changes).
+- **`/work/<name>` follows your branch.** It starts on the branch your
+  checkout has. A sync fast-forwards it when it is clean and only behind
+  (`receive.denyCurrentBranch=updateInstead`); otherwise the sync leaves
+  it alone and says so.
+- **One worktree per agent session.** Each session starts a worktree and
+  a branch of its own, from your branch as it is then, and works only
+  there:
+  `mdt sync && git worktree add /work/<name>.wt/<task> -b <task> host/master`.
+  Several sessions work side by side this way, and each handoff holds one
+  session's work and nothing else. `/work/<name>` itself is nobody's
+  workplace: it only follows your branch. The agents' instructions say
+  so, and `mdt handoff` holds them to it (below).
+- **When:** a Sync button on the project, and `mdt sync` in the VM, which
+  needs no approval: it only brings your committed branches to the VM.
+  There is no timer.
+- **Not carried:** files git ignores (`_build`, `deps`, `.env`), so each
+  side builds its own; submodules and LFS files, which the VM gets from
+  their own remotes.
+
+<a id="handoffs"></a>
+
+#### Handoffs: the VM's work back to you
+
+Work in progress in the VM stays in the VM. What comes back is a
+handoff: one finished piece of work that an agent wraps up, names and
+describes, the way it would open a pull request.
+
+```
+mdt handoff --title "Fix the login redirect" [--body FILE]    from its worktree, everything committed
+mdt handoffs                                                   its handoffs: waiting, taken, sent back (with your note), declined
+```
+
+- **A handoff is one commit, fixed when it is made.** MDT fetches the
+  branch as it is at that moment and records the commit it got. Later
+  commits in the VM don't change what you are looking at; handing off the
+  same branch again replaces it with the new commit, and says so.
+- **One handoff per worktree,** so each is one session's work. `mdt
+  handoff` hands off the branch of the worktree it runs in, and refuses
+  in `/work/<name>` itself. Several can wait at once, one per worktree.
+- **Uncommitted work isn't handed off:** `mdt handoff` refuses a worktree
+  with changes and lists them, so a checkpoint is something the agent
+  meant.
+- **Where it sits on your machine:** as `vm/<branch>`, kept the way git
+  keeps a remote's branches (`refs/remotes/vm/…`). Git won't commit on it
+  (checking it out detaches), `git push` leaves it behind, and tools list
+  it apart from your branches. It exists only while the handoff waits, so
+  any git tool can read the diff too. Nothing else of the VM's is in your
+  repository.
+- **It asks nothing of you right away.** A line on the Projects page and
+  in the activity log. `mdt handoff` returns at once with its id.
+
+```
+mdt_client    your branch: master                                         [Sync]
+
+Handoffs
+  #7  Fix the login redirect      claude · fix-login · 3 commits · 5 files +120 −34 · merges cleanly             waiting
+  #6  Port forwarding, guest side  codex · port-forward · 9 commits · 12 files +800 −20 · conflicts with master   waiting
+  #5  Faster inbox writes          claude · taken yesterday
+
+#7  Fix the login redirect
+  The agent says:  "The redirect dropped the return path when … `mix precommit` passes."
+  Facts:           built on your master as it is now · 5 files, +120 −34
+  Hints:           changes mix.exs, which runs when you build
+  The whole diff, against your branch
+
+  [Bring it into my working tree]     [Send back with a note]     [Decline]
+```
+
+- **Facts and claims apart,** as on approvals. Facts are worked out by
+  MDT: the files, the size, what it is built on, whether it merges with
+  your working tree as it is now. The title, the description and the
+  commit messages are the agent's claims. Hints mark files that run on
+  your machine when you build or commit (`mix.exs`, a `Makefile`,
+  `package.json`, `.envrc`, CI and editor task files); they are hints, not
+  a review.
+- **Bring it** takes the whole handoff, never part of it, into your
+  working tree as uncommitted changes, merged with what you have there.
+  Your branch, your index and anything you staged stay as they were, and
+  no commit is made. You look, keep or drop what you like with your usual
+  tools, and commit in your own time, under your name.
+- **Undo** puts your working tree back: MDT keeps the snapshot it took
+  before bringing anything.
+- **When it doesn't merge** with what you have, nothing is written. You
+  send it back, the agent merges your branch in the VM, resolves there
+  and hands off again. You can also bring it anyway, with conflict
+  markers.
+- **A file of yours that git ignores is never written over.** Where a
+  handoff adds a file and you already have one there (a `.env`, say), it
+  is in the way and nothing is written.
+- **Send back with a note:** the note is what the agent reads in
+  `mdt handoffs`. Declining ends it. Either way `vm/<branch>` goes away.
+- **What MDT keeps in your repository** besides `vm/<branch>` are refs no
+  tool lists, under `refs/mdt/`: the handoff's commit, so a bring can be
+  undone after `vm/<branch>` is gone, and the snapshot taken before a
+  bring. They go when the handoff is sent back or declined, when the
+  project is removed, or when the handoff falls out of the last 50.
+- **How a bring works:** a snapshot of your working tree, then
+  `git merge-tree --write-tree SNAPSHOT COMMIT`, which computes the merge
+  without touching anything, then git itself writes the changed paths from
+  the result into the working tree only
+  (`git restore --source=TREE --worktree`). Needs git 2.38 or newer.
+- **Afterwards the agent catches up by merging,** not rebasing:
+  `mdt sync`, then `git merge host/master` in its worktree. Lines you kept
+  as they were merge silently, and `git diff host/master` then shows what
+  you dropped or changed. Its branch's history is never yours, so its
+  shape doesn't matter.
+- **Pushing to GitHub** from the VM through a token grant still works,
+  for a real pull request.
+
+Copying files instead (rsync, or a two-way sync tool) was considered and
+not chosen. It writes what the VM wrote straight into your working tree,
+which is what dropping the share was for. Two versions of a file have no
+common base to merge from. And it fights git: one branch's files copied
+onto another's checkout show up as changes.
+
+Checked on 2026-11-13 with a throwaway VM (msb 0.7.14, Alpine, git 2.54)
+and a clone of this repository. The transport and the bring were tried;
+the handoff's record, its commands and its screen are design.
+
+| Check                                                                   | Result                                                                                                              |
+| ----------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| Plain `msb exec`                                                        | Holds output until the command ends, so git's protocol stalls. `--stream` sends it at once, unchanged (256 MiB, same SHA-256) |
+| The pipe's speed                                                        | 60 MiB/s into the VM, 138 MiB/s out; 0.03 s for an empty call                                                        |
+| The whole repository into the VM (6 MiB)                                | 0.25 s; 0.03 s when nothing is new                                                                                   |
+| A VM branch out                                                         | 0.05 s; 0.03 s when nothing is new                                                                                   |
+| Snapshot of uncommitted work                                            | `git status` identical before and after; the edit and the new file were in it, `_build` was not                      |
+| Both sides edit the same line                                           | Both transfers pass and no tree changes. The conflict shows only when the agent brings your branch into its own, in the VM, and is resolved there |
+| Hooks, `core.fsmonitor`, `core.pager`, `core.sshCommand` planted in the VM's repository | None ran on the host (6 hooks ran in the VM); the host's `.git/config` and hooks unchanged          |
+| A tree holding `.git/config`, offered by the VM                         | Refused: "fsck error in packed object"                                                                               |
+| `/work/<name>` following                                                | Clean and behind: updated. Uncommitted edit, or commits of its own: left alone. `host/master` updated in all three   |
+
+Bringing a branch's changes in, checked the same day in a plain
+repository (git 2.56; `take_probe.sh`). The VM's branch edited three
+files, added one and deleted one; you had one staged change and two
+unstaged edits. The test wrote four of the five files; a bring writes all:
+
+| Check                                             | Result                                                                  |
+| ------------------------------------------------- | ----------------------------------------------------------------------- |
+| HEAD, the index, your branches, before and after  | Identical; no commit on `master`                                        |
+| Your staged change                                | Still staged                                                            |
+| A file both edited, on different lines            | Both edits there                                                        |
+| A file both edited, on the same line              | Reported as a conflict before anything was written                      |
+| The new file, the deleted file                    | Untracked; removed                                                      |
+| Undo                                              | `git status` back to what it was                                        |
+
+Scripts and output: `test/review/vm_sync` on the `sandbox-review` branch.
+
+### What MDT hands to the VM
+
+Today MDT writes its instruction block into `~/.claude/CLAUDE.md` and
+`~/.codex/AGENTS.md` in Home, and copies `memo` into the VM's OptMem
+folder, from the host. Both follow a symlink the VM plants, so a host file
+gets rewritten at the next start. From now on:
+
+- **MDT writes only `/mnt/mdt`,** which the VM can't change. `memo` goes
+  to `/mnt/mdt/bin`.
+- **The VM copies for itself.** After each boot MDT runs one script from
+  `/mnt/mdt/bin`, inside the VM (`msb exec`), that puts the block between
+  its markers in the agents' files. A symlink there now points inside the
+  VM.
+- With Home on a disk, the host has no path to it anyway.
+
+### Host commands become a grant
+
+A fourth type, beside `token`, `network` and `file`:
+
+| Type      | What the VM gets                                      | Approval                          | Turning it off                                             |
+| --------- | ----------------------------------------------------- | --------------------------------- | ---------------------------------------------------------- |
+| `command` | Nothing. It may ask MDT to run a command on your machine | Per run, of the exact text. No allowance | New asks are refused. A command already running goes on until it ends or you stop it |
+
+```elixir
+%Grant{
+  kind: :command,
+  purpose: "Deploy the docs site to staging",
+  script: "./deploy.sh staging",          # fixed; nil = agents write the text
+  dir: "/home/me/projects/site"           # where a fixed script runs
+}
+```
+
+- **Two forms:**
+    - *Fixed:* you write the script and its folder. Agents run it by the
+      grant's name and send no text: `mdt run GRANT --reason "…"`.
+    - *Any command:* agents send the text, as today:
+      `mdt run GRANT --reason "…" -- COMMAND`. Labeled as the widest grant
+      there is, the way file grants are labeled a last resort.
+- **Off by default, by not existing.** With no command grant, `mdt run`
+  is refused and says how to ask (`mdt request --need "…"`), which you
+  answer by setting one up, or not.
+- **It behaves like any grant:** on for a time or until turned off, with
+  your words for what it is for, listed by `mdt grants`, asked for with
+  `mdt request`, with its own activity.
+- **Every run still waits for you,** fixed or not, with the card as it is
+  today; the approval now names its grant. No allowance covers a command
+  (the 11-12 decision stands).
+- **Where it runs:** a fixed script in the grant's folder. Any command in
+  `--dir` when that is inside a share, otherwise in your home folder: an
+  agent's own folder is on the Work disk now, which the host doesn't have.
+  The folder is resolved again when the command starts (`cd -P`, then
+  compared), so swapping it for a symlink after the ask changes nothing.
+- `mdt host` needs no grant: it only reads.
+
+### The image stays local
+
+Unchanged: the recipe ships with MDT (`priv/sandbox`), and podman builds
+it on your machine. Nothing is pulled from a registry of MDT's. So podman
+is a package dependency, and the Checks screen says so when it is missing.
+
+### Developing MDT itself
+
+- **Your MDT** is the installed package, from the last tag or from
+  `./scripts/build-linux.sh`. It holds your real vault and the VM agents
+  work in, and loads no code from a folder a VM can write. Today the dev
+  server runs from the checkout the VM writes, so an agent's edit to
+  `lib/`, or to the `msb` in `_build`, runs on your machine.
+- **Agents in the VM** work on MDT as a [project](#projects): a worktree
+  from `host/master`, `mix precommit`, then `mdt handoff`. You review the
+  [handoff](#handoffs), bring it in and commit it yourself. The "work in
+  a worktree" section of `AGENTS.md` is rewritten for it once projects
+  exist.
+- **Trying a change:** a dev MDT with a data folder of its own
+  (`MDT_RUN_DIR`), so its own identities, microsandbox home and VM. On the
+  host when the change touches the VM; inside the VM for anything else.
+- **Packages** are built by CI from the tag, as now, after the tests on a
+  real VM pass on Fedora and Ubuntu.
+- **Cost:** a merged change reaches your own MDT only when you install a
+  new build (about 8 minutes for an rpm here).
+
+### Order of work
+
+| Step | What                                                                                                                                              | Done when                                                                                   |
+| ---- | ------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| 1    | Close the gaps the 11-13 review proved: approvals joined too loosely, expiry never checked, host writes that follow the VM's symlinks, a command's folder swapped after the ask, GraphQL and Host spoofing, `TRACE`, values in a crash log, the 10-second CONNECT wait, the inbox rewrite, unbounded certificates. With them the one-line speedups (socket buffers, `nodelay`, roots loaded once, chunked bodies, connecting while peeking). | The 16 tests in `test/review/sandbox_intent_test.exs` pass and move into the suite; the three benchmarks are rerun. |
+| 2    | The VM layer: the bubble and relay, the proxy and DNS on sockets, per-identity microsandbox home, the three disks, clean stops, the launcher's refusals, the Checks screen. | A test on a real VM passes every row of the table above, plus disks kept across a recreate. Throughput through the relay is measured. |
+| 3    | Projects: adding one, sync to the VM, `mdt sync`, `mdt handoff`, and the handoff screen (review, bring, undo, send back).                         | On a real VM: a handoff is listed with its diff, brought in uncommitted with your branch and index unchanged, undone, and sent back with a note the agent reads; a planted hook runs nowhere on the host. |
+| 4    | The `command` grant.                                                                                                                              | A new identity can't run anything on the host; fixed and any-command runs pass on a real VM. |
+| 5    | A pure `Policy.decide(snapshot, use, now)`, `Server` split into Grants, Approvals, VM and HostRuns, and intercepted hosts served by Bandit and Finch instead of the hand-written parser (after a one-day spike: websocket upgrades, holding a body). | Policy has property tests; a corpus of malformed and ambiguous requests is refused.          |
+| 6    | Release engineering: package dependencies (`bubblewrap`, `podman`, `e2fsprogs`), the real-VM suite run from the installed package on Fedora and Ubuntu, signed checksums, a page on what MDT protects and what it doesn't, how to report a security problem. | A fresh Fedora and a fresh Ubuntu go from install to a handoff brought in and committed by you.     |
+| 7    | You use the release candidate every day, with agents on the new workflow.                                                                         | A week without a blocker; then the tag.                                                     |
+
+Step 1 was built on 2026-11-13, uncommitted on the `sandbox-review`
+branch. The 16 tests are `test/mdt_client/sandbox/guarantees_test.exs`,
+with more in `egress_test.exs` and `graphql_test.exs`. Two things differ
+from the list above:
+
+- **Host writes into Home and the VM's OptMem** no longer follow links.
+  Moving them out of there altogether comes with step 2, as
+  [What MDT hands to the VM](#what-mdt-hands-to-the-vm) says.
+- **The system roots** go to the proxy's own connections as a file
+  (`MDTClient.Sandbox.Roots`), which `ssl` reads once, instead of a list
+  it takes in again per connection.
+
+Measured again on loopback, same benchmarks as the review:
+
+| Path                                      | Before       | After        |
+| ----------------------------------------- | ------------ | ------------ |
+| Tunnel, 1 GiB                             | 1.1 GiB/s, about 300 ms of CPU per GiB | 3.6 GiB/s, 16 ms |
+| One intercepted GET                       | 50.6 ms      | 6.8 ms       |
+| 64 intercepted requests at once           | 243 per second | 519 per second |
+| A 27-byte chunked body                    | 2,007 ms     | 4.8 ms       |
+| A server that speaks first, to first byte | 1.5 s        | 0.11 s       |
+
+Step 2 was built the same day, uncommitted on the same branch: the relay
+(`native/mdt_relay`, `scripts/build-relay.sh`), `Bubble`, `Sockets`, `Dns`,
+`Disks`, the per-identity `Msb`, the boot script (`priv/sandbox/mdt-boot`),
+shares read-only by default, and the package dependencies. `mix test
+--only vm` boots a real VM (Alpine, msb 0.7.14) twice, in 34 seconds here:
+
+| Check, on a real VM with MDT's own proxy, DNS forwarder and channel   | Result |
+| ---------------------------------------------------------------------- | ------ |
+| The VM's process: seven namespaces of its own, no `/home`, `/etc` or `/run` of yours, `lo` only, no capability held or regainable | Pass |
+| `/root`, `/cache`, `/work` are ext4 disks; `/mnt/mdt` and the VM's memory are folders; a share is read-only | Pass |
+| HTTP out is in MDT's activity log, and so is the name it looked up     | Pass   |
+| A name asked of 8.8.8.8 gets no answer and is in no log                | Pass   |
+| `mdt grants` over vsock, with bash and socat fetched through MDT       | Pass   |
+| The boot script puts the instructions in the agents' files, and `memo` with an empty memory in the VM's own folder | Pass |
+| Stop, start, recreate: the three disks keep their files, the root disk starts over | Pass |
+| `msb start` and `msb exec` from outside the bubble boot nothing        | Pass   |
+| MDT locked: the VM runs on, without internet                            | Pass   |
+| The sandbox itself creates, stops, starts and recreates it (Home emptied, a copy kept, Work untouched), and stops it when you lock | Pass |
+| The launcher goes into the VM while it runs, and refuses after         | Pass   |
+
+With the Python stand-ins of the earlier check on MDT's side: 1 GiB from
+the host side into the VM, through msb, the relay and the socket, at 610
+MiB/s; create and boot in 0.5 s, start in 0.4 s.
+
+Step 4, the `command` grant, was built the same day as well: the fourth
+grant type, with a script of yours or for any command; `mdt run GRANT`; no
+allowance and no "allow every use" for one; the approval names its grant.
+`mdt` no longer reads a script from a stdin that has nothing in it, so a
+run of your own script never waits on one. Checked in a real VM: with no
+command grant `mdt run` is refused, and a grant with a script of yours
+waits for approval with that script, in its folder.
+
+Step 3 was built the same day too: `Guest`, `HostGit`, `Project`, `Sync`,
+`Handoff`, `Projects`, the `mdt sync`, `mdt handoff` and `mdt handoffs`
+commands, and the Projects page. Its tests use a folder of this machine in
+the VM's place (`projects_test.exs`, `projects_flow_test.exs`,
+`sandbox_projects_live_test.exs`); `mix test --only vm` does the same
+through a real VM, with the real `mdt` command in it:
+
+| Check, through msb's pipe into a VM in the bubble                      | Result |
+| ---------------------------------------------------------------------- | ------ |
+| A sync makes the copy on your branch; a second one finds it current    | Pass   |
+| A handoff from a worktree arrives, with its facts                      | Pass   |
+| It comes into your working tree uncommitted, HEAD unmoved; undo puts the tree back | Pass |
+| A hook and `core.fsmonitor` planted in the VM's repository run there, never here | Pass |
+| `mdt sync`, `mdt handoff` and `mdt handoffs`, run in the VM            | Pass   |
+
+<a id="step-5"></a>
+
+Step 5 was built the same day too, with one part of it decided against:
+
+- **The decision is one pure function.**
+  `Policy.decide(snapshot, use, now)` answers pass, allow, ask or refuse
+  for a connection, a request or a command, and the server acts on the
+  answer. `policy_test.exs` checks its rules for every combination of a
+  small world: 40,320 requests, 16,128 connections and 1,620 asks to run a
+  command.
+- **Text the VM chooses** turned up while those tests were written: raw
+  bytes and invisible characters reached approval cards. See
+  [Text the VM chooses](#text-the-vm-chooses), and the limits on what MDT
+  reads from git there.
+- **The server is the process and six modules**, from 3,000 lines in one:
+  `Server` (1,070 lines, every message), `State`, `Grants`, `Approvals`,
+  `Values`, `HostRuns` and `Machine`. One process and one state as before:
+  the functions were moved by a script, not rewritten, and
+  `Settings.cast/2` took the settings form's checks.
+- **Bandit and Finch for intercepted hosts were tried and not taken.**
+
+| Question                        | What the spike found (`test/review/http_spike/`)                                                                                   |
+| ------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| The corpus of 65 requests       | Of the 52 MDT's reader refuses, Bandit refuses 39. It takes 7 by reading leniently (a list as `Content-Length`, bare line feeds, a full address as the target) and 6 a Plug would have to refuse itself (`TRACE`, `CONNECT`, the `Host` rules). Finch rewrites what goes out, so none is a way through |
+| A request held for your answer  | Works: held 70 s, then sent on                                                                                                     |
+| An upgrade (WebSocket)          | Reaches the Plug as an ordinary request. Passing it on takes a WebSocket client, which MDT doesn't have; today it is bytes after the head |
+| A header value outside ASCII    | Mint refuses to send it (`502`); MDT's reader passes it on, as HTTP allows                                                         |
+| Giving Bandit the connection    | No supported way to hand it a connection MDT accepted and decrypted: a second listener on loopback with a table of which VM connection is which, or Bandit's private modules |
+| Time                            | 0.11 ms a request with connections kept on both sides, 1.5 ms with a new TLS connection each (loopback). To api.github.com from here a new connection costs about 27 ms before the request goes |
+
+  The gain would be about 30 ms a request, and every request on a kept
+  connection judged on its own. The cost is the upgrade pipe, a private
+  API or a second listener, and a rewrite of the path that was just
+  hardened and measured. What carries over is the corpus: MDT's reader
+  passes it, after three fixes it found (only spaces and tabs are trimmed
+  from a value; a head over 64 KiB is refused even when it arrives at
+  once; bare line feeds get an answer instead of a wait).
+
+`mix precommit` passes with 875 tests, and `mix test --only vm` with its
+two on a real VM.
+
+<a id="step-6"></a>
+
+Step 6 was started the same day with what this machine could check: Ubuntu
+24.04 and 26.04 under qemu, with KVM passed through so a VM runs inside
+(`test/review/ubuntu_check/`). The same check as step 2's, as an ordinary
+user, with MDT's runtime as it is built here:
+
+| Ubuntu, as an ordinary user                                   | 24.04 (bwrap 0.9.0)                          | 26.04 (bwrap 0.11.1)                              |
+| ------------------------------------------------------------- | -------------------------------------------- | ------------------------------------------------- |
+| The bubble with the system's bwrap, as it comes               | Fails: `loopback: Failed RTM_NEWADDR`        | Fails: the relay may not add its route            |
+| An AppArmor profile on the program that starts bwrap          | Works                                        | Fails: bwrap's own profile takes over             |
+| A copy of bwrap with a profile of its own, left unconfined    | Works                                        | Works                                             |
+| The same copy under the profile the deb installs              | Works: 28 of 28 rows                         | Works: 27 of 27 rows (before the last was added)  |
+| Inside that copy: `CAP_NET_ADMIN`; a raw socket (`CAP_NET_RAW`) | Allowed; refused                           | Allowed; refused                                  |
+| 128 MiB into the VM through the relay, a VM inside a VM       | 162 MiB/s                                    | 158 MiB/s                                         |
+
+Two things kept the sandbox from starting on Ubuntu, and both are closed:
+
+- **AppArmor.** Since 24.04 a program holds capabilities in a user
+  namespace only under a profile that allows it, and 26.04's profile for
+  `/usr/bin/bwrap` lets bwrap make the namespaces but gives what runs in
+  them no capability. The relay needs one, once, for the route into
+  loopback. The deb's install script (`scripts/deb/postinst.sh`) copies the
+  system's bwrap to `/usr/lib/mdt/bwrap` and loads a profile for that
+  path, modelled on Ubuntu's own: what runs inside may hold
+  `CAP_NET_ADMIN` and `CAP_SETPCAP` and no other. `Bubble.bwrap/0` uses
+  that copy when it is there. Any program of yours can run the copy, so on
+  a machine with MDT installed a program can get those two capabilities in
+  namespaces of its own, which hold no network of the machine's. The copy
+  is the system's bwrap of the day MDT was installed; installing MDT again
+  refreshes it.
+- **The umask.** Ubuntu's is 002, so MDT's folders were writable by your
+  group, and msb refuses a store under such a folder. `Msb.ensure_home!/1`
+  now makes the store and the folders above it, up to MDT's own, `0700`.
+
+`Bubble.available/0` now makes a bubble for real and runs the relay's
+first two steps in it (`mdt-relay --check`), so a system that refuses is
+told apart before a VM is offered, and the Setup page says what to run.
+
+Still to do in step 6: the deb and the rpm built with these scripts and
+installed on fresh machines, signed checksums, the page on what MDT
+protects, and how to report a security problem.
+
+#### Moving a VM from before the disks
+
+Not built, and not tried as written: the one VM that exists is yours. The
+new VM starts with empty disks, and its image must be built once more in
+MDT, since each identity now has its own microsandbox home. What the old
+VM kept is still where it was, in the identity's sandbox folder
+(`~/.mdt_client/identities/<id>/sandbox/home` and `…/cache`).
+
+1. Build the image and start the VM in MDT.
+2. Home, through msb's pipe, with the launcher shown on the Setup page:
+
+       tar -C ~/.mdt_client/identities/<id>/sandbox/home -cf - . |
+         <launcher> exec --stream <vm> -- tar -C /root -xpf -
+
+3. Cache is not worth moving: tools and packages download again. Projects
+   come in by sync.
+4. When the new VM has what you need, the old folders (`home`, `cache`,
+   `snapshots`) and the old shared microsandbox home
+   (`~/.mdt_client/microsandbox`, several GB) can be deleted.
+
+### Not checked yet
+
+- **The deb itself.** Ubuntu was checked with the package's install
+  script run by hand in an Ubuntu VM ([step 6](#step-6)); the deb that
+  runs it, and MDT started from that deb, were not built here.
+- **Zed** through `msb ssh serve` with the VM in the bubble. `msb exec`
+  from outside works, and the launcher was tried with `exec` only.
+- **A seccomp filter** for msb in the bubble: `bwrap` can load one; the
+  VM's process still has none.
+- **The pinned msb.** Every check ran the 0.7.14 runtime, not
+  `0.7.15+6626e7cb2`.
+- **MDT's own image.** The real-VM tests use Alpine; the 4.5 GB image and
+  a VM made through the pages were not tried.
+- **Not built yet for handoffs:** a desktop notification when one
+  arrives, a folder picker for adding a project, and the handoffs in
+  MDT's Git tool.
+- **Submodules and LFS files** in a project.
+- **A large repository.** At the pipe's speed, 1 GiB would take about
+  17 s to go in; not tried.
+- **`msb cp`** for folders that aren't repositories.
+- **VPN,** still open from 2026-11-11.
+
+### Known and left open
+
+Found while building step 5, none of them a way to a real value:
+
+- **A passed-through connection is logged under the name the VM gave**
+  (the TLS name), which MDT doesn't check against the address. The VM can
+  make a connection to any public address read as `github.com` in the log.
+  MDT sees every lookup now, so it could say when a name and an address
+  never met.
+- **The activity log is the last 1,000 events, in memory.** A VM can push
+  older ones out with noise, and a restart empties it. A log kept on disk,
+  sealed, would hold.
+- **What the VM sends behind a request MDT read** goes to the host unread
+  and unlogged. It carries a placeholder at most
+  ([Each intercepted request](#each-intercepted-request)).
+- **DNS carries data out.** Every lookup is logged, none is judged.
+- **Letters that look alike.** A script mixing alphabets gets a hint;
+  everywhere else such text is shown as it is.
+- **A host name in a network grant is resolved inside the sandbox's
+  process**, for each connection to a private or reserved address. A slow
+  resolver makes everything wait.
 
 ## Built so far
 
@@ -146,7 +842,7 @@ belong in `.mdtexport`. Open: whether values travel at all, and how a CA moves
 ## Overview
 
 ```
-VM ──all TCP──▶ msb ──HTTP CONNECT ip:port──▶ MDT egress proxy (127.0.0.1)
+VM ──all TCP──▶ msb ──HTTP CONNECT ip:port──▶ relay ──proxy.sock──▶ MDT egress proxy
                                                │
                                                ├─ loopback, link-local, host's own addresses → deny
                                                ├─ private ranges (VPN, LAN) → deny unless a network grant is on
@@ -154,27 +850,34 @@ VM ──all TCP──▶ msb ──HTTP CONNECT ip:port──▶ MDT egress pro
                                                │     read request → placeholder? → allowance or approve → swap → forward
                                                └─ anything else → blind byte tunnel (log host, bytes, duration)
 
-VM ──vsock:5000──▶ $XDG_RUNTIME_DIR/mdt/mdt-sandbox-<id>.sock ──▶ agent channel (`mdt grants`, `mdt request`, `mdt run`, `mdt host`, `mdt wait`)
+VM ──DNS──▶ msb ──▶ relay ──dns.sock──▶ MDT DNS forwarder ──▶ this machine's resolver (every name logged)
+
+VM ──vsock:5000──▶ $XDG_RUNTIME_DIR/mdt/<id>/channel.sock ──▶ agent channel (`mdt grants`, `mdt request`, `mdt run`, `mdt host`, `mdt wait`)
                                                                    │
                                                                    └─ `mdt run`, once you approve it ──▶ bash -lc on the host, as you
 
 /mnt/mdt (read-only, from host): CA certificate, placeholder env file, the `mdt` command, git credential helper, file grants, host.md
 /root/.optmem (read-write, from host): the VM's own OptMem
+/root, /cache, /work: the VM's own disks (ext4 images on the host, which nothing there opens)
+
+msb and the relay run in a bubble (bwrap): no home folder of yours, no network but loopback
 ```
 
-The VM is created with `--proxy http://127.0.0.1:<port>`. All of its TCP goes
-through MDT, and it cannot opt out the way it could ignore `HTTPS_PROXY`. The
-setting is saved with the VM, so it also applies when Zed's SSH bridge boots
-the VM. When MDT is not running, the VM has no internet. With an HTTP CONNECT
-proxy, microsandbox blocks UDP other than DNS, so HTTP/3 cannot go around the
-proxy. DNS goes to microsandbox's resolver, which forwards to the host's
-systemd-resolved.
+The VM is created with `--proxy http://127.0.0.1:3128` and
+`--dns-nameserver 127.0.0.1:5353`: ports that exist only in the bubble
+microsandbox runs in, where MDT's relay joins them to MDT's sockets (see
+[The VM runs in a bubble](#the-bubble)). All of the VM's TCP goes through
+MDT, and it cannot opt out the way it could ignore `HTTPS_PROXY`; the bubble
+has no network of its own to go around MDT with. When MDT is not running,
+the VM has no internet and resolves no name. With an HTTP CONNECT proxy,
+microsandbox blocks UDP other than DNS, so HTTP/3 cannot go around the
+proxy.
 
 <a id="grants-and-approvals"></a>
 
 ## Grant kinds
 
-A grant is one piece of access you can turn on and off. It has one of three
+A grant is one piece of access you can turn on and off. It has one of four
 generic types, none tied to a provider, and your own words for what it is
 for, which agents read to find the grant they need.
 
@@ -183,6 +886,7 @@ for, which agents read to find the grant they need.
 | `token`   | A placeholder, in variables, in a token file, and as git's password if you choose. | Per request    | Takes effect on the next request. Complete, since the VM never had the value. |
 | `network` | Reachability to listed hosts, address ranges and ports                             | Per connection | New connections refused, open ones closed                                     |
 | `file`    | The real value, as a file in `/mnt/mdt/files`                                      | None possible  | File deleted. **Copies survive.** Only expiry at the provider ends it.        |
+| `command` | Nothing. It may ask MDT to run a command on your machine                           | Per run, no allowance | New asks are refused. A command already running goes on until it ends or you stop it. |
 
 A token grant names:
 
@@ -237,7 +941,7 @@ Their rules are dropped, so uses that went through silently now ask.
 %Grant{
   id: "github-personal",
   name: "GitHub (personal)",
-  kind: :token,                      # :token | :network | :file
+  kind: :token,                      # :token | :network | :file | :command
   preset: :github,                   # its icon; nothing else depends on it
   purpose: "Push to oliveigah/klife and open PRs there",
   state: :on,                        # :on | :off
@@ -256,6 +960,10 @@ Their rules are dropped, so uses that went through silently now ask.
 
   # :file
   path: "/mnt/mdt/files/kubeconfig",
+
+  # :command
+  script: "./deploy.sh staging",     # yours; nil = agents write the text
+  dir: "/home/me/projects/site",     # where a script of yours runs
 
   # :token and :network
   allowances: [%Allowance{}]
@@ -299,12 +1007,18 @@ itself, so MDT gets an IP, not a hostname.
    reached a test server on the host's LAN address through the proxy.
    A denied CONNECT reaches the VM as a plain "connection refused", with no
    message. Agents learn why from `mdt grants`.
+   A CONNECT is answered within 3 seconds, because microsandbox gives up on
+   one after 10. A connection still waiting for your approval then gets its
+   200 and the open tunnel waits instead; a "no" closes it.
 2. **Private ranges** (RFC 1918, ULA, `100.64.0.0/10`): allowed only when an
    `on` network grant matches the IP and port. Grant hostnames are resolved
    with the host's DNS, which knows VPN names. The connection waits for
    approval unless an allowance covers its address and port.
 3. **Peek** at the first bytes. For a TLS ClientHello, read the hostname
-   (SNI).
+   (SNI). A client that speaks first does so at once. After 100 ms of
+   silence MDT also connects to the destination and takes the first bytes
+   from whichever side speaks, so a server that greets first (SSH, SMTP,
+   MySQL) is heard in 0.1 s instead of 1.5.
 4. If the hostname belongs to **any registered token grant, on or off**,
    intercept. Off grants are intercepted too, so the agent gets a clear answer
    instead of an auth failure from the provider.
@@ -314,9 +1028,28 @@ itself, so MDT gets an IP, not a hostname.
 
 1. Finish the TLS handshake with a certificate MDT's CA makes for that
    hostname. Offer HTTP/1.1 only.
-2. Read the request head. If `Host` does not match the TLS hostname, reject
-   it. A mismatch would let a request say "github" to MDT while going
-   somewhere else.
+2. Read the request head, strictly. MDT judges a request by what it read,
+   and the host must act on the same thing, so a request two parsers could
+   read two ways is refused (`400`, `mdt_bad_request`):
+    - the target must be a path, not a full URL;
+    - exactly one `Host`, the TLS hostname (`421` otherwise): a mismatch
+      would let a request say "github" to MDT while going somewhere else;
+    - one way of saying how long the body is: one numeric `Content-Length`
+      or `Transfer-Encoding: chunked`, never both;
+    - the target is visible ASCII, as HTTP says: anything else arrives
+      percent-encoded or not at all;
+    - every header line is `name: value`: no folded lines, no space before
+      the colon, a name of token characters only;
+    - a value is visible bytes, spaces and tabs, and only the spaces and
+      tabs around it are dropped: no other control character, no bare CR
+      or LF;
+    - lines end in CR LF, and the head is at most 64 KiB (`431`);
+    - `TRACE` and `CONNECT` are refused (`405`): a host answers `TRACE` with
+      the request it got, real value included.
+
+   The TLS name itself must be a host name (letters, digits, dots, dashes,
+   underscores). Any other bytes name nothing: the connection is passed
+   through unread, under its address.
 3. Look for placeholders in the grant's carriers. Basic auth is decoded and
    checked inside.
 4. A placeholder that belongs to a grant **not** listing this host: block it
@@ -343,8 +1076,18 @@ itself, so MDT gets an IP, not a hostname.
 9. Stream the response back. If the real value appears in the response
    headers, MDT replaces it with the placeholder before the VM sees it.
 
-Every request on a kept-alive connection goes through steps 2–9 again, so
-turning a grant off affects the very next request.
+One request per connection: MDT sends the head it wrote itself, with
+`Connection: close`, so each request is judged on its own and turning a
+grant off affects the very next one. The real value is written once, into
+that head. Whatever the VM sends after it (the body, and anything behind
+the body) is passed on as bytes MDT never wrote a value into, so a second
+request hidden there reaches the host with its placeholder, which opens
+nothing.
+
+A corpus of 65 requests, malformed or written to be read two ways
+(`test/support/sandbox_corpus.ex`), goes through the proxy in the suite,
+each with the placeholder of a grant that lets every use through. Each is
+refused whole, or reaches the host as one request with the head MDT wrote.
 
 `Upgrade` (websockets) on an intercepted host: the handshake goes through the
 steps above, then bytes are tunnelled.
@@ -356,13 +1099,61 @@ An approval shows facts MDT worked out, not what the agent says.
 | Describer      | Facts                                                                                               |
 | -------------- | --------------------------------------------------------------------------------------------------- |
 | GitHub git     | `push owner/repo: refs/heads/main abc123→def456` (read from the receive-pack commands); fetch/clone |
-| GitHub GraphQL | operation type and name (`mutation createPullRequest`)                                              |
+| GitHub GraphQL | the type and the fields of the operation a server would run (`mutation`, `createPullRequest`)       |
 | GitHub REST    | method, resource path (`POST /repos/o/r/pulls`)                                                     |
 | Hex            | publish/retire/owner change, package and version                                                    |
 | Generic        | method, host, path, query, start of body                                                            |
 
 Text the agent wrote (commit messages, PR bodies, a stated reason) is shown in
 a separate, labeled area. It is a claim, never a fact.
+
+A GraphQL document is read with a tokenizer (`MDTClient.Sandbox.GraphQL`),
+not matched as text: the operation is the one `operationName` selects, a
+comment or a string can't pose as one, an alias is read through to its
+field, and fields behind fragments count. An operation's name is its
+author's, so "allow similar" goes by the whole document: the same document
+with other variables is similar, another document with the same name is
+not.
+
+<a id="text-the-vm-chooses"></a>
+
+### Text the VM chooses
+
+Most of what an approval shows was picked by the agent: paths, header
+values, ref and file names, reasons, commit messages, scripts. Before
+2026-11-13 it went to the pages as it came. A path with one raw byte in it
+reached an approval's title, and from there the JSON every page is sent
+as, which takes UTF-8 only; a right-to-left override (U+202E) in a title
+or a script made a line read as something else.
+
+`MDTClient.Sandbox.Shown` makes such text show all it holds: what isn't
+UTF-8 becomes `�`, and a control or format character is written out, as
+`\u{202E}`. Tabs and new lines stay. It is applied where the text enters
+MDT, so the pages don't have to think about it:
+
+| Way in                         | What happens there                                                              |
+| ------------------------------ | ------------------------------------------------------------------------------- |
+| A request MDT reads            | The target must be visible ASCII; titles, facts and claims are made to show all |
+| The TLS name of a connection   | A host name, or the connection is passed through under its address              |
+| A DNS question                 | Visible ASCII labels, or it isn't answered                                      |
+| An ask on the agent channel    | Text, whole numbers and yes or no; anything else in it counts as nothing        |
+| A script for your machine      | Never changed: one that hides anything is refused, and the agent is told what   |
+| A folder for that script       | One whose real name hides anything isn't used: the command runs in your home    |
+| A handoff                      | Its title, body, commit messages, file names and diff                           |
+| What git says when it fails    | Shown text; what it prints on success stays git's bytes, for MDT to read        |
+| A held request, read or copied | Headers, body, the HTTP text and the curl command                               |
+
+A request's pattern, which an allowance is matched on, is compared and so
+never merged: two that differ stay different once made safe to show.
+
+A script that mixes alphabets in one word (`gіthub.com` with a Cyrillic
+`і`) gets a hint on its card. That is a hint, not a check.
+
+Sizes are the VM's to choose too. MDT reads at most 32 MiB of what one git
+command prints and fails past that; of a handoff's diff it reads the first
+512 KiB and says so; and a handoff may bring at most 1 GiB of new data
+into your repository (the fetch runs under a file size limit, and what a
+stopped fetch left is removed).
 
 ### Approvals
 
@@ -585,7 +1376,12 @@ third-party code as possible:
 
 ### Home and Cache
 
-Two folders inside the identity's sandbox folder, mounted read-write:
+Since 2026-11-13 these are disk images, with a third for work: see
+[Storage: the VM's own disks](#storage-the-vms-own-disks). What follows
+still holds for what each is for and what recreating asks; a snapshot is
+now a copy of the Home disk's file.
+
+Two disks inside the identity's sandbox folder:
 
 |       | In the VM | Holds                                                                                            | If lost             |
 | ----- | --------- | ------------------------------------------------------------------------------------------------ | ------------------- |
@@ -616,9 +1412,13 @@ changed, so "start empty" is always within reach.
 
 ### Instructions for agents in the VM
 
-Before each start, MDT writes its block at the top of `~/.claude/CLAUDE.md`
-and `~/.codex/AGENTS.md` in Home, between markers. The rest of each file is
-left alone. The same text is at `/mnt/mdt/AGENTS.md`. It says:
+After each boot, the VM puts MDT's block at the top of `~/.claude/CLAUDE.md`
+and `~/.codex/AGENTS.md` in its Home, between markers: MDT runs
+`/mnt/mdt/bin/mdt-boot` in it (`msb exec`), which copies the block from
+`/mnt/mdt/agents-block.md`. The rest of each file is left alone. MDT itself
+writes nothing into Home. An image without Bash can't run the script; the
+VM still runs, and MDT logs it. The same text is at `/mnt/mdt/AGENTS.md`.
+It says:
 
 - Access comes only from MDT grants. Agents run no login commands, ask for
   no pasted tokens, and write no tokens into files or variables. When access
@@ -635,8 +1435,9 @@ left alone. The same text is at `/mnt/mdt/AGENTS.md`. It says:
 ## Agent channel
 
 MDT listens on a Unix socket per identity,
-`$XDG_RUNTIME_DIR/mdt/mdt-sandbox-<id>.sock` (Unix socket paths are short,
-so not the identity's folder), which `msb create --vsock <socket>:5000`
+`$XDG_RUNTIME_DIR/mdt/<id>/channel.sock` (Unix socket paths are short, so
+not the identity's folder; `MDTClient.Sandbox.Sockets`), which
+`msb create --vsock /mdt/sockets/channel.sock:5000`, run in the bubble,
 joins to the VM's vsock port 5000. The VM has no network route to the host.
 Microsandbox opens the socket for each connection, so when MDT restarts,
 the channel works again without touching the VM. While MDT is locked or
@@ -651,8 +1452,11 @@ mdt grants                                   every grant: id, what it is for, ho
 mdt request GRANT --reason "…" [--minutes 60] [--wait 60]
 mdt request --need "the access, and the host" --reason "…"
 mdt wait ASK_ID [--wait 60]
-mdt run --reason "…" -- COMMAND              see Host commands
+mdt run GRANT --reason "…" [-- COMMAND]      see Host commands
 mdt host                                     see Host commands
+mdt sync                                     see Projects
+mdt handoff --title "…" [--body FILE]        see Projects
+mdt handoffs                                 see Projects
 ```
 
 - `request` asks you to turn a grant on, by id or name. It shows as an
@@ -699,19 +1503,30 @@ its text.
 
 ```
 mdt host                                       your machine, as agents see it
-mdt run --reason "…" [--dir DIR] [--timeout 120] [--wait 60] -- COMMAND [ARG…]
-mdt run --reason "…" [options] <<'EOF'         the script from stdin
+mdt run GRANT --reason "…" [--dir DIR] [--timeout 120] [--wait 60] [-- COMMAND [ARG…]]
+mdt run GRANT --reason "…" [options] <<'EOF'   the script from stdin
 …
 EOF
 mdt wait RUN_ID [--wait 60]
 ```
+
+- **Through a command grant** (since 2026-11-13, see
+  [Host commands become a grant](#host-commands-become-a-grant)). None
+  exists until you add one, so on a new install `mdt run` is refused and
+  says how to ask for one. A grant with a script of yours runs that text,
+  in its folder, and takes none from the agent; any other takes the text
+  below. The one word before `--` is the grant, so a typo is never run as
+  a command.
 
 - **The script travels in the ask.** Arguments after `--` are quoted for
   the shell and joined; a single argument is taken as a shell line as it
   is. With no arguments, the script is read from stdin. At most 16 KiB.
   What you read on the card is what runs. A script in a file the VM can
   write could change between your click and the run, so
-  `mdt run -- ./deploy.sh` is flagged.
+  `mdt run -- ./deploy.sh` is flagged. A script holding anything that
+  doesn't show (a control character, a zero-width one, a right-to-left
+  override, bytes that aren't UTF-8) is refused before it waits for you,
+  and the agent is told which ([Text the VM chooses](#text-the-vm-chooses)).
 - **Where it runs:** `--dir`, by default the agent's current directory.
   Shared folders sit at the same path on both sides, so a directory inside
   one is used as it is, after resolving symlinks on the host. A directory
@@ -745,6 +1560,10 @@ from the others (red, a terminal icon):
 - `bash -lc SCRIPT` as you, in the directory, with stdin from `/dev/null`,
   under `timeout`: TERM at the limit, KILL 5 seconds later, to its whole
   process group.
+- The directory on the card is a real path, and the command starts there
+  after `cd -P` and a check that the path still leads there. A folder the
+  VM can write may have been swapped for a link since you looked: then
+  nothing runs, and the agent gets exit 126.
 - The environment is MDT's own, without MDT's and the BEAM's variables
   (`RELEASE_*`, `ERL_*`, `MIX_*`, `PHX_*`, `MDT_*`, `SECRET_KEY_BASE`,
   `PORT`…). The login shell then sets up your usual tools. SIGPIPE, which
@@ -803,32 +1622,36 @@ from Settings; agents never probe the host to find out.
 
 ## VM
 
-- **Checks:** KVM is available, MDT's `msb` is there (see
-  [Runtime](#runtime)), the image exists.
+- **Checks:** KVM is available, MDT's `msb` and relay are there (see
+  [Runtime](#runtime)), `bwrap` may create user namespaces, the tools that
+  make disks are installed, the image exists.
 - **Image:** see [Image and VM state](#image-and-vm-state). The checks
   showed what TLS needs: the `ca-certificates` package (without it Erlang
   finds no CAs at all), MDT's CA in the system bundle (curl, git, `gh`,
   Python's `ssl`), `HEX_CACERTS_PATH` and `CLOUDSDK_CORE_CUSTOM_CA_CERTS_FILE`.
   Hex gives up after 15 seconds by default, shorter than any approval, hence
   `HEX_HTTP_TIMEOUT`.
-- **Created with:**
-    - `--proxy http://127.0.0.1:<port>`;
+- **Created with,** in the bubble, every part named by its path there:
+    - `--proxy http://127.0.0.1:3128` and `--dns-nameserver 127.0.0.1:5353`,
+      the relay's ports;
     - `--net public,private`, so private ranges reach MDT, which gates them.
       Access to the host stays blocked;
-    - one mount per shared folder;
+    - `--mount-disk` for Home at `/root`, Cache at `/cache` and Work at
+      `/work`;
+    - one mount per shared folder, at the path it has on your machine;
     - the read-only `/mnt/mdt`;
     - the OptMem folder;
-    - Home at `/root` and Cache at `/cache`;
     - `--vsock` for the agent channel;
     - CPU and memory limits;
-    - `--root-disk` and a `quota=` on every read-write mount (see Disk).
-- **Disk:** two settings, both applied by recreating.
+    - `--root-disk` and a `quota=` on every read-write folder (see Disk).
+- **Disk:** the root disk and folder writes are applied by recreating; the
+  sizes of Home, Cache and Work at the next start (bigger only).
     - *Root disk* (64 GiB): what the image and the VM write outside its
       folders, apt packages, `/tmp` and `/var` included. A sparse ext4
       image, so it takes host space only as it fills; it starts empty on
       every recreate. microsandbox's default is 4 GiB.
     - *Folder writes* (64 GiB): how much the VM may add to each read-write
-      folder (Home, Cache, OptMem, shares) per boot, beyond what was there
+      folder (OptMem, shares) per boot, beyond what was there
       at its first write. Past it, writes fail with `ENOSPC`, and `df` in the
       VM shows the budget, not your disk. It keeps a runaway agent from
       filling your disk. microsandbox applies 4 GiB to every mount unless
@@ -841,14 +1664,19 @@ from Settings; agents never probe the host to find out.
   with the image cached. What survives is Home, Cache and the VM's OptMem
   (see [Home and Cache](#home-and-cache)); packages installed with apt at
   runtime vanish, so they belong in the Containerfile.
-- **Lifecycle:** MDT calls the `msb` CLI. Settings that need recreating are
-  shown as "recreate to apply". The VM stops when MDT quits.
-- **Started from Zed:** `msb ssh` boots a stopped VM by itself. That VM still
-  goes through the proxy, so with MDT closed it has no internet.
+- **Lifecycle:** MDT starts the bubble with `msb create` or `msb start` in
+  it, and stops the VM through the relay (`MDTClient.Sandbox.Bubble`).
+  Settings that need recreating are shown as "recreate to apply". The VM
+  stops when MDT quits or locks, cleanly: its disks are block devices, and a
+  VM cut off loses what it hadn't written out yet.
+- **Not started from Zed:** `msb ssh` boots a stopped VM by itself, outside
+  the bubble. The launcher refuses it while the VM isn't running, and the
+  VM couldn't boot there anyway: its disks are at paths only the bubble has.
 
 ### Runtime
 
-MDT brings its own microsandbox; nothing needs installing on the machine.
+MDT brings its own microsandbox and relay. The machine needs `bwrap`
+(bubblewrap), podman and e2fsprogs, which the packages depend on.
 
 - **What ships:** `msb` built from MDT's fork,
   [oliveigah/microsandbox](https://github.com/oliveigah/microsandbox) at
@@ -867,13 +1695,19 @@ MDT brings its own microsandbox; nothing needs installing on the machine.
   differs means the pin moved and the runtime needs rebuilding. The package build runs it once, on Ubuntu 22.04, the
   older glibc of the two packages; `msb` links only glibc. In a source
   checkout, run it once yourself.
-- **Its own home:** VMs, images and msb's SSH keys live in
-  `~/.mdt_client/microsandbox` (`MSB_HOME`), not `~/.microsandbox`. An
-  `msb` you install, at any version, neither sees MDT's VMs nor migrates
-  their database. Every call also sets `MSB_PATH`, the binary VMs are
-  spawned with.
-- **Launcher:** `~/.mdt_client/bin/msb` runs MDT's `msb` with that home.
-  The Zed SSH config uses it, and so can you (`~/.mdt_client/bin/msb ls`).
+- **MDT's relay** (`native/mdt_relay`) is built by `scripts/build-relay.sh`
+  into the same folder, as `bin/mdt-relay`. It has no dependencies, so its
+  build needs no network.
+- **A home per identity:** the VM, images and msb's SSH keys live in the
+  identity's sandbox folder (`…/sandbox/microsandbox`), not
+  `~/.microsandbox`. An `msb` you install, at any version, neither sees
+  MDT's VMs nor migrates their database, and one identity's VM never sees
+  another's. `MSB_HOME` is a short link to that folder, beside the
+  identity's sockets (see [The VM runs in a bubble](#the-bubble) for why).
+  Every call also sets `MSB_PATH`, the binary VMs are spawned with.
+- **Launcher:** `…/sandbox/bin/msb` runs MDT's `msb` with that home, to
+  look at the VM and go into it while it runs. The Zed SSH config uses it,
+  and so can you (`… ls`). It refuses what starts, stops or changes the VM.
   MDT rewrites it on start, so its path survives an update that moves the
   runtime.
 - **Never** the `msb` on your PATH: MDT has no fallback to it.
@@ -886,7 +1720,8 @@ MDT brings its own microsandbox; nothing needs installing on the machine.
 ### Shared folders
 
 - You pick each folder. It's mounted at the same path as on the host,
-  read-write or read-only.
+  read-only unless you choose read-write, which asks first: what the VM
+  writes there can run on your machine when you use that folder.
 - Read-only is enforced on the host's side. Root in the VM can remount the
   folder read-write, and `/proc/mounts` then claims it's writable, but writes
   still fail.
@@ -970,9 +1805,10 @@ are gitignored. Upstream code:
 - Kept on the host at `~/.mdt_client/<id>/sandbox/optmem`, mounted read-write
   at `/root/.optmem`. It survives deleting, rebuilding or upgrading the VM,
   and emptying Home.
-- Before each start MDT copies the host's `memo` into it, and runs
-  `memo init` on it when it holds no memory. The check ran `init`, `note`
-  and `wake` in the VM on a host-mounted folder.
+- After each boot the VM copies `memo` into it from `/mnt/mdt/bin/memo`
+  (yours, put there by MDT), and runs `memo init` when it holds no memory:
+  both in `/mnt/mdt/bin/mdt-boot`, inside the VM. MDT writes nothing into
+  the folder except a copy of your memory when you ask for one.
 - **Starting from your memory:** a checkbox when creating the VM, and a
   button while it is stopped.
     - It copies your memory's `LOG.txt`, `TREE/` and `config` (what
@@ -1009,13 +1845,12 @@ Everything belongs to the signed-in identity:
 - **Encrypted, like other MDT data:** grants, stored values, allowances, VM
   settings, MDT's CA key, the activity log.
 - **Plaintext, readable by the VM:** `/mnt/mdt` (holds no real values except
-  file grants), the VM's OptMem, Home and Cache. Home holds the VM's own
-  logins (Codex, Claude). Its snapshots sit next to it, readable by MDT
-  only. On this machine the disk itself is encrypted.
+  file grants), the VM's OptMem, and the Home, Cache and Work disks. Home
+  holds the VM's own logins (Codex, Claude). Its snapshots sit next to it,
+  readable by you only. On this machine the disk itself is encrypted.
 
-Shared by every identity on the machine, not encrypted: MDT's microsandbox
-home (`~/.mdt_client/microsandbox`: VMs, images, msb's SSH keys) and the
-launcher (`~/.mdt_client/bin/msb`).
+Per identity too, not encrypted: its microsandbox home (the VM, images,
+msb's SSH keys), its disks and its launcher, all in its sandbox folder.
 
 Locking MDT pauses every grant. Without the CA key, MDT tunnels everything.
 Placeholders then reach providers unswapped and fail to authenticate, which
@@ -1054,34 +1889,43 @@ Approvals and agent requests raise a desktop notification. This needs
 
 ## Components
 
-Each has one job. Proposed modules sit under `lib/mdt_client/sandbox/`.
+Each has one job. They sit under `lib/mdt_client/sandbox/` (brought up to
+date on 2026-11-13, after step 5).
 
-| Component              | Job                                                                                    |
-| ---------------------- | -------------------------------------------------------------------------------------- |
-| `VM`                   | Turns settings into `msb` commands, starts, stops, reports status                      |
-| `Settings`             | VM settings for the identity, and what needs a restart                                 |
-| `Shares`               | Validates folder picks, produces mounts                                                |
-| `Inbox`                | Writes `/mnt/mdt` atomically: CA certificate, `env.sh`, credential helper, file grants |
-| `CertificateAuthority` | Creates the CA, makes and caches a certificate per host                                |
-| `Grants`               | Grants, their state and expiry; the source of truth                                    |
-| `Presets`              | The three types and the presets that fill their form                                   |
-| `Credentials`          | Returns the value for a grant: stored or minted, with caching                          |
-| `Egress.Listener`      | Accepts msb's CONNECTs (Thousand Island, already a dependency through Bandit)          |
-| `Egress.Destination`   | Deny, private-range gate, intercept or tunnel                                          |
-| `Egress.Tunnel`        | Moves bytes both ways and counts them                                                  |
-| `Egress.Interceptor`   | TLS, HTTP/1.1, holding, forwarding (Mint, already a dependency)                        |
-| `Egress.Substitution`  | Finds placeholders in carriers and swaps them, including Basic auth                    |
-| `Allowance`            | What goes through without asking, and until when                                       |
-| `Describe`             | Turns requests into facts                                                              |
-| `RequestView`          | Shows a held request in full, and as curl or HTTP to copy                              |
-| `Approvals`            | Waiting requests and connections, timeouts, decisions, PubSub                          |
-| `Activity`             | The append-only log                                                                    |
-| `Channel`              | The vsock socket behind the `mdt` command                                              |
-| `HostCommand`          | Checks an ask to run a command and describes it: where it runs, facts, hints           |
-| `HostRun`              | Runs an approved command on the host: time limit, capped output, process group         |
-| `HostInfo`             | What agents are told about this machine (`mdt host`, `host.md`)                        |
-| `VMMemory`             | The OptMem folder and its Transfer participant                                         |
-| `DesktopNotice`        | The desktop notification's text for a waiting approval                                 |
+| Module                                  | Job                                                                                   |
+| --------------------------------------- | ------------------------------------------------------------------------------------- |
+| `Server`                                | The process of one identity's sandbox: holds the state, takes every message           |
+| `Server.State`                          | Changing that state and telling the pages, the log, saving it sealed, timers, tasks   |
+| `Server.Grants`                         | Building and checking a grant, turning it on, allowances, expiry by the clock         |
+| `Server.Approvals`                      | What waits for you: holding, joining retries, your decision, giving up                |
+| `Server.Values`                         | The real values, stored or minted, and answering the proxy with them                  |
+| `Server.HostRuns`                       | A command on this machine: the ask, the run, its output                               |
+| `Server.Machine`                        | The VM in its bubble, its disks and their copies, the image's builds                  |
+| `Policy`                                | Whether a use goes through, asks or is refused: a pure function                       |
+| `Placeholder`                           | Finding a placeholder in headers and putting the value in its place, Basic included   |
+| `Grant`, `Allowance`, `Approval`        | The records of access, of a standing yes, and of what waits for you                   |
+| `Presets`                               | The grant types and the presets that fill their form                                  |
+| `Egress`, `Egress.Connection`           | The proxy on its socket; one connection from CONNECT to close, tunnelled or read      |
+| `Destinations`                          | Which addresses are reserved, private or public, and a network grant's entries        |
+| `Dns`                                   | The VM's lookups, passed to your resolver and logged                                  |
+| `CertificateAuthority`, `Roots`         | MDT's CA and the certificates it makes; the system's roots for MDT's own connections  |
+| `Describe`, `GraphQL`                   | A request as facts and claims                                                         |
+| `RequestView`                           | A held request in full, and as curl or HTTP to copy                                   |
+| `Shown`                                 | Text the VM chose, made to show all it holds                                          |
+| `Channel`                               | The vsock socket behind the `mdt` command                                             |
+| `HostCommand`, `HostRun`                | Checks and describes an ask to run a command; runs an approved one                    |
+| `HostInfo`                              | What agents are told about this machine (`mdt host`, `host.md`)                       |
+| `Bubble`, `Sockets`                     | The confined process the VM runs in; the sockets it reaches MDT through               |
+| `Msb`, `VM`                             | The `msb` commands and the per-identity home; the VM's record                         |
+| `Disks`, `Snapshot`                     | The VM's Home, Cache and Work disks; a copy of Home                                   |
+| `Image`, `Build`                        | Building the image with podman; one build's record                                    |
+| `Settings`, `Share`, `Shares`           | The VM's settings and their checks; shared folders and their mounts                   |
+| `Inbox`, `Instructions`                 | What the VM reads at `/mnt/mdt`; the text agents are given                            |
+| `Memory`                                | The VM's own OptMem folder and its seeding                                            |
+| `Project`, `Projects`, `Guest`          | A repository with a copy in the VM; what the pages and the channel call; the VM's side |
+| `HostGit`, `Sync`, `Handoff`            | git on your repository, bounded; your branches into the VM; the VM's work back        |
+| `Event`                                 | One line of the activity log                                                          |
+| `DesktopNotice`                         | The desktop notification's text for a waiting approval                                |
 
 ## Guarantees to test
 
@@ -1094,7 +1938,10 @@ Each has one job. Proposed modules sit under `lib/mdt_client/sandbox/`.
    with TLS verified.
 4. A placeholder going to a host outside its grant is blocked and logged.
 5. Turning a grant off, or its expiry, affects the next request. Turning a
-   network grant off closes its open connections.
+   network grant off closes its open connections. Expiry is read from the
+   clock at every decision, for grants and allowances alike, so it also
+   holds across a restart and a suspend; timers only refresh the screens,
+   and the clock is looked at again when MDT starts and every 30 seconds.
 6. A locked MDT swaps nothing. A stopped MDT leaves the VM without internet.
 7. Nothing in the VM can reach MDT's web server. The agent channel offers only
    reading the grants (never values) and the host's description, asking for
@@ -1104,6 +1951,38 @@ Each has one job. Proposed modules sit under `lib/mdt_client/sandbox/`.
    text, each time. What runs is the text on the card.
 10. Forwarding opens nothing from the VM to your machine, and listens only on
     the VM's own loopback address.
+
+Added by the [first release](#first-release), each checked on a real VM:
+
+11. The process running the VM has namespaces of its own (user, mount,
+    network, PID, IPC), sees nothing of your home folder but msb's own
+    store and no `/run`, and has no network
+    interface but loopback. Read from `/proc`.
+12. Every DNS query from the VM reaches MDT and is logged. A query aimed at
+    another resolver gets no answer.
+13. MDT writes nothing into storage the VM can write: its disks, its OptMem
+    folder, read-write shares.
+14. With no command grant, nothing in the VM can ask to run anything on your
+    machine.
+
+Added by step 5, each checked in the suite (`policy_test.exs`,
+`hostile_text_test.exs`, `egress_corpus_test.exs`, `guarantees_test.exs`):
+
+15. Whether a use goes through, asks or is refused depends only on the
+    grants, the use and the clock. For every combination of grant state,
+    allowances, host and placeholder: no placeholder goes to a host its
+    grant doesn't list, nothing is let through or asked about for a grant
+    that is off by the clock, an allowance past its time allows nothing, a
+    reserved address opens only for an entry naming that very address, and
+    a command is never let through unasked.
+16. What an approval, the log, a notification or a page shows of the VM's
+    text is UTF-8 and holds nothing that doesn't show. A script that does
+    is refused.
+17. Nothing the VM sends in an ask, a request or a repository makes the
+    sandbox's process fail or MDT read without limit.
+18. A request two parsers could read two ways goes out with no real value:
+    it is refused whole, or reaches the host as one request with the head
+    MDT wrote.
 
 ## Checks (2026-11-11)
 
@@ -1169,3 +2048,12 @@ checks used openssl; `:public_key` or the `x509` package are the options).
 - Containers inside the VM (klife's Kafka test clusters): unchecked.
 - Desktop notifications elsewhere than GNOME (KDE, macOS), and a sound or
   urgency per kind of approval.
+- A second VM backend from stock parts (QEMU or Cloud Hypervisor, virtiofsd,
+  vsock; spiked in `test/review/vm_spike`): folders added while the VM runs,
+  connections from your machine into it, file sharing in a process per
+  folder, no fork to carry.
+- A seccomp filter on the bubble.
+- MDT's Git tool on repositories in the VM, by running git inside it.
+- Bringing a branch out of the VM when the repository has no remote.
+- A published default image, so podman is needed only to change it.
+- Names beside addresses in the activity log, read from the DNS answers.

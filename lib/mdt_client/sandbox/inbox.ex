@@ -17,6 +17,10 @@ defmodule MDTClient.Sandbox.Inbox do
     * `files/` - the real value of file grants that are on;
     * `AGENTS.md`, `grants.md` - what agents are told, and the grants as they
       are now;
+    * `bin/mdt-boot`, `agents-block.md`, `bin/memo` - what the VM copies for
+      itself after each boot: the script MDT runs in it, the instructions as
+      a block for the agents' own files, and your `memo` tool when you have
+      OptMem;
     * `host.md` - your machine, for writing host commands
       (`MDTClient.Sandbox.HostInfo`), written by `write_host/2`.
 
@@ -25,7 +29,7 @@ defmodule MDTClient.Sandbox.Inbox do
   copies survive.
   """
 
-  alias MDTClient.Sandbox.{Grant, Instructions}
+  alias MDTClient.Sandbox.{Grant, Instructions, Memory}
 
   @doc """
   Rewrites the inbox from the grants, the values of those that are on, and
@@ -35,11 +39,6 @@ defmodule MDTClient.Sandbox.Inbox do
   def write(dir, grants, values, ca_pem) do
     File.mkdir_p!(dir)
 
-    for sub <- ["git", "tokens", "files"] do
-      File.rm_rf!(Path.join(dir, sub))
-      File.mkdir_p!(Path.join(dir, sub))
-    end
-
     put_changed(dir, "ca.pem", ca_pem)
     put_changed(dir, "ca-bundle.pem", bundle(ca_pem))
     put_changed(dir, "profile.sh", priv("mdt-profile.sh"))
@@ -47,28 +46,60 @@ defmodule MDTClient.Sandbox.Inbox do
     put_changed(dir, "bin/git-credential", priv("mdt-git-credential"), 0o755)
     put_changed(dir, "bin/mdt", priv("mdt-cli"), 0o755)
     put_changed(dir, "AGENTS.md", Instructions.text())
+    # What the VM copies for itself after each boot (`bin/mdt-boot`): MDT
+    # writes nothing into storage the VM can write.
+    put_changed(dir, "agents-block.md", Instructions.block())
+    put_changed(dir, "bin/mdt-boot", priv("mdt-boot"), 0o755)
+
+    case Memory.host_memo() do
+      nil -> File.rm(Path.join(dir, "bin/memo"))
+      memo -> put_changed(dir, "bin/memo", File.read!(memo), 0o755)
+    end
 
     tokens = Enum.filter(grants, &(&1.kind == :token))
 
-    put(dir, "env.sh", env_script(tokens))
+    put_changed(dir, "env.sh", env_script(tokens))
     put(dir, "grants.md", Instructions.grants(grants, DateTime.utc_now()))
 
-    for grant <- tokens, host <- Grant.git_hosts(grant) do
-      put(
-        dir,
-        Path.join("git", host),
-        "protocol=https\nhost=#{host}\nusername=x-access-token\npassword=#{grant.placeholder}\n"
-      )
-    end
+    hold(
+      dir,
+      "git",
+      for grant <- tokens, host <- Grant.git_hosts(grant), into: %{} do
+        {host,
+         {"protocol=https\nhost=#{host}\nusername=x-access-token\npassword=#{grant.placeholder}\n",
+          0o644}}
+      end
+    )
 
-    for grant <- tokens do
-      put(dir, Path.join("tokens", grant.id), grant.placeholder)
-    end
+    hold(dir, "tokens", Map.new(tokens, &{&1.id, {&1.placeholder, 0o644}}))
 
-    for %Grant{kind: :file, state: :on} = grant <- grants, value = values[grant.id] do
-      put(dir, Path.join("files", Path.basename(grant.path)), value, 0o600)
-    end
+    hold(
+      dir,
+      "files",
+      for %Grant{kind: :file} = grant <- grants,
+          Grant.on?(grant),
+          value = values[grant.id],
+          into: %{} do
+        {Path.basename(grant.path), {value, 0o600}}
+      end
+    )
 
+    :ok
+  end
+
+  # Makes the folder `sub` hold exactly `wanted` (name => {data, mode}): what
+  # is new or changed is written, what is no longer wanted is deleted, and
+  # the rest is left alone. A file that stays is never missing, not even for
+  # the moment a rewrite of the whole folder would take.
+  defp hold(dir, sub, wanted) do
+    folder = Path.join(dir, sub)
+    File.mkdir_p!(folder)
+
+    for name <- File.ls!(folder),
+        not Map.has_key?(wanted, name),
+        do: File.rm_rf!(Path.join(folder, name))
+
+    for {name, {data, mode}} <- wanted, do: put_changed(dir, Path.join(sub, name), data, mode)
     :ok
   end
 

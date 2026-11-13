@@ -1,0 +1,16 @@
+== The machine
+Ubuntu 24.04.5 LTS, kernel 6.8.0-147-generic, bwrap 0.9.0
+apparmor_restrict_unprivileged_userns = 1
+profiles naming bwrap: 
+crw-rw-rw- 1 root kvm 10, 232 Nov 13 20:01 /dev/kvm
+
+== 1. The system's bwrap, as it comes
+bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted
+exit 1
+
+== 2. msb's image
+msb pull alpine: exit 1 error: io error: catalog ancestor /var/tmp/w permits path substitution; use a st
+
+== 3. The whole check, with the system's bwrap
+1. Created in the bubble by the relay
+  FAIL  msb create: exit -1 in 0.1 s the bubble ended: bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted

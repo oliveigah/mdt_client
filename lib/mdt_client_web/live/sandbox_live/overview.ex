@@ -137,6 +137,7 @@ defmodule MDTClientWeb.SandboxLive.Overview do
           Open Setup
         </.link>
         <span :if={not @tools.podman} class="text-bad">podman isn't installed.</span>
+        <span :for={need <- @tools.needs} class="text-bad">{need}</span>
         <span :if={is_nil(@tools.msb)} class="text-bad">
           This MDT has no microsandbox runtime; in a source checkout, run scripts/build-microsandbox.sh.
         </span>

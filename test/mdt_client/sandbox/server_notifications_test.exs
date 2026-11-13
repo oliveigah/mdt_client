@@ -101,10 +101,20 @@ defmodule MDTClient.Sandbox.ServerNotificationsTest do
   test "a command shows while it waits, and again when its output waits for you", %{
     username: username
   } do
+    {:ok, grant} =
+      Sandbox.create_grant(username, %{
+        "kind" => "command",
+        "name" => "shell",
+        "purpose" => "Run commands on this machine"
+      })
+
+    {:ok, _} = Sandbox.turn_on(username, grant.id, :until_off, :ask)
+
     {:ok, approval} =
       Server.call(
         username,
-        {:request_command, %{script: "echo hi", timeout: 10, reason: "check", agent: "claude"}}
+        {:request_command,
+         %{grant: "shell", script: "echo hi", timeout: 10, reason: "check", agent: "claude"}}
       )
 
     assert %{summary: "Claude asks to run a command on this machine"} =

@@ -1,0 +1,34 @@
+net=vsock cache=auto confine=False
+  QEMU start to the VM's agent answering over vsock (s)      1.68
+  guest kernel                                               7.2.15-200.fc44.x86_64
+
+What the VM has
+  network interfaces in the VM                               dummy0 lo
+  PCI device classes (0x0200 would be a network card)        1 0x010000 1 0x010601 1 0x018000 1 0x060000 1 0x060100 1 0x060400 1 0x078000 1 0x0c0500
+
+Egress with no network card
+  curl https://example.com/                                  200 via 104.20.23.154:443 in 0.036010s
+  server speaks first, github.com:22                         SSH-2.0-5a55ed12
+  CONNECT lines the host saw                                 104.20.23.154:443, 4.228.31.150:22
+  names the host saw looked up                               example.com, github.com
+  UDP straight to 1.1.1.1:53                                 no answer (timed out)
+  with the VM's relay killed by root in the VM               curl: (7) Failed to connect to 93.184.215.14 port 443 after 0 ms: Coul
+  and its nftables rules flushed                             curl: (28) Connection timed out after 5002 milliseconds
+
+Throughput, 4096 MiB each way (MiB/s)
+  vsock stream, VM <-> host, down                            2251
+  vsock stream, VM <-> host, up                              4035
+  TCP in VM -> relay -> vsock -> host proxy -> TCP, down     2027
+  TCP in VM -> relay -> vsock -> host proxy -> TCP, up       2254
+
+Shared folder: the host replaces a file, the VM reads it at once
+  200 replacements: new content / old content / error        0 / 200 / 0
+  longest the old content was served (s)                     1.02
+  100 host `git add`s, VM `git ls-files`: new / previous / wrong 1 / 2 / 97
+  VM `git status` lines, `git fsck`                          100, dangling blob fff0a2476aa5c8e60a3ef21cfc66e0cc670920be
+  inotify in the VM for a file the host creates              no event
+
+Adding a folder to a running VM
+  device_add over QMP                                        ok
+  mounted and read in the VM                                 'added while running' after 0.07s
+  after device_del, mounting it again                        mount: mounting share2 on /mnt/share2 failed: Invalid argument code=0

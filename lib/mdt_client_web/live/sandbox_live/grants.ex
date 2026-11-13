@@ -173,6 +173,10 @@ defmodule MDTClientWeb.SandboxLive.Grants do
     do: Enum.join(destinations, "  ·  ")
 
   def summary(%Grant{kind: :file, path: path}), do: path
+  def summary(%Grant{kind: :command, script: nil}), do: "Any command the agent writes"
+
+  def summary(%Grant{kind: :command, script: script, dir: dir}),
+    do: "#{script |> String.split("\n") |> hd()}  ·  in #{dir}"
 
   ## One grant
 
@@ -291,7 +295,7 @@ defmodule MDTClientWeb.SandboxLive.Grants do
         </.card>
 
         <.card
-          :if={@grant.kind != :file}
+          :if={@grant.kind not in [:file, :command]}
           id="grant-uses"
           title="Uses"
         >
@@ -428,6 +432,10 @@ defmodule MDTClientWeb.SandboxLive.Grants do
     do:
       "Nothing to hold. While this is on, MDT lets the VM's connections to these destinations through, from this machine, so they reach whatever your network or VPN reaches. Services behind a VPN often trust where a connection comes from, so the VM acts as you there: list destinations, not whole networks, where you can."
 
+  defp delivery_help(:command),
+    do:
+      "Nothing to hold. While this is on, agents may ask MDT to run a command on this machine, as you, outside the VM. Each run shows on a card with its exact text and waits for you; nothing lets one through unasked. It is for jobs that need what only this machine has, so the work goes to the value instead of the value to the VM."
+
   defp delivery_help(:file),
     do:
       "Some tools must read a value themselves: a key that signs, a kubeconfig with client certificates. There is nothing on the wire to swap, so the VM gets the real value. Turning this off deletes the file, but anything the VM copied keeps working until the value expires at its provider."
@@ -526,6 +534,44 @@ defmodule MDTClientWeb.SandboxLive.Grants do
     """
   end
 
+  defp delivery(%{grant: %Grant{kind: :command}} = assigns) do
+    ~H"""
+    <div class="space-y-3">
+      <div
+        :if={is_nil(@grant.script)}
+        id="grant-any-command"
+        class="flex gap-2.5 rounded-lg border border-warn/35 bg-warn-soft/30 p-3"
+      >
+        <.icon name="hero-exclamation-triangle" class="mt-px size-4 shrink-0 text-warn" />
+        <p class="text-xs leading-5 text-ink">
+          The widest grant there is: agents write the command. Read every card before you run it.
+        </p>
+      </div>
+      <dl class="grid grid-cols-[8rem_minmax(0,1fr)] gap-x-4 gap-y-2 text-xs">
+        <dt class="text-muted">Runs</dt>
+        <dd :if={is_nil(@grant.script)} class="text-[11px] text-ink">
+          Whatever text the agent sends, exactly as its card shows it.
+        </dd>
+        <dd :if={@grant.script} id="grant-script">
+          <pre
+            class="overflow-x-auto whitespace-pre-wrap break-words rounded-md border border-line-soft bg-deep/50 p-2 font-mono text-[11px] text-ink"
+            phx-no-format
+          >{@grant.script}</pre>
+          <p class="mt-1 text-[10px] text-faint">Yours. Agents run it by name and send no text.</p>
+        </dd>
+        <dt :if={@grant.script} class="text-muted">In</dt>
+        <dd :if={@grant.script} class="font-mono text-[11px] text-ink">{@grant.dir}</dd>
+        <dt class="text-muted">Approval</dt>
+        <dd class="text-[11px] text-ink">Every run waits for you. No allowance covers one.</dd>
+        <dt class="text-muted">In the VM</dt>
+        <dd class="font-mono text-[11px] text-ink">
+          mdt run {@grant.id} --reason "…"{if is_nil(@grant.script), do: " -- COMMAND"}
+        </dd>
+      </dl>
+    </div>
+    """
+  end
+
   ## Adding a grant
 
   @doc """
@@ -597,7 +643,7 @@ defmodule MDTClientWeb.SandboxLive.Grants do
 
         <div class="min-h-0 overflow-y-auto p-5">
           <div :if={@adding.step == :pick} class="space-y-5">
-            <div id="type-grid" class="grid gap-2.5 sm:grid-cols-3">
+            <div id="type-grid" class="grid gap-2.5 sm:grid-cols-2">
               <button
                 :for={type <- Presets.types()}
                 type="button"
@@ -613,11 +659,14 @@ defmodule MDTClientWeb.SandboxLive.Grants do
                 <span class="block text-[11px] leading-4 text-muted">{type.blurb}</span>
                 <span class={[
                   "inline-flex items-center gap-1 text-[10px] font-medium",
-                  if(type.kind == :file, do: "text-warn-strong", else: "text-ok-strong")
+                  if(type.kind in [:file, :command],
+                    do: "text-warn-strong",
+                    else: "text-ok-strong"
+                  )
                 ]}>
                   <.icon
                     name={
-                      if type.kind == :file,
+                      if type.kind in [:file, :command],
                         do: "hero-exclamation-triangle-micro",
                         else: "hero-shield-check-micro"
                     }
@@ -889,8 +938,48 @@ defmodule MDTClientWeb.SandboxLive.Grants do
               </div>
             </div>
 
+            <div :if={@adding.preset.kind == :command} class="space-y-3">
+              <div>
+                <label
+                  for="grant-script"
+                  class="mb-1 block text-[11px] font-medium uppercase tracking-wide text-muted"
+                >
+                  Your script (optional)
+                </label>
+                <textarea
+                  name="grant[script]"
+                  id="grant-script"
+                  rows="4"
+                  spellcheck="false"
+                  autocomplete="off"
+                  placeholder="./deploy.sh staging"
+                  class={[input_classes(), "font-mono text-xs"]}
+                >{@adding.form[:script].value}</textarea>
+                <p class="mt-1 text-[10px] leading-4 text-faint">
+                  With a script, agents can run only this text, by the grant's name. Left empty, they write the command themselves: the widest grant there is. Either way every run waits for your approval.
+                </p>
+                <.field_error errors={@adding.errors} field={:script} />
+              </div>
+              <div>
+                <.input
+                  field={@adding.form[:dir]}
+                  label="Folder your script runs in"
+                  placeholder="~/projects/site"
+                />
+                <.field_error errors={@adding.errors} field={:dir} />
+              </div>
+            </div>
+
             <p
-              :if={@adding.preset.kind != :file}
+              :if={@adding.preset.kind == :command}
+              class="flex items-start gap-2 rounded-lg border border-line-soft bg-deep/50 p-3 text-[11px] leading-4 text-muted"
+            >
+              <.icon name="hero-hand-raised-micro" class="mt-px size-3.5 shrink-0 text-warn" />
+              Once on, agents can ask. Each run shows its exact text on a card and waits for you; it runs as you, outside the VM.
+            </p>
+
+            <p
+              :if={@adding.preset.kind not in [:file, :command]}
               class="flex items-start gap-2 rounded-lg border border-line-soft bg-deep/50 p-3 text-[11px] leading-4 text-muted"
             >
               <.icon name="hero-hand-raised-micro" class="mt-px size-3.5 shrink-0 text-warn" />
@@ -936,4 +1025,5 @@ defmodule MDTClientWeb.SandboxLive.Grants do
   defp exposure_words(:token), do: "VM gets a placeholder"
   defp exposure_words(:network), do: "Nothing to hold"
   defp exposure_words(:file), do: "VM holds the value"
+  defp exposure_words(:command), do: "Runs on this machine, each time you approve"
 end

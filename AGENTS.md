@@ -7,11 +7,22 @@ This is a web application written using the Phoenix web framework.
 
 ### In the agent sandbox, work in a worktree
 
-You are in MDT's agent sandbox when `/mnt/mdt` exists. The user's MDT, the
-one running your VM, runs from this checkout, and its dev server loads
-whatever lands here. So never edit, build or test in the checkout itself: an
-unfinished edit would run in the process holding your own VM, and a build
-with other tools would break the user's `_build`.
+This whole section, down to its last rule, is for agents running inside
+MDT's agent sandbox: the VM that MDT starts. Check which side you are on
+before anything else:
+
+- **In the sandbox**, `/mnt/mdt` exists. MDT mounts it, read-only, in every
+  VM it starts, and nothing else creates it. Test the folder, not
+  `MDT_SANDBOX=1`: the image sets that too, but a process started with a
+  clean environment loses it.
+- **On the user's own machine** there is no `/mnt/mdt`. Skip this section,
+  its rule about `msb` and `~/.mdt_client` included.
+
+In the sandbox, the user's MDT, the one running your VM, runs from this
+checkout, and its dev server loads whatever lands here. So never edit, build
+or test in the checkout itself: an unfinished edit would run in the process
+holding your own VM, and a build with other tools would break the user's
+`_build`.
 
 1. Start every task in a worktree of your own, from the checkout:
 
@@ -44,8 +55,7 @@ with other tools would break the user's `_build`.
    force anything in the checkout.
 5. Then clean up from the checkout:
    `cd ../.. && git worktree remove .worktrees/<name> && git branch -d <name>`.
-
-Don't run `msb`, and don't touch `~/.mdt_client`: both are the user's.
+6. Don't run `msb`, and don't touch `~/.mdt_client`: both are the user's.
 
 ### Phoenix v1.8 guidelines
 

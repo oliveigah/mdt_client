@@ -1,0 +1,16 @@
+== The machine
+Ubuntu 26.04.1 LTS, kernel 7.0.0-38-generic, bwrap 0.11.1
+apparmor_restrict_unprivileged_userns = 1
+profiles naming bwrap: bwrap-userns-restrict glycin.bwrap 
+crw-rw-rw- 1 root kvm 10, 232 Nov 13 20:04 /dev/kvm
+
+== 1. The system's bwrap, as it comes
+mdt-relay: could not add the default route into loopback: Operation not permitted (os error 1)
+exit 2
+
+== 2. msb's image
+msb pull alpine: exit 0   ✓ Pulled              alpine (1.7s)
+
+== 3. The whole check, with the system's bwrap
+1. Created in the bubble by the relay
+  FAIL  msb create: exit -1 in 0.1 s the bubble ended: mdt-relay: could not add the default route into loopback: Operation not permitted (os error 1)

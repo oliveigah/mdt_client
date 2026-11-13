@@ -1,0 +1,70 @@
+#!/bin/bash
+# Run by MDT inside the VM after every boot, as root, from /mnt/mdt/bin.
+#
+# MDT never writes into anything the VM can write: what it has for the VM is
+# in /mnt/mdt, read-only, and this script, running in the VM, copies the
+# parts that tools expect elsewhere:
+#
+#   - MDT's instructions for agents, as a block between two markers at the
+#     top of ~/.claude/CLAUDE.md and ~/.codex/AGENTS.md. The rest of each
+#     file is left alone;
+#   - the memo tool, into the VM's own memory folder, with an empty memory
+#     when there is none.
+#
+# MDT_INBOX and HOME can be set to try it outside a VM.
+set -u
+inbox=${MDT_INBOX:-/mnt/mdt}
+block=$inbox/agents-block.md
+begin='<!-- mdt:begin'
+finish='<!-- mdt:end -->'
+
+put_block() {
+  local file=$1 partial
+  mkdir -p "$(dirname "$file")" || return 1
+  [ -e "$file" ] || : > "$file"
+  partial=$(mktemp "$file.XXXXXX") || return 1
+
+  if grep -qF -- "$begin" "$file"; then
+    # Replaced where it was. A block that was never closed runs to the end.
+    awk -v block="$block" -v begin="$begin" -v finish="$finish" '
+      !inside && index($0, begin) == 1 {
+        while ((getline line < block) > 0) print line
+        inside = 1
+        next
+      }
+      inside && index($0, finish) == 1 { inside = 0; next }
+      !inside { print }
+    ' "$file" > "$partial"
+  else
+    {
+      cat "$block"
+      [ -s "$file" ] && echo
+      cat "$file"
+    } > "$partial"
+  fi
+
+  mv "$partial" "$file"
+}
+
+status=0
+
+if [ -r "$block" ]; then
+  for file in "$HOME/.claude/CLAUDE.md" "$HOME/.codex/AGENTS.md"; do
+    put_block "$file" || { echo "mdt-boot: could not write $file" >&2; status=1; }
+  done
+fi
+
+if [ -x "$inbox/bin/memo" ]; then
+  optmem=$HOME/.optmem
+  mkdir -p "$optmem" &&
+    cp "$inbox/bin/memo" "$optmem/memo.new" &&
+    chmod 0755 "$optmem/memo.new" &&
+    mv "$optmem/memo.new" "$optmem/memo" || { echo "mdt-boot: could not copy memo" >&2; status=1; }
+
+  if [ ! -f "$optmem/memory/LOG.txt" ]; then
+    MEMORY_DIR=$optmem/memory "$optmem/memo" init >/dev/null 2>&1 ||
+      { echo "mdt-boot: memo init failed" >&2; status=1; }
+  fi
+fi
+
+exit $status

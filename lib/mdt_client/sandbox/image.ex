@@ -103,7 +103,7 @@ defmodule MDTClient.Sandbox.Image do
   The shell script that builds `ref` from `dir` and loads it into
   microsandbox. It leaves `versions.txt` (what mise installed) and `size` in
   `dir`, read without running anything from the image. Paths are quoted, so
-  spaces in a home folder are fine. It runs with `Msb.env/0`, whose
+  spaces in a home folder are fine. It runs with `Msb.env/1`, whose
   `MSB_PATH` is MDT's `msb`.
   """
   @spec build_script(Path.t(), String.t()) :: String.t()
@@ -161,9 +161,9 @@ defmodule MDTClient.Sandbox.Image do
   archive also names it `localhost/<ref>` in microsandbox, so both names go.
   Failures are ignored.
   """
-  @spec delete(String.t()) :: :ok
-  def delete(ref) do
-    _ = Msb.run(["image", "remove", ref, "localhost/" <> ref], 60)
+  @spec delete(String.t(), String.t()) :: :ok
+  def delete(username, ref) do
+    _ = Msb.run(username, ["image", "remove", ref, "localhost/" <> ref], 60)
 
     if podman?() do
       System.cmd("podman", ["rmi", "--ignore", ref], stderr_to_stdout: true)

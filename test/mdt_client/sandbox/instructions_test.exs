@@ -16,19 +16,74 @@ defmodule MDTClient.Sandbox.InstructionsTest do
     assert Instructions.put_block("", "only") =~ ~r/^<!-- mdt:begin.*only\n<!-- mdt:end -->\n$/s
   end
 
-  test "Claude Code and Codex both get the block in Home" do
-    home = Path.join(System.tmp_dir!(), "home-#{System.unique_integer([:positive])}")
-    on_exit(fn -> File.rm_rf!(home) end)
-    File.mkdir_p!(Path.join(home, ".codex"))
-    File.write!(Path.join(home, ".codex/AGENTS.md"), "Prefer small commits.\n")
+  # The VM puts the block in its own files, after every boot, with the script
+  # MDT runs in it. Here the script runs on this machine, pointed at folders
+  # of the test's.
+  describe "the boot script" do
+    setup do
+      base = Path.join(System.tmp_dir!(), "boot-#{System.unique_integer([:positive])}")
+      on_exit(fn -> File.rm_rf!(base) end)
+      inbox = Path.join(base, "inbox")
+      home = Path.join(base, "home")
+      File.mkdir_p!(inbox)
+      File.mkdir_p!(home)
+      File.write!(Path.join(inbox, "agents-block.md"), Instructions.block())
 
-    :ok = Instructions.write_home!(home, Instructions.text())
+      boot = fn ->
+        System.cmd(
+          "bash",
+          [Path.join([:code.priv_dir(:mdt_client), "sandbox", "mdt-boot"])],
+          env: [{"MDT_INBOX", inbox}, {"HOME", home}],
+          stderr_to_stdout: true
+        )
+      end
 
-    claude = File.read!(Path.join(home, ".claude/CLAUDE.md"))
-    codex = File.read!(Path.join(home, ".codex/AGENTS.md"))
-    assert claude =~ "Access comes only from MDT"
-    assert codex =~ "Access comes only from MDT"
-    assert codex =~ "Prefer small commits."
+      %{inbox: inbox, home: home, boot: boot}
+    end
+
+    test "Claude Code and Codex both get the block in Home", %{home: home, boot: boot} do
+      File.mkdir_p!(Path.join(home, ".codex"))
+      File.write!(Path.join(home, ".codex/AGENTS.md"), "Prefer small commits.\n")
+
+      assert {"", 0} = boot.()
+
+      claude = File.read!(Path.join(home, ".claude/CLAUDE.md"))
+      codex = File.read!(Path.join(home, ".codex/AGENTS.md"))
+      assert claude == Instructions.block()
+      assert codex == Instructions.block() <> "\nPrefer small commits.\n"
+    end
+
+    test "a later boot replaces the block and leaves the rest", %{
+      inbox: inbox,
+      home: home,
+      boot: boot
+    } do
+      assert {"", 0} = boot.()
+      file = Path.join(home, ".claude/CLAUDE.md")
+      File.write!(file, File.read!(file) <> "\nmy own notes\n")
+
+      File.write!(Path.join(inbox, "agents-block.md"), Instructions.put_block("", "changed"))
+      assert {"", 0} = boot.()
+
+      assert File.read!(file) == Instructions.put_block("", "changed") <> "\nmy own notes\n"
+      # The script and `put_block/2` agree on where the block goes.
+      assert File.read!(file) == Instructions.put_block(File.read!(file), "changed")
+    end
+
+    test "the memo tool is copied into the VM's memory folder, which gets a memory", %{
+      inbox: inbox,
+      home: home,
+      boot: boot
+    } do
+      File.mkdir_p!(Path.join(inbox, "bin"))
+      memo = Path.join(inbox, "bin/memo")
+      File.write!(memo, "#!/bin/sh\nmkdir -p \"$MEMORY_DIR\" && : > \"$MEMORY_DIR/LOG.txt\"\n")
+      File.chmod!(memo, 0o755)
+
+      assert {"", 0} = boot.()
+      assert File.read!(Path.join(home, ".optmem/memo")) == File.read!(memo)
+      assert File.regular?(Path.join(home, ".optmem/memory/LOG.txt"))
+    end
   end
 
   test "the standing text forbids the usual login steps and explains MDT's answers" do

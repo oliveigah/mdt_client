@@ -22,11 +22,22 @@ defmodule MDTClient.Sandbox.Egress.Connection do
 
   require Logger
 
-  alias MDTClient.Sandbox.{Destinations, Server}
+  alias MDTClient.Sandbox.{Destinations, Roots, Server}
 
   @head_limit 64 * 1024
   @body_peek 64 * 1024
   @idle 60_000
+  # The driver's own buffer per socket. The default (a few KiB) costs a
+  # tunnel about four times the CPU and a quarter of the speed.
+  @buffer 262_144
+  # microsandbox waits 10 seconds for the answer to a CONNECT.
+  @answer_within 3_000
+  # A client that speaks first does so at once; after this long MDT also
+  # connects, in case the server speaks first.
+  @client_first 100
+  @server_first 1_400
+  @token ~r/\A[!#$%&'*+.^_`|~0-9A-Za-z-]+\z/
+  @field_value ~r/\A[\t\x20-\x7e\x80-\xff]*\z/
 
   @doc """
   Serves `client`, an accepted socket the caller owns.
@@ -35,6 +46,9 @@ defmodule MDTClient.Sandbox.Egress.Connection do
 
     * `:upstream` - `fn host -> {:ok, ssl_socket} | {:error, reason} end`, the
       connection a read request is sent on; tests point it elsewhere
+    * `:answer_within` - how long, in milliseconds, the sandbox has to answer
+      for a destination before the CONNECT is answered and the tunnel waits
+      instead (3 seconds)
   """
   def run(client, username, options \\ []) do
     started = System.monotonic_time(:millisecond)
@@ -42,15 +56,15 @@ defmodule MDTClient.Sandbox.Egress.Connection do
     with {:ok, head, rest} <- read_head(client, :gen_tcp, "", 10_000),
          {:ok, host, port} <- connect_target(head),
          {:ok, ip} <- address(host),
-         :ok <- destination(username, ip, port) do
-      :ok = :gen_tcp.send(client, "HTTP/1.1 200 Connection Established\r\n\r\n")
-      first = peek(client, rest)
-      sni = sni(first)
+         :ok <- destination(client, username, ip, port, options),
+         {from_client, from_server, upstream} <- opening(client, rest, ip, port) do
+      sni = sni(from_client)
 
       if sni && Server.call(username, {:intercept?, sni}) do
-        intercept(client, first, sni, username, options)
+        discard(upstream)
+        intercept(client, from_client, sni, username, options)
       else
-        tunnel(client, first, ip, port, sni, username, started)
+        tunnel(client, from_client, from_server, upstream, {ip, port, sni}, username, started)
       end
     else
       {:deny, _reason} ->
@@ -70,17 +84,131 @@ defmodule MDTClient.Sandbox.Egress.Connection do
       :gen_tcp.close(client)
   end
 
-  defp destination(username, ip, port) do
-    Server.call(username, {:destination, ip, port}, :infinity)
+  # Asks the sandbox whether the VM may connect there. An answer that comes
+  # at once is passed on as it is: 200, or 403, which the VM sees as
+  # "connection refused". A destination waiting for your approval takes
+  # longer than microsandbox waits for a CONNECT, so then the 200 goes out
+  # first and the open tunnel waits instead; a "no" closes it.
+  defp destination(client, username, ip, port, options) do
+    parent = self()
+    ref = make_ref()
+
+    spawn_link(fn ->
+      send(parent, {ref, Server.call(username, {:destination, ip, port}, :infinity)})
+    end)
+
+    receive do
+      {^ref, :ok} -> established(client)
+      {^ref, {:deny, reason}} -> {:deny, reason}
+    after
+      Keyword.get(options, :answer_within, @answer_within) ->
+        with :ok <- established(client) do
+          receive do
+            {^ref, :ok} -> :ok
+            {^ref, {:deny, _reason}} -> {:error, :denied}
+          end
+        end
+    end
   end
+
+  defp established(client),
+    do: :gen_tcp.send(client, "HTTP/1.1 200 Connection Established\r\n\r\n")
+
+  ## The first bytes
+
+  # Who speaks first, as `{from_client, from_server, upstream}`. Most clients
+  # do, at once (a TLS ClientHello, an HTTP request), and their first bytes
+  # decide between reading and tunnelling. When the client stays quiet for a
+  # moment the server probably speaks first (SSH, SMTP, MySQL): MDT connects
+  # and takes the first bytes from either side, instead of making the server's
+  # greeting wait. `upstream` is the connection made on the way, if any.
+  defp opening(client, "", ip, port) do
+    case :gen_tcp.recv(client, 0, @client_first) do
+      {:ok, data} -> {complete_record(client, data), "", nil}
+      {:error, :timeout} -> either(client, connect(ip, port))
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp opening(client, rest, _ip, _port), do: {complete_record(client, rest), "", nil}
+
+  defp either(_client, {:error, _reason} = failed), do: {"", "", failed}
+
+  defp either(client, {:ok, upstream}) do
+    :inet.setopts(client, active: :once)
+    :inet.setopts(upstream, active: :once)
+
+    receive do
+      {:tcp, ^client, data} -> {complete_record(client, data), "", {:ok, upstream}}
+      {:tcp, ^upstream, data} -> {"", data, {:ok, upstream}}
+      {tag, ^client} when tag in [:tcp_closed, :tcp_error] -> {:error, :closed}
+      {:tcp_error, ^client, reason} -> {:error, reason}
+      {:tcp_closed, ^upstream} -> {"", "", {:error, :closed}}
+      {:tcp_error, ^upstream, reason} -> {"", "", {:error, reason}}
+    after
+      @server_first -> {"", "", {:ok, upstream}}
+    end
+  end
+
+  # A connection made while waiting for the first bytes, not needed after
+  # all: closed, and whatever it already delivered dropped.
+  defp discard({:ok, upstream}) do
+    :gen_tcp.close(upstream)
+    forget(upstream)
+  end
+
+  defp discard(_none), do: :ok
+
+  defp forget(socket) do
+    receive do
+      {:tcp, ^socket, _data} -> forget(socket)
+      {:tcp_closed, ^socket} -> forget(socket)
+      {:tcp_error, ^socket, _reason} -> forget(socket)
+    after
+      0 -> :ok
+    end
+  end
+
+  # A ClientHello can span TCP segments (post-quantum key shares make it
+  # large), so read until the TLS record is whole.
+  defp complete_record(client, <<0x16, _major, _minor, length::16, _::binary>> = data)
+       when byte_size(data) < length + 5 do
+    case :gen_tcp.recv(client, 0, 5_000) do
+      {:ok, more} -> complete_record(client, data <> more)
+      {:error, _} -> data
+    end
+  end
+
+  defp complete_record(_client, data), do: data
 
   ## Tunnels
 
-  defp tunnel(client, first, ip, port, sni, username, started) do
-    case :gen_tcp.connect(ip, port, [:binary, active: false, nodelay: true], 10_000) do
+  defp connect(ip, port) do
+    :gen_tcp.connect(
+      ip,
+      port,
+      [:binary, active: false, nodelay: true, buffer: @buffer],
+      10_000
+    )
+  end
+
+  defp tunnel(client, from_client, from_server, upstream, {ip, port, sni}, username, started) do
+    case upstream || connect(ip, port) do
       {:ok, upstream} ->
-        if first != "", do: :ok = :gen_tcp.send(upstream, first)
-        {up, down} = splice(client, :gen_tcp, upstream, :gen_tcp, byte_size(first), 0, nil)
+        :inet.setopts(client, buffer: @buffer)
+        if from_client != "", do: :ok = :gen_tcp.send(upstream, from_client)
+        if from_server != "", do: :ok = :gen_tcp.send(client, from_server)
+
+        {up, down} =
+          splice(
+            client,
+            :gen_tcp,
+            upstream,
+            :gen_tcp,
+            byte_size(from_client),
+            byte_size(from_server),
+            nil
+          )
 
         Server.cast(
           username,
@@ -133,7 +261,9 @@ defmodule MDTClient.Sandbox.Egress.Connection do
 
     with {:ok, head, rest} <- read_head(tls, :ssl, "", @idle),
          {:ok, method, target, version, headers} <- parse_request(head),
-         :ok <- same_host(headers, sni) do
+         :ok <- acceptable(method, target, headers, sni) do
+      # One Host, and it is the name the connection was encrypted for.
+      headers = List.keyreplace(headers, "host", 0, {"host", sni})
       {headers, rest} = continue_if_expected(tls, headers, rest)
       body = read_body_prefix(tls, headers, rest)
 
@@ -154,7 +284,36 @@ defmodule MDTClient.Sandbox.Egress.Connection do
           Jason.encode!(%{error: "Host #{host} does not match #{sni}.", by: "MDT agent sandbox"})
         )
 
-      _closed_or_bad ->
+      {:refuse, status, code, message} ->
+        respond(
+          tls,
+          status,
+          Jason.encode!(%{code: code, error: message, by: "MDT agent sandbox"})
+        )
+
+      {:error, :bad_request} ->
+        respond(
+          tls,
+          400,
+          Jason.encode!(%{
+            code: "mdt_bad_request",
+            error: "MDT could not read this as one HTTP/1.1 request.",
+            by: "MDT agent sandbox"
+          })
+        )
+
+      {:error, :head_too_large} ->
+        respond(
+          tls,
+          431,
+          Jason.encode!(%{
+            code: "mdt_bad_request",
+            error: "The request's head is over #{div(@head_limit, 1024)} KiB.",
+            by: "MDT agent sandbox"
+          })
+        )
+
+      _closed ->
         :ssl.close(tls)
     end
   end
@@ -206,8 +365,9 @@ defmodule MDTClient.Sandbox.Egress.Connection do
       charlist,
       443,
       [
+        nodelay: true,
         verify: :verify_peer,
-        cacerts: :public_key.cacerts_get(),
+        cacertfile: Roots.file(),
         server_name_indication: charlist,
         customize_hostname_check: [match_fun: :public_key.pkix_verify_hostname_match_fun(:https)],
         alpn_advertised_protocols: ["http/1.1"],
@@ -230,15 +390,46 @@ defmodule MDTClient.Sandbox.Egress.Connection do
     :ssl.close(tls)
   end
 
-  # The request must be for the host it was encrypted for; otherwise a
-  # request could look like GitHub to MDT while going elsewhere.
-  defp same_host(headers, sni) do
-    case List.keyfind(headers, "host", 0) do
-      {_, host} ->
-        bare = host |> String.split(":") |> hd() |> String.downcase()
-        if bare == String.downcase(sni), do: :ok, else: {:misdirected, host}
+  # MDT judges a request by what it read, and the host must act on the same
+  # thing. So a request two parsers could read two ways does not go out: its
+  # target is a path, it has one Host (the name it was encrypted for, or it
+  # could look like GitHub to MDT while going elsewhere), and one way of
+  # saying how long its body is. TRACE has the host send the request back,
+  # real value included.
+  defp acceptable(method, target, headers, sni) do
+    hosts = for {"host", value} <- headers, do: String.downcase(value)
+    lengths = for {"content-length", value} <- headers, do: value
+    encodings = for {"transfer-encoding", value} <- headers, do: String.downcase(value)
 
-      nil ->
+    cond do
+      method in ["TRACE", "CONNECT"] ->
+        {:refuse, 405, "mdt_method_refused", "MDT does not pass on #{method} requests."}
+
+      not (String.starts_with?(target, "/") or (method == "OPTIONS" and target == "*")) ->
+        {:refuse, 400, "mdt_bad_request", "The request target must be a path."}
+
+      # What HTTP allows in a target, and what an approval can show as it is.
+      not (target =~ ~r/\A[\x21-\x7e]+\z/) ->
+        {:refuse, 400, "mdt_bad_request",
+         "The request target must be visible ASCII: percent-encode anything else."}
+
+      length(hosts) != 1 ->
+        {:refuse, 400, "mdt_bad_request", "A request needs exactly one Host header."}
+
+      hd(hosts) not in [sni, sni <> ":443"] ->
+        {:misdirected, hd(hosts)}
+
+      length(lengths) > 1 or (lengths != [] and encodings != []) ->
+        {:refuse, 400, "mdt_bad_request",
+         "A request says how long its body is once: Content-Length or Transfer-Encoding."}
+
+      lengths != [] and not (hd(lengths) =~ ~r/\A[0-9]+\z/) ->
+        {:refuse, 400, "mdt_bad_request", "Content-Length must be a number."}
+
+      encodings not in [[], ["chunked"]] ->
+        {:refuse, 400, "mdt_bad_request", "The only Transfer-Encoding passed on is chunked."}
+
+      true ->
         :ok
     end
   end
@@ -270,10 +461,48 @@ defmodule MDTClient.Sandbox.Egress.Connection do
           end
 
         nil ->
-          if List.keymember?(headers, "transfer-encoding", 0), do: @body_peek, else: 0
+          if List.keymember?(headers, "transfer-encoding", 0), do: :chunked, else: 0
       end
 
-    read_at_least(tls, rest, wanted)
+    if wanted == :chunked, do: read_chunked(tls, rest), else: read_at_least(tls, rest, wanted)
+  end
+
+  # A chunked body is read until its last chunk or the peek limit, whichever
+  # comes first: a small one ends long before the limit.
+  defp read_chunked(tls, acc) do
+    if byte_size(acc) >= @body_peek or chunked_whole?(acc) do
+      acc
+    else
+      case :ssl.recv(tls, 0, 2_000) do
+        {:ok, data} -> read_chunked(tls, acc <> data)
+        {:error, _timeout_or_closed} -> acc
+      end
+    end
+  end
+
+  @doc "Whether these bytes hold a chunked body up to and including its last chunk."
+  @spec chunked_whole?(binary()) :: boolean()
+  def chunked_whole?(data) do
+    with [line, rest] <- :binary.split(data, "\r\n"),
+         {size, _extension} <- line |> String.trim() |> Integer.parse(16) do
+      cond do
+        size == 0 and String.starts_with?(rest, "\r\n") ->
+          true
+
+        size == 0 ->
+          String.contains?(rest, "\r\n\r\n")
+
+        true ->
+          case rest do
+            <<_chunk::binary-size(size), "\r\n", more::binary>> -> chunked_whole?(more)
+            _short -> false
+          end
+      end
+    else
+      # Not a chunk header: nothing to wait for; the host will refuse it.
+      :error -> true
+      [_no_line_yet] -> false
+    end
   end
 
   defp read_at_least(_tls, acc, wanted) when byte_size(acc) >= wanted, do: acc
@@ -359,6 +588,9 @@ defmodule MDTClient.Sandbox.Egress.Connection do
 
   defp read_head(socket, mod, acc, timeout) do
     case :binary.split(acc, "\r\n\r\n") do
+      [head, _rest] when byte_size(head) > @head_limit ->
+        {:error, :head_too_large}
+
       [head, rest] ->
         {:ok, head, rest}
 
@@ -366,9 +598,15 @@ defmodule MDTClient.Sandbox.Egress.Connection do
         {:error, :head_too_large}
 
       [_] ->
-        case mod.recv(socket, 0, timeout) do
-          {:ok, data} -> read_head(socket, mod, acc <> data, timeout)
-          {:error, reason} -> {:error, reason}
+        # A head that ends its lines with line feeds alone never ends for
+        # this reader: said at once, instead of waiting for more.
+        if :binary.match(acc, "\n\n") != :nomatch do
+          {:error, :bad_request}
+        else
+          case mod.recv(socket, 0, timeout) do
+            {:ok, data} -> read_head(socket, mod, acc <> data, timeout)
+            {:error, reason} -> {:error, reason}
+          end
         end
     end
   end
@@ -397,47 +635,44 @@ defmodule MDTClient.Sandbox.Egress.Connection do
     end
   end
 
+  # Strict on purpose: a line that isn't `name: value`, a name with a space in
+  # it, a folded header or a stray CR or LF is where two parsers disagree. A
+  # value is what HTTP says one is: visible bytes, spaces and tabs, with the
+  # spaces and tabs around it dropped and nothing else.
   defp parse_request(head) do
     [line | lines] = String.split(head, "\r\n")
 
-    with [method, target, "HTTP/1." <> _ = version] <- String.split(line, " ") do
-      headers =
-        for header <- lines, [name, value] <- [String.split(header, ":", parts: 2)] do
-          {String.downcase(String.trim(name)), String.trim(value)}
-        end
-
+    with [method, target, version] when version in ["HTTP/1.1", "HTTP/1.0"] <-
+           String.split(line, " "),
+         true <- method =~ @token,
+         {:ok, headers} <- parse_headers(lines, []) do
       {:ok, method, target, version, headers}
     else
       _ -> {:error, :bad_request}
     end
   end
 
-  ## The first bytes
+  defp parse_headers([], acc), do: {:ok, Enum.reverse(acc)}
 
-  # Servers that speak first (SSH, SMTP) send nothing from the client side;
-  # a short wait tells them apart.
-  defp peek(client, "") do
-    case :gen_tcp.recv(client, 0, 1_500) do
-      {:ok, data} -> complete_record(client, data)
-      {:error, _timeout} -> ""
+  defp parse_headers([line | rest], acc) do
+    with [name, value] <- String.split(line, ":", parts: 2),
+         true <- name =~ @token,
+         true <- value =~ @field_value do
+      value = String.replace(value, ~r/\A[ \t]+|[ \t]+\z/, "")
+      parse_headers(rest, [{String.downcase(name), value} | acc])
+    else
+      _ -> :error
     end
   end
 
-  defp peek(client, rest), do: complete_record(client, rest)
+  ## The ClientHello
 
-  # A ClientHello can span TCP segments (post-quantum key shares make it
-  # large), so read until the TLS record is whole.
-  defp complete_record(client, <<0x16, _major, _minor, length::16, _::binary>> = data)
-       when byte_size(data) < length + 5 do
-    case :gen_tcp.recv(client, 0, 5_000) do
-      {:ok, more} -> complete_record(client, data <> more)
-      {:error, _} -> data
-    end
-  end
-
-  defp complete_record(_client, data), do: data
-
-  @doc "The host a TLS ClientHello names, if the bytes are one."
+  @doc """
+  The host a TLS ClientHello names, if the bytes are one and the name is a
+  host name: letters, digits, dots, dashes and underscores, as names are on
+  the wire (others travel as punycode). Any other bytes name nothing, and
+  the connection is passed through unread under its address.
+  """
   @spec sni(binary()) :: String.t() | nil
   def sni(<<0x16, _major, _minor, length::16, record::binary-size(length), _::binary>>) do
     with <<1, _hlen::24, _version::16, _random::binary-32, sid_len, _sid::binary-size(sid_len),
@@ -454,7 +689,8 @@ defmodule MDTClient.Sandbox.Egress.Connection do
   defp server_name(<<0::16, length::16, data::binary-size(length), _rest::binary>>) do
     case data do
       <<_list::16, 0, name_length::16, name::binary-size(name_length), _::binary>> ->
-        String.downcase(name)
+        name = String.downcase(name)
+        if name =~ ~r/\A[a-z0-9_]([a-z0-9_.-]{0,251}[a-z0-9_])?\z/, do: name
 
       _ ->
         nil

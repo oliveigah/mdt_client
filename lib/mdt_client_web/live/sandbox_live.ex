@@ -17,13 +17,15 @@ defmodule MDTClientWeb.SandboxLive do
 
   alias MDTClient.Desktop.Notifications
   alias MDTClient.Sandbox
-  alias MDTClient.Sandbox.{Event, Presets, RequestView, Shares}
+  alias MDTClient.Sandbox.{Event, Presets, Projects, RequestView, Shares}
   alias MDTClient.Tools
   alias MDTClientWeb.SandboxLive.{Activity, Approvals, Dialogs, Grants, Overview, Settings, Setup}
+  alias MDTClientWeb.SandboxLive.Projects, as: ProjectsPage
 
   @pages [
     {:overview, "Overview", "hero-squares-2x2", "/tools/sandbox"},
     {:approvals, "Approvals", "hero-hand-raised", "/tools/sandbox/approvals"},
+    {:projects, "Projects", "hero-code-bracket-square", "/tools/sandbox/projects"},
     {:grants, "Grants", "hero-key", "/tools/sandbox/grants"},
     {:activity, "Activity", "hero-queue-list", "/tools/sandbox/activity"},
     {:settings, "Settings", "hero-cog-6-tooth", "/tools/sandbox/settings"},
@@ -57,8 +59,13 @@ defmodule MDTClientWeb.SandboxLive do
      |> assign(:activity, %{cursors: [], older?: false, shown: 0, oldest: nil, fresh: 0})
      |> assign(:settings_tab, "general")
      |> assign(:page_size, @page_size)
-     |> assign(:share_form, to_form(%{"path" => "", "mode" => "rw"}, as: :share))
+     |> assign(:share_form, to_form(%{"path" => "", "mode" => "ro"}, as: :share))
      |> assign(:share_error, nil)
+     |> assign(:project_form, to_form(%{"path" => ""}, as: :project))
+     |> assign(:project_error, nil)
+     |> assign(:note_form, to_form(%{"note" => ""}, as: :send_back))
+     |> assign(:handoff_id, nil)
+     |> assign(:handoff_view, nil)
      |> assign(:vm_errors, %{})
      |> assign(:focus, nil)
      |> assign(:desktop, nil)
@@ -86,6 +93,9 @@ defmodule MDTClientWeb.SandboxLive do
         :approvals ->
           assign(socket, :focus, params["focus"])
 
+        :projects ->
+          assign(socket, :handoff_id, params["handoff"])
+
         :settings ->
           assign(socket,
             settings_tab: Settings.tab(params["tab"]),
@@ -96,7 +106,7 @@ defmodule MDTClientWeb.SandboxLive do
           socket
       end
 
-    {:noreply, socket |> refresh() |> page_title()}
+    {:noreply, socket |> refresh() |> assign_handoff() |> page_title()}
   end
 
   @impl true
@@ -211,6 +221,17 @@ defmodule MDTClientWeb.SandboxLive do
                   host_form={@host_form}
                   host_error={@host_error}
                   desktop={@desktop}
+                />
+              <% :projects -> %>
+                <ProjectsPage.page
+                  projects={@settings.projects}
+                  handoffs={@handoffs}
+                  view={@handoff_view}
+                  vm={@vm}
+                  project_form={@project_form}
+                  project_error={@project_error}
+                  note_form={@note_form}
+                  now={@now}
                 />
               <% :setup -> %>
                 <Setup.page vm={@vm} image={@image} settings={@settings} tools={@tools} />
@@ -358,7 +379,7 @@ defmodule MDTClientWeb.SandboxLive do
           ]}></span>
           <span class="text-muted">Proxy</span>
           <span class="ml-auto font-mono text-[10px] text-faint">
-            {if @proxy.listening?, do: "127.0.0.1:#{@proxy.port}", else: "down"}
+            {if @proxy.listening?, do: "listening", else: "down"}
           </span>
         </p>
         <p :if={@proxy.error} class="text-[10px] leading-4 text-bad">{@proxy.error}</p>
@@ -870,8 +891,9 @@ defmodule MDTClientWeb.SandboxLive do
     {:noreply, assign(socket, share_form: to_form(params, as: :share), share_error: nil)}
   end
 
+  # Read-only unless read-write was chosen, which the page asks about first.
   def handle_event("add_share", %{"share" => params}, socket) do
-    mode = if params["mode"] == "ro", do: :ro, else: :rw
+    mode = if params["mode"] == "rw", do: :rw, else: :ro
 
     case Sandbox.add_share(socket.assigns.username, params["path"] || "", mode) do
       {:ok, _share} ->
@@ -892,7 +914,7 @@ defmodule MDTClientWeb.SandboxLive do
 
   # Folders picked in the desktop app's folder dialog, any number at once.
   def handle_event("add_shares", %{"paths" => paths} = params, socket) when is_list(paths) do
-    mode = if params["mode"] == "ro", do: :ro, else: :rw
+    mode = if params["mode"] == "rw", do: :rw, else: :ro
 
     results =
       for path <- paths, is_binary(path) do
@@ -931,9 +953,99 @@ defmodule MDTClientWeb.SandboxLive do
 
   def handle_event("set_share_mode", %{"path" => path, "mode" => mode}, socket) do
     :ok =
-      Sandbox.set_share_mode(socket.assigns.username, path, if(mode == "ro", do: :ro, else: :rw))
+      Sandbox.set_share_mode(socket.assigns.username, path, if(mode == "rw", do: :rw, else: :ro))
 
     {:noreply, refresh(socket)}
+  end
+
+  ## Projects and handoffs
+
+  def handle_event("add_project", %{"project" => %{"path" => path}}, socket) do
+    case Projects.add(socket.assigns.username, path) do
+      {:ok, project} ->
+        {:noreply,
+         socket
+         |> assign(project_form: to_form(%{"path" => ""}, as: :project), project_error: nil)
+         |> refresh()
+         |> put_notice(:success, "#{project.name} is a project",
+           body: "Sync it to copy it into the VM, at /work/#{project.name}."
+         )}
+
+      {:error, reason} ->
+        {:noreply,
+         assign(socket,
+           project_form: to_form(%{"path" => path}, as: :project),
+           project_error: Projects.explain(reason)
+         )}
+    end
+  end
+
+  def handle_event("remove_project", %{"name" => name}, socket) do
+    Projects.remove(socket.assigns.username, name)
+    {:noreply, socket |> refresh() |> assign_handoff()}
+  end
+
+  def handle_event("sync_project", %{"name" => name} = params, socket) do
+    case Projects.sync(socket.assigns.username, name,
+           uncommitted: params["uncommitted"] == "true"
+         ) do
+      {:ok, result} ->
+        {:noreply,
+         socket
+         |> refresh()
+         |> put_notice(:success, "#{name} synced into the VM", body: sync_words(name, result))}
+
+      {:error, reason} ->
+        {:noreply,
+         put_notice(socket, :warning, "#{name} was not synced", body: Projects.explain(reason))}
+    end
+  end
+
+  def handle_event("bring_handoff", %{"id" => id} = params, socket) do
+    case Projects.bring(socket.assigns.username, id, params["anyway"] == "true") do
+      {:ok, handoff} ->
+        {:noreply,
+         socket
+         |> refresh()
+         |> assign_handoff()
+         |> put_notice(:success, "In your working tree, uncommitted",
+           body:
+             "#{length(handoff.undo.paths)} files of \"#{handoff.title}\". Nothing was committed or staged."
+         )}
+
+      {:error, reason} ->
+        # What it merges with may have changed since the page worked it out.
+        {:noreply,
+         socket
+         |> assign_handoff()
+         |> put_notice(:warning, "Nothing was brought in", body: Projects.explain(reason))}
+    end
+  end
+
+  def handle_event("undo_handoff", %{"id" => id}, socket) do
+    handoff_action(
+      socket,
+      Projects.undo(socket.assigns.username, id),
+      "Your working tree is as it was"
+    )
+  end
+
+  def handle_event(
+        "send_back_handoff",
+        %{"handoff" => id, "send_back" => %{"note" => note}},
+        socket
+      ) do
+    socket = assign(socket, :note_form, to_form(%{"note" => ""}, as: :send_back))
+
+    handoff_action(
+      socket,
+      Projects.send_back(socket.assigns.username, id, note),
+      "Sent back to the agent"
+    )
+  end
+
+  def handle_event("decline_handoff", %{"id" => id}, socket) do
+    handoff_action(socket, Projects.decline(socket.assigns.username, id), "Declined")
   end
 
   def handle_event("save_settings", %{"vm" => params}, socket) do
@@ -1106,7 +1218,87 @@ defmodule MDTClientWeb.SandboxLive do
     |> assign(snapshot)
     |> assign(:grant_map, grant_map)
     |> assign(:marks, RequestView.marks(snapshot.grants))
+    |> follow_handoff()
     |> assign_page_data(grant_map)
+  end
+
+  # The handoff being looked at, with what MDT works out about it against
+  # your repository as it is now, and its diff. Worked out when you open it
+  # and after you act on it, not on every refresh: it runs git.
+  defp assign_handoff(socket) do
+    username = socket.assigns.username
+    id = socket.assigns[:handoff_id]
+    handoff = id && Enum.find(socket.assigns.handoffs, &(&1.id == id))
+
+    view =
+      cond do
+        socket.assigns[:page] != :projects or is_nil(handoff) ->
+          nil
+
+        handoff.status in [:waiting, :brought] ->
+          %{
+            handoff: handoff,
+            facts: ok(Projects.facts(username, id)),
+            diff: ok(Projects.diff(username, id))
+          }
+
+        true ->
+          %{handoff: handoff, facts: nil, diff: nil}
+      end
+
+    assign(socket, :handoff_view, view)
+  end
+
+  defp ok({:ok, value}), do: value
+  defp ok({:error, _reason}), do: nil
+
+  # Between those moments the record itself is kept current: an agent may
+  # replace the handoff while you look at it.
+  defp follow_handoff(%{assigns: %{handoff_view: %{handoff: %{id: id}} = view}} = socket) do
+    case Enum.find(socket.assigns.handoffs, &(&1.id == id)) do
+      nil -> assign(socket, :handoff_view, nil)
+      handoff -> assign(socket, :handoff_view, %{view | handoff: handoff})
+    end
+  end
+
+  defp follow_handoff(socket), do: socket
+
+  defp handoff_action(socket, result, done) do
+    case result do
+      {:ok, handoff} ->
+        {:noreply,
+         socket
+         |> refresh()
+         |> assign_handoff()
+         |> put_notice(:success, done, body: "\"#{handoff.title}\"")}
+
+      {:error, reason} ->
+        {:noreply,
+         socket
+         |> refresh()
+         |> assign_handoff()
+         |> put_notice(:warning, "That didn't happen", body: Projects.explain(reason))}
+    end
+  end
+
+  defp sync_words(name, result) do
+    case result.followed do
+      :updated ->
+        "/work/#{name} is on your branch #{result.branch}, as committed."
+
+      :current ->
+        "It was up to date already."
+
+      {:left, why} ->
+        "Your branches are there as host/…; /work/#{name} itself was left alone. #{why}"
+
+      :none ->
+        "Your branches are there as host/…; you are on no branch, so /work/#{name} follows none."
+    end <>
+      if(result.uncommitted,
+        do: " What you haven't committed is there as host-wip/#{result.branch}.",
+        else: ""
+      )
   end
 
   defp assign_page_data(socket, grant_map) do
@@ -1186,7 +1378,9 @@ defmodule MDTClientWeb.SandboxLive do
           "disk_gib" => settings.disk_gib,
           "write_budget_gib" => settings.write_budget_gib,
           "hold_seconds" => settings.hold_seconds,
-          "proxy_port" => settings.proxy_port
+          "home_gib" => settings.home_gib,
+          "cache_gib" => settings.cache_gib,
+          "work_gib" => settings.work_gib
         },
         as: :vm
       )
@@ -1238,6 +1432,12 @@ defmodule MDTClientWeb.SandboxLive do
         {:noreply,
          put_notice(socket, :warning, "Build the image first",
            body: "Setup → Build the image. The VM boots from it."
+         )}
+
+      {:error, {:needs, needs}} ->
+        {:noreply,
+         put_notice(socket, :warning, "This machine can't run the VM yet",
+           body: Enum.join(needs, " ")
          )}
 
       {:error, :no_snapshot} ->

@@ -11,11 +11,29 @@ defmodule MDTClientWeb.SandboxLiveCommandsTest do
     sign_in(conn)
   end
 
-  # An agent asking to run `script`, and waiting up to 10 s for the answer.
+  # An agent asking to run `script` through a command grant, and waiting up
+  # to 10 s for the answer.
   defp ask(username, script, attrs \\ %{}) do
+    unless Enum.any?(Sandbox.snapshot(username).grants, &(&1.id == "shell")) do
+      {:ok, grant} =
+        Sandbox.create_grant(username, %{
+          "kind" => "command",
+          "name" => "shell",
+          "purpose" => "Run commands on this machine"
+        })
+
+      {:ok, _} = Sandbox.turn_on(username, grant.id, :until_off, :ask)
+    end
+
     ask =
       Map.merge(
-        %{script: script, reason: "check the cluster", agent: "claude", dir: "/root"},
+        %{
+          grant: "shell",
+          script: script,
+          reason: "check the cluster",
+          agent: "claude",
+          dir: "/root"
+        },
         attrs
       )
 
@@ -51,7 +69,7 @@ defmodule MDTClientWeb.SandboxLiveCommandsTest do
     |> render_submit()
 
     # sudo fails without a terminal; what matters is that it ran and answered.
-    assert {:ok, %{status: :allowed, run: %{state: :done, exit: exit}}, nil} =
+    assert {:ok, %{status: :allowed, run: %{state: :done, exit: exit}}, %{id: "shell"}} =
              Task.await(task, 11_000)
 
     assert is_integer(exit)
@@ -75,7 +93,9 @@ defmodule MDTClientWeb.SandboxLiveCommandsTest do
     refute has_element?(view, "#command-script-text-#{approval.id}")
 
     view |> element("#decline-ask-#{approval.id}") |> render_click()
-    assert {:ok, %{status: :denied, decision: :decline, run: nil}, nil} = Task.await(task)
+
+    assert {:ok, %{status: :denied, decision: :decline, run: nil}, %{id: "shell"}} =
+             Task.await(task)
   end
 
   test "output shown first waits on its own card, to send or keep", %{
@@ -100,7 +120,8 @@ defmodule MDTClientWeb.SandboxLiveCommandsTest do
 
     view |> element("#send-output-#{approval.id}") |> render_click()
 
-    assert {:ok, %{status: :allowed, decision: :send_output, run: %{output: "the-output\n"}}, nil} =
+    assert {:ok, %{status: :allowed, decision: :send_output, run: %{output: "the-output\n"}},
+            %{id: "shell"}} =
              Task.await(task, 11_000)
 
     assert has_element?(view, "#decided-#{approval.id}", "you sent the output")
@@ -118,7 +139,8 @@ defmodule MDTClientWeb.SandboxLiveCommandsTest do
     assert has_element?(view, "#running-#{approval.id}", "sleep 30")
     view |> element("#stop-command-#{approval.id}") |> render_click()
 
-    assert {:ok, %{run: %{state: :done, stopped: true}}, nil} = Task.await(task, 11_000)
+    assert {:ok, %{run: %{state: :done, stopped: true}}, %{id: "shell"}} =
+             Task.await(task, 11_000)
 
     {:ok, view, _html} = live(conn, ~p"/tools/sandbox")
     refute has_element?(view, "#running-commands")

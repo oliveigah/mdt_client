@@ -1,0 +1,9 @@
+net=vsock cache=auto confine=False
+  QEMU start to the VM's agent answering over vsock (s)      1.50
+  guest kernel                                               7.2.15-200.fc44.x86_64
+
+How the host processes are confined (seccomp 2 = filtered)
+  QEMU                                                       seccomp 2, no_new_privs 1, own namespaces: none
+  QEMU: groups, root                                         10 968 1000, /
+  virtiofsd (the process serving the folder)                 seccomp 2, no_new_privs 1, own namespaces: user mnt net pid
+  virtiofsd (the process serving the folder): groups, root   10 968 1000, /

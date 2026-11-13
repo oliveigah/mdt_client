@@ -1,0 +1,63 @@
+
+== 1. The whole repository into the VM, host branches arriving as host/*
+   [0.25 s, exit 0]
+
+==    Again, nothing new
+   [0.03 s, exit 0]
+
+== 2. An agent works in a worktree of its own in the VM and commits
+0084309 vm: touch mix.exs
+
+==    Its branch into the host, arriving as vm/task1
+   [0.05 s, exit 0]
+   vm/task1 0084309
+
+==    Again, nothing new
+   [0.03 s, exit 0]
+
+==    The host takes it: fast-forward
+0084309 vm: touch mix.exs
+
+== 3. Work the agent has not committed: a snapshot, taken without touching its tree
+   git status in the VM is the same before and after
+    M mix.exs
+   !! _build/
+   ?? NEW_FILE.md
+   [0.05 s, exit 0]
+   what the host sees in vm/wip/task1, beyond vm/task1:
+    NEW_FILE.md | 1 +
+    mix.exs     | 1 +
+    2 files changed, 2 insertions(+)
+
+== 4. Both sides change the same line
+   sync both ways:
+   [0.05 s, exit 0]
+   [0.05 s, exit 0]
+   host working tree after the sync: 0 changed files; on d3ac765 host: edit the last line
+   host tries to take vm/task1:
+   fatal: Not possible to fast-forward, aborting.
+   the agent rebases onto host/master in the VM:
+   CONFLICT (content): Merge conflict in mix.exs
+   error: could not apply a41e8b5... vm: edit the last line
+   ...resolves it there, and continues:
+   Successfully rebased and updated refs/heads/task1.
+   [0.05 s, exit 0]
+   host fast-forwards: fb727c4 vm: edit the last line
+   # host edit
+   # vm edit
+
+== 5. The VM plants hooks and config in its repository; the host syncs and merges
+   [0.05 s, exit 0]
+   [0.05 s, exit 0]
+   951021e merge vm/task1
+   canaries on the host: 0
+   canaries in the VM (its own hooks ran there): 6
+   host .git/config: unchanged
+   host .git/hooks: unchanged
+
+== 6. The VM offers a tree with a file named .git/config inside
+   made refs/heads/evil
+   fatal: fsck error in packed object
+   fatal: index-pack failed
+      [0.04 s, exit 128]
+   vm/evil did not arrive on the host

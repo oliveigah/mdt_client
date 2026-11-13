@@ -1,0 +1,32 @@
+#!/bin/sh
+# PID 1 of the spike VM. The kernel is the host's stock Fedora kernel, so the
+# drivers it ships as modules are loaded from the root disk here.
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+mount -t proc proc /proc
+mount -t sysfs sys /sys
+mount -t devtmpfs dev /dev 2>/dev/null
+mount -t tmpfs tmp /tmp
+mount -t tmpfs run /run
+while read -r module; do insmod "/modules/$module" 2>>/tmp/insmod.log; done </modules/order
+ip link set lo up
+mkdir -p /mnt/share /mnt/share2
+mount -t virtiofs share /mnt/share
+git config --system --add safe.directory '*'
+
+if grep -q 'spike.net=nic' /proc/cmdline; then
+  # Reference run only: a virtio network card behind passt.
+  ip link set eth0 up
+  udhcpc -i eth0 -q -n -t 5 >/tmp/dhcp.log 2>&1
+else
+  # No network card. A dummy interface gives the kernel a route, so connect()
+  # to any address gets as far as the nat hook, which hands every TCP
+  # connection to the local relay. The relay's only way out is vsock.
+  ip link add dummy0 type dummy 2>/dev/null
+  ip link set dummy0 up
+  ip addr add 10.99.0.2/32 dev dummy0
+  ip route add default dev dummy0
+  nft -f /etc/egress.nft
+  echo 'nameserver 127.0.0.1' >/etc/resolv.conf
+  python3 /opt/relay.py >/tmp/relay.log 2>&1 &
+fi
+exec python3 /opt/agent.py

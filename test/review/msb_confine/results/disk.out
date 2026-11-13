@@ -1,0 +1,15 @@
+msb 0.7.14, Alpine, 4 vCPU, 2 GiB, 2026-11-13. disk_bench.sh in one VM, seconds.
+The VM was created with:  --mount-disk work.img:/work  --volume share:/share:quota=8G
+work.img: truncate -s 8G, mkfs.ext4 -E root_owner=0:0 (no root needed).
+
+step                      /work (disk image)   /var/tmp (root disk)   /share (shared folder)
+create 10,000 files       0.85                 0.51                   3.51
+read them                 0.23                 0.26                   1.89
+write 1 GiB + fsync       2.81                 0.81                   2.15
+read 1 GiB back           0.21                 0.45                   0.35
+remove everything         0.23                 0.48                   1.23
+
+Kept across `msb rm` + `msb create`:
+  write, sync, msb stop, rm, create      -> file is there
+  write, msb stop, msb start (no sync)   -> file is there
+  write, msb rm --force 0.1 s later      -> file is gone (like a power cut: unsynced writes are lost)

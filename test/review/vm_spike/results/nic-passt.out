@@ -1,0 +1,7 @@
+net=nic cache=auto confine=False
+  QEMU start to the VM's agent answering over vsock (s)      1.56
+  guest kernel                                               7.2.15-200.fc44.x86_64
+
+Throughput, 4096 MiB each way (MiB/s)
+  virtio-net + passt, down                                   1852
+  virtio-net + passt, up                                     934

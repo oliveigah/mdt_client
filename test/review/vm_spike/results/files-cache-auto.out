@@ -1,0 +1,14 @@
+net=vsock cache=auto confine=False
+  QEMU start to the VM's agent answering over vsock (s)      3.13
+  guest kernel                                               7.2.15-200.fc44.x86_64
+
+File work in a shared folder (s in the VM / s on the host, host caches warm)
+  create 10,000 files in 500 folders                         5.96 / 0.12
+  git init, add, commit                                      16.34 / 0.46
+  git status                                                 0.11 / 0.05
+  git status again                                           0.11 / 0.05
+  read the 10,000 files                                      2.09 / 0.04
+  write 1 GiB and fsync                                      3.27 / 0.11
+  read the 1 GiB back                                        0.54 / 0.06
+  remove everything                                          0.68 / nan
+  virtiofsd CPU (s) over the VM run's wall time (s)          5.91 / 29.3

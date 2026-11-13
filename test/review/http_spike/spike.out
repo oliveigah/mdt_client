@@ -1,0 +1,111 @@
+
+1. The corpus, sent to Bandit as it is
+
+
+16:46:17.576 [error] ** (Bandit.HTTPError) Request cannot contain both 'content-length' and 'transfer-encoding' (RFC9112§6.3.3)
+
+16:46:17.735 [error] ** (Bandit.HTTPError) Content length unknown error: "invalid content-length header (RFC9112§6.3)"
+
+16:46:17.886 [error] ** (Bandit.HTTPError) Content length unknown error: "invalid content-length header (RFC9112§6.3)"
+
+16:46:18.190 [error] ** (Bandit.HTTPError) Content length unknown error: "invalid content-length header (RFC9112§6.3.5)"
+
+16:46:18.342 [error] ** (Bandit.HTTPError) Content length unknown error: "invalid content-length header (RFC9112§6.3.5)"
+
+16:46:18.494 [error] ** (Bandit.HTTPError) Content length unknown error: "invalid content-length header (RFC9112§6.3.5)"
+
+16:46:18.646 [error] ** (Bandit.HTTPError) Content length unknown error: "invalid content-length header (RFC9112§6.3.5)"
+
+16:46:18.797 [error] ** (Bandit.HTTPError) Content length unknown error: "invalid content-length header (RFC9112§6.3.5)"
+
+16:46:18.949 [error] ** (Bandit.HTTPError) Transfer encoding unknown error: "multiple transfer-encoding headers (RFC9112§6.1, RFC9112§6.3)"
+
+16:46:19.101 [error] ** (Bandit.HTTPError) Unsupported transfer-encoding
+
+16:46:19.253 [error] ** (Bandit.HTTPError) Unsupported transfer-encoding
+
+16:46:19.405 [error] ** (Bandit.HTTPError) Unsupported transfer-encoding
+
+16:46:19.556 [error] ** (Bandit.HTTPError) Unsupported transfer-encoding
+
+16:46:19.707 [error] ** (Bandit.HTTPError) Unsupported transfer-encoding
+
+16:46:19.859 [error] ** (Bandit.HTTPError) Header read HTTP error: "Content-Length : 5\r\n"
+
+16:46:20.011 [error] ** (Bandit.HTTPError) Header read HTTP error: "Content-Length\t: 5\r\n"
+
+16:46:20.163 [error] ** (Bandit.HTTPError) Field value contains invalid characters (RFC9110§5.5)
+
+16:46:20.314 [error] ** (Bandit.HTTPError) Header read HTTP error: "just-a-word\r\n"
+
+16:46:20.617 [error] ** (Bandit.HTTPError) Header read HTTP error: "Con(tent: 1\r\n"
+
+16:46:20.769 [error] ** (Bandit.HTTPError) Header read HTTP error: "X-Café: 1\r\n"
+
+16:46:21.225 [error] ** (Bandit.HTTPError) Field value contains invalid characters (RFC9110§5.5)
+
+16:46:21.377 [error] ** (Bandit.HTTPError) Field value contains invalid characters (RFC9110§5.5)
+
+16:46:22.141 [error] ** (Bandit.HTTPError) Unsupported request target (RFC9112§3.2)
+
+16:46:22.293 [error] ** (Bandit.HTTPError) Unsupported request target (RFC9112§3.2)
+
+16:46:22.445 [error] ** (Bandit.HTTPError) Request line HTTP error: "GET /a b HTTP/1.1\r\n"
+
+16:46:22.596 [error] ** (Bandit.HTTPError) Request line HTTP error: "GET /a\tb HTTP/1.1\r\n"
+
+16:46:23.054 [error] ** (Bandit.HTTPError) Invalid HTTP version: {0, 9}
+
+16:46:23.206 [error] ** (Bandit.HTTPError) Invalid HTTP version: {1, 2}
+
+16:46:23.358 [error] ** (Bandit.HTTPError) Invalid HTTP version: {2, 0}
+
+16:46:23.510 [error] ** (Bandit.HTTPError) Request line HTTP error: "GET /user http/1.1\r\n"
+
+16:46:23.662 [error] ** (Bandit.HTTPError) Request line HTTP error: "G@T /user HTTP/1.1\r\n"
+
+16:46:24.270 [error] ** (Bandit.HTTPError) Unable to obtain host and port: No host header
+
+16:46:24.422 [error] ** (Bandit.HTTPError) Unable to obtain host and port: multiple host headers (RFC9112§3.2, RFC9110§7.2)
+
+16:46:24.574 [error] ** (Bandit.HTTPError) Unable to obtain host and port: multiple host headers (RFC9112§3.2, RFC9110§7.2)
+
+16:46:25.798 [error] ** (Bandit.HTTPError) Header too long
+
+16:46:25.950 [error] ** (Bandit.HTTPError) Header too long
+   65 requests. MDT's reader refuses 52 of them.
+   Of those, Bandit takes 13 and the host receives a request:
+
+   Content-Length as a list                             200  1x  POST /x HTTP/1.1
+   an empty header name                                 200  1x  GET /user HTTP/1.1
+   a bare line feed between headers                     200  1x  GET /user HTTP/1.1
+   line feeds alone as line ends                        200  1x  GET /user HTTP/1.1
+   a full address as the target                         200  1x  GET /user HTTP/1.1
+   two spaces after the method                          200  1x  GET /user HTTP/1.1
+   an empty line before the request                     200  1x  GET /user HTTP/1.1
+   TRACE                                                200  1x  TRACE /user HTTP/1.1
+   CONNECT                                              200  1x  CONNECT /user HTTP/1.1
+   another Host than the connection's                   502  1x  GET /user HTTP/1.1
+   Host with another port                               200  1x  GET /user HTTP/1.1
+   Host with a user in front                            200  1x  GET /user HTTP/1.1
+   Host empty                                           200  1x  GET /user HTTP/1.1
+
+   Refused by both: 39.
+   Ordinary requests Bandit or this Plug did not pass: ["a value of bytes outside ASCII, which HTTP allows (502)"]
+
+2. A request held before it is sent on
+
+   held 5 s: 200 after 5.2 s, the host received 1 request(s)
+   held 70 s: 200 after 70.2 s, the host received 1 request(s)
+
+3. A WebSocket upgrade
+
+   Bandit hands it to the Plug as an ordinary GET; this one answered 501.
+   To pass it on, the Plug must take the socket over itself (WebSock) and speak
+   WebSocket frames to the host with a client of its own; there is none in the deps.
+
+4. Time per request
+
+   Through Bandit and Finch, connections kept on both sides: 0.11 ms
+   A new TLS connection to the host for each request, as MDT makes today (loopback): 1.53 ms
+
