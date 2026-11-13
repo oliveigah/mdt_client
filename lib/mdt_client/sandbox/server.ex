@@ -23,6 +23,10 @@ defmodule MDTClient.Sandbox.Server do
   (`MDTClient.Sandbox.HostRun`), and its output goes back to the agent, or
   first to you when you chose to see it; `stop_command` kills it.
 
+  While the VM runs, a `MDTClient.Sandbox.Forwarder` forwards its ports to
+  the VM's address on this machine (`MDTClient.Sandbox.Ports`) and reports
+  what is forwarded, which the overview and `mdt ports` show.
+
   It also keeps the image's builds (the current one and the two before it),
   the snapshots of the VM's Home, and how far the VM's memory was seeded and
   reviewed. Creating or starting the VM prepares its folders first
@@ -50,6 +54,7 @@ defmodule MDTClient.Sandbox.Server do
     Destinations,
     Event,
     Folders,
+    Forwarder,
     Grant,
     HostCommand,
     HostInfo,
@@ -59,6 +64,7 @@ defmodule MDTClient.Sandbox.Server do
     Instructions,
     Memory,
     Msb,
+    Ports,
     Presets,
     Settings,
     Shares,
@@ -179,6 +185,8 @@ defmodule MDTClient.Sandbox.Server do
         error: nil
       },
       proxy: %{listening?: false, error: nil, port: nil},
+      ports: %{address: Ports.address(Accounts.id(username)), status: :off, ports: []},
+      forwarder: nil,
       flush: nil
     }
 
@@ -238,11 +246,14 @@ defmodule MDTClient.Sandbox.Server do
        proxy: Map.update!(state.proxy, :port, &(&1 || state.settings.proxy_port)),
        tools: %{msb: Msb.executable(), podman: Image.podman?()},
        inbox: inbox_dir(state),
-       host: Map.put(state.host, :text, host_text(state))
+       host: Map.put(state.host, :text, host_text(state)),
+       ports: state.ports
      }, state}
   end
 
   def handle_call(:host_text, _from, state), do: {:reply, host_text(state), state}
+
+  def handle_call(:ports_text, _from, state), do: {:reply, ports_text(state.ports), state}
 
   def handle_call(:probe_host, _from, state) do
     if state.host.probing?,
@@ -828,6 +839,24 @@ defmodule MDTClient.Sandbox.Server do
      finished(%{state | tasks: tasks}, purpose, {:error, "crashed: #{inspect(reason)}"})}
   end
 
+  def handle_info({:ports, pid, snapshot}, %{forwarder: pid} = state),
+    do: {:noreply, change(state, :ports, &Map.merge(&1.ports, snapshot))}
+
+  def handle_info({:ports, _stopped, _snapshot}, state), do: {:noreply, state}
+
+  # The forwarder crashed: say so, and start another in a while.
+  def handle_info({:EXIT, pid, reason}, %{forwarder: pid} = state) do
+    Logger.warning("port forwarding stopped: #{inspect(reason)}", system: :sandbox)
+    Process.send_after(self(), :sync_forwarder, 5_000)
+
+    {:noreply,
+     state
+     |> Map.put(:forwarder, nil)
+     |> change(:ports, &%{&1.ports | status: {:error, "Port forwarding stopped"}, ports: []})}
+  end
+
+  def handle_info(:sync_forwarder, state), do: {:noreply, sync_forwarder(state)}
+
   def handle_info({:EXIT, _pid, _reason}, state), do: {:noreply, state}
 
   # Crash reports print the state; the vault key, real values, minted
@@ -863,6 +892,7 @@ defmodule MDTClient.Sandbox.Server do
   @impl true
   def terminate(_reason, state) do
     persist(state)
+    stop_forwarder(state)
 
     # A command runs for the VM, which stops with MDT, so it stops too.
     for {_id, group} <- state.running, is_integer(group), do: HostRun.stop(group, "KILL")
@@ -1671,7 +1701,8 @@ defmodule MDTClient.Sandbox.Server do
         state.host.facts,
         state.host.tools,
         state.settings.shares,
-        state.settings.host_notes
+        state.settings.host_notes,
+        state.ports.address
       )
 
   defp write_host(state) do
@@ -1688,6 +1719,104 @@ defmodule MDTClient.Sandbox.Server do
     |> change(:host, &%{&1.host | probing?: true})
     |> task(:probe_host, &HostInfo.probe_tools/0)
   end
+
+  ## Ports
+
+  # A forwarder runs exactly while the VM does (tests have no VM, so none
+  # unless their config asks for one).
+  defp sync_forwarder(state) do
+    wanted? = forwarding?() and state.vm.status == :running and not is_nil(state.vm.msb)
+
+    cond do
+      wanted? and is_nil(state.forwarder) -> start_forwarder(state)
+      not wanted? and not is_nil(state.forwarder) -> stop_forwarder(state)
+      true -> state
+    end
+  end
+
+  defp start_forwarder(state) do
+    config = Application.get_env(:mdt_client, Forwarder, [])
+    id = Accounts.id(state.username)
+
+    {:ok, pid} =
+      Forwarder.start_link(
+        Keyword.merge(Keyword.get(config, :opts, []),
+          report_to: self(),
+          address: state.ports.address,
+          tunnel: Keyword.get(config, :tunnel, Forwarder.SSH),
+          tunnel_opts: %{
+            vm: state.vm.name,
+            key: Path.join(state.dir, "forward_key"),
+            control: Path.join(Channel.runtime_dir(), "mdt-ports-" <> String.slice(id, 0, 12))
+          }
+        )
+      )
+
+    state
+    |> Map.put(:forwarder, pid)
+    |> change(:ports, &%{&1.ports | status: :connecting, ports: []})
+  end
+
+  defp stop_forwarder(%{forwarder: nil} = state), do: state
+
+  defp stop_forwarder(state) do
+    Process.unlink(state.forwarder)
+    Process.exit(state.forwarder, :shutdown)
+
+    state
+    |> Map.put(:forwarder, nil)
+    |> change(:ports, &%{&1.ports | status: :off, ports: []})
+  end
+
+  defp forwarding? do
+    config = Application.get_env(:mdt_client, __MODULE__, [])
+    Keyword.get_lazy(config, :forward_ports, &external?/0)
+  end
+
+  defp ports_text(%{address: address, status: status, ports: ports}) do
+    {forwarded, others} = Enum.split_with(ports, &(&1.status == :forwarded))
+
+    state =
+      case status do
+        :off -> "Forwarding is off: the VM isn't running under MDT."
+        :connecting -> "Forwarding is starting; ask again in a few seconds."
+        {:error, message} -> "Forwarding has a problem: #{message}"
+        :on when ports == [] -> "Nothing listens in the VM yet."
+        :on -> nil
+      end
+
+    forwarded_text =
+      if forwarded != [],
+        do:
+          "Forwarded, on the user's machine:\n\n" <>
+            Enum.map_join(forwarded, "\n", fn entry ->
+              "- #{entry.port}: #{Ports.url(address, entry.port)}#{process_words(entry)}"
+            end),
+        else: nil
+
+    others_text =
+      if others != [],
+        do:
+          "Not forwarded:\n\n" <>
+            Enum.map_join(others, "\n", fn entry ->
+              reason =
+                case entry.status do
+                  {:skipped, reason} -> reason
+                  :pending -> "Starting"
+                end
+
+              "- #{entry.port}#{process_words(entry)}: #{reason}"
+            end),
+        else: nil
+
+    ["The VM's address on the user's machine: #{address}", state, forwarded_text, others_text]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.join("\n\n")
+    |> Kernel.<>("\n")
+  end
+
+  defp process_words(%{process: nil}), do: ""
+  defp process_words(%{process: process}), do: " (#{process})"
 
   ## The VM
 
@@ -2417,6 +2546,8 @@ defmodule MDTClient.Sandbox.Server do
     before = waiting_count(state)
     state = Map.put(state, area, fun.(state))
     broadcast(state, {:sandbox_changed, area})
+    # Forwarding follows the VM.
+    state = if area == :vm, do: sync_forwarder(state), else: state
     after_count = waiting_count(state)
 
     if before != after_count do

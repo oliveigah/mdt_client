@@ -3,14 +3,15 @@ defmodule MDTClient.Sandbox.Channel do
   How agents in the VM ask MDT for access: a Unix socket that microsandbox
   joins to the VM's vsock port 5000 (`msb create --vsock`). The VM has no
   network route to MDT, so this is the only way in, and all it offers is
-  reading the grants and the host's description, asking for a grant, and
-  asking to run a command on the host.
+  reading the grants, the host's description and the forwarded ports,
+  asking for a grant, and asking to run a command on the host.
 
   Inside the VM, `/mnt/mdt/bin/mdt` (`priv/sandbox/mdt-cli`) speaks it with
   socat, one ask per connection:
 
     * the client sends one line of JSON: `{"command": "grants"}`,
-      `{"command": "host"}`, `{"command": "request", "grant": "...",
+      `{"command": "host"}`, `{"command": "ports"}`,
+      `{"command": "request", "grant": "...",
       "need": "...", "minutes": 60, "reason": "...", "agent": "...",
       "wait": 60}`, `{"command": "run", "script": "...", "dir": "...",
       "timeout": 120, "reason": "...", "agent": "...", "wait": 60}` or
@@ -71,10 +72,18 @@ defmodule MDTClient.Sandbox.Channel do
   """
   @spec socket_path(String.t()) :: Path.t()
   def socket_path(username) do
-    Path.join(dir(), "mdt-sandbox-" <> String.slice(Accounts.id(username), 0, 12) <> ".sock")
+    Path.join(
+      runtime_dir(),
+      "mdt-sandbox-" <> String.slice(Accounts.id(username), 0, 12) <> ".sock"
+    )
   end
 
-  defp dir do
+  @doc """
+  Where MDT keeps its sockets: `$XDG_RUNTIME_DIR/mdt`, or a folder in the
+  temporary directory without one. Tests set `:channel_dir`.
+  """
+  @spec runtime_dir() :: Path.t()
+  def runtime_dir do
     config = Application.get_env(:mdt_client, Server, [])
 
     Keyword.get_lazy(config, :channel_dir, fn ->
@@ -222,6 +231,8 @@ defmodule MDTClient.Sandbox.Channel do
   end
 
   def answer("host", _ask, username), do: {0, Server.call(username, :host_text)}
+
+  def answer("ports", _ask, username), do: {0, Server.call(username, :ports_text)}
 
   def answer("run", ask, username) do
     request = %{

@@ -1,13 +1,14 @@
 defmodule MDTClientWeb.SandboxLive.Overview do
   @moduledoc """
-  The overview: the VM and its controls, what waits for you, what is shared
-  right now, and the latest activity, on one screen.
+  The overview: the VM and its controls, what waits for you, the VM's ports
+  on this machine, what is shared right now, and the latest activity, on
+  one screen.
   """
   use MDTClientWeb, :html
 
   import MDTClientWeb.SandboxLive.Components
 
-  alias MDTClient.Sandbox.{Grant, Presets}
+  alias MDTClient.Sandbox.{Grant, Ports, Presets}
   alias MDTClientWeb.SandboxLive.Approvals
 
   attr :vm, :any, required: true
@@ -20,6 +21,7 @@ defmodule MDTClientWeb.SandboxLive.Overview do
   attr :grant_map, :map, required: true
   attr :waiting, :list, required: true
   attr :running, :list, default: []
+  attr :ports, :map, default: nil
   attr :recent, :list, required: true
   attr :stats, :map, required: true
   attr :now, DateTime, required: true
@@ -235,6 +237,8 @@ defmodule MDTClientWeb.SandboxLive.Overview do
       </section>
 
       <div class="space-y-5">
+        <.ports_card :if={@ports} ports={@ports} />
+
         <.card id="overview-grants" title="Shared right now" body_class="">
           <:actions>
             <.link patch={~p"/tools/sandbox/grants"} class="text-[11px] text-accent hover:underline">
@@ -315,6 +319,125 @@ defmodule MDTClientWeb.SandboxLive.Overview do
     />
     """
   end
+
+  attr :ports, :map, required: true
+
+  # The VM's address on this machine and what is forwarded there.
+  defp ports_card(assigns) do
+    {forwarded, others} = Enum.split_with(assigns.ports.ports, &(&1.status == :forwarded))
+    assigns = assign(assigns, forwarded: forwarded, others: others)
+
+    ~H"""
+    <.card
+      id="overview-ports"
+      title="Ports on this machine"
+      subtitle="Servers in the VM show up here by themselves, on the same port."
+      body_class=""
+    >
+      <:actions>
+        <span
+          id="ports-address"
+          class="rounded-md border border-line bg-deep px-2 py-1 font-mono text-[11px] text-ink"
+        >
+          {@ports.address}
+        </span>
+        <button
+          type="button"
+          id="copy-ports-address"
+          phx-hook="CopyText"
+          phx-update="ignore"
+          data-copy-target="ports-address-text"
+          title="Copy the VM's address"
+          class="inline-flex cursor-pointer items-center gap-1 rounded-md border border-line bg-panel px-2 py-1 text-[11px] font-medium text-ink transition-colors hover:border-accent/50 hover:text-accent active:scale-[0.97]"
+        >
+          <.icon name="hero-clipboard-document-micro" class="size-3.5 text-muted" />
+          <span data-copy-label>Copy</span>
+        </button>
+        <pre id="ports-address-text" hidden>{@ports.address}</pre>
+      </:actions>
+
+      <p
+        :if={@ports.status != :on}
+        id="ports-status"
+        class={[
+          "flex items-start gap-2 border-b border-line-soft px-4 py-2.5 text-[11px] leading-5",
+          if(match?({:error, _}, @ports.status), do: "text-bad", else: "text-muted")
+        ]}
+      >
+        <.icon
+          name={ports_icon(@ports.status)}
+          class={["mt-0.5 size-3.5 shrink-0", @ports.status == :connecting && "animate-spin"]}
+        />
+        <span>{ports_status_words(@ports.status)}</span>
+      </p>
+
+      <div :if={@ports.status == :on and @ports.ports == []}>
+        <.empty icon="hero-signal" id="ports-none">
+          Nothing listens in the VM. Start a server there, on 127.0.0.1 or 0.0.0.0, and it shows up here within a few seconds.
+        </.empty>
+      </div>
+
+      <ul :if={@forwarded != []} id="ports-forwarded" class="divide-y divide-line-soft">
+        <li
+          :for={entry <- @forwarded}
+          id={"port-#{entry.port}"}
+          class="group flex items-center gap-3 px-4 py-2.5"
+        >
+          <span class="flex h-6 min-w-12 items-center justify-center rounded-md bg-ok-soft/60 px-1.5 font-mono text-[11px] font-semibold tabular-nums text-ok-strong">
+            {entry.port}
+          </span>
+          <a
+            id={"port-link-#{entry.port}"}
+            href={Ports.url(@ports.address, entry.port)}
+            target="_blank"
+            rel="noopener noreferrer"
+            class="min-w-0 flex-1 truncate font-mono text-[11px] text-ink transition-colors group-hover:text-accent hover:underline"
+          >
+            {Ports.url(@ports.address, entry.port)}
+          </a>
+          <span :if={entry.process} class="shrink-0 truncate text-[11px] text-faint">
+            {entry.process}
+          </span>
+          <.icon
+            name="hero-arrow-top-right-on-square-micro"
+            class="size-3.5 shrink-0 text-faint transition-colors group-hover:text-accent"
+          />
+        </li>
+      </ul>
+
+      <ul
+        :if={@others != []}
+        id="ports-skipped"
+        class="divide-y divide-line-soft border-t border-line-soft"
+      >
+        <li
+          :for={entry <- @others}
+          id={"port-skipped-#{entry.port}"}
+          class="flex items-center gap-3 px-4 py-2"
+        >
+          <span class="flex h-6 min-w-12 items-center justify-center rounded-md bg-deep px-1.5 font-mono text-[11px] tabular-nums text-muted">
+            {entry.port}
+          </span>
+          <p class="min-w-0 flex-1 text-[11px] leading-4 text-muted">
+            {skipped_words(entry.status)}
+            <span :if={entry.process} class="text-faint">· {entry.process}</span>
+          </p>
+        </li>
+      </ul>
+    </.card>
+    """
+  end
+
+  defp ports_icon(:off), do: "hero-pause-circle-micro"
+  defp ports_icon(:connecting), do: "hero-arrow-path-micro"
+  defp ports_icon({:error, _}), do: "hero-exclamation-triangle-micro"
+
+  defp ports_status_words(:off), do: "Forwarding starts when the VM runs."
+  defp ports_status_words(:connecting), do: "Connecting to the VM…"
+  defp ports_status_words({:error, message}), do: message
+
+  defp skipped_words({:skipped, reason}), do: reason
+  defp skipped_words(:pending), do: "Starting…"
 
   @ssh_host "mdt-sandbox"
 

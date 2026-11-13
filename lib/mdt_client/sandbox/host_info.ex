@@ -13,7 +13,7 @@ defmodule MDTClient.Sandbox.HostInfo do
   and when you ask from Settings. Agents never probe the host themselves.
   """
 
-  alias MDTClient.Sandbox.{HostRun, Share}
+  alias MDTClient.Sandbox.{HostRun, Ports, Share}
 
   # Name, then the arguments that print its version.
   @tools [
@@ -138,10 +138,12 @@ defmodule MDTClient.Sandbox.HostInfo do
 
   @doc """
   The description agents read, as Markdown. `tools` is `nil` until probed;
-  `notes` is your own text from Settings.
+  `notes` is your own text from Settings; `address` is the VM's address on
+  this machine, where its ports show up (`MDTClient.Sandbox.Ports`).
   """
-  @spec text(facts(), [tool()] | nil, [Share.t()], String.t() | nil) :: String.t()
-  def text(facts, tools, shares, notes) do
+  @spec text(facts(), [tool()] | nil, [Share.t()], String.t() | nil, String.t() | nil) ::
+          String.t()
+  def text(facts, tools, shares, notes, address \\ nil) do
     """
     # The user's machine
 
@@ -159,6 +161,7 @@ defmodule MDTClient.Sandbox.HostInfo do
     ## Command-line tools
 
     #{tools_text(tools)}
+    #{ports_text(address)}
     #{notes_text(notes)}
     """
     |> String.replace(~r/\n{3,}/, "\n\n")
@@ -197,6 +200,17 @@ defmodule MDTClient.Sandbox.HostInfo do
     #{if found == "", do: "- none of those MDT looks for", else: found}
 
     Not found: #{if missing == [], do: "none", else: Enum.join(missing, ", ")}. MDT looks only for these; others may exist.
+    """
+  end
+
+  defp ports_text(nil), do: ""
+
+  defp ports_text(address) do
+    """
+
+    ## Servers you start
+
+    A server you start in the VM shows up on this machine at #{address}, on the same port, within a few seconds: give the user http://#{address}:PORT. Listening on 127.0.0.1 or 0.0.0.0 both work; ports below #{Ports.unprivileged_start()} aren't forwarded. `mdt ports` lists what is forwarded now.
     """
   end
 

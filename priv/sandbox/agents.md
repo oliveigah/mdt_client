@@ -100,6 +100,14 @@ ask was wrong, 123 MDT isn't answering. The user may choose to see the
 output before you get it, or keep it. Don't ask again for something they
 declined unless they say so.
 
+## Servers you start
+
+A server you start here (a Phoenix app, a docs preview, an API) shows up on
+the user's machine by itself within a few seconds, on the same port, at the
+VM's address there (in `mdt host`). Listening on `127.0.0.1` or `0.0.0.0`
+both work; ports below 1024 aren't forwarded. `mdt ports` lists what is
+forwarded, with each URL: give the user that URL, not `localhost`.
+
 ## Tools
 
 Languages and CLIs come from mise. In a project, run `mise install` first:
