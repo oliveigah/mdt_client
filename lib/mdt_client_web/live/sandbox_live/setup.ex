@@ -197,11 +197,7 @@ defmodule MDTClientWeb.SandboxLive.Setup do
     msb = assigns.launcher
 
     folders =
-      case Enum.map(assigns.settings.projects, &"/work/#{&1.name}") ++
-             Enum.map(assigns.settings.shares, & &1.path) do
-        [] -> ["/work"]
-        folders -> folders
-      end
+      ["/work" | Enum.map(assigns.settings.shares, & &1.path)]
 
     assigns =
       assign(assigns,
@@ -293,7 +289,7 @@ defmodule MDTClientWeb.SandboxLive.Setup do
         <.connect_step n={4} title="Open a project" id="connect-open" text={@open}>
           Then sign the agents in from a Zed terminal: <code class="font-mono">claude auth login</code>, <code class="font-mono">codex login --device-auth</code>.
           <:help>
-            A project is a copy in /work, synced from the Projects page; a shared folder keeps its path from this machine. A folder shared after the VM was created appears once it is recreated. Logins live in the VM's Home disk and survive recreating it.
+            Agents work in /work, a disk of the VM, and offer their work back as pull requests; a shared folder keeps its path from this machine. A folder shared after the VM was created appears once it is recreated. Logins live in the VM's Home disk and survive recreating it.
           </:help>
         </.connect_step>
       </ol>

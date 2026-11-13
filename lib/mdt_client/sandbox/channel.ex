@@ -3,8 +3,9 @@ defmodule MDTClient.Sandbox.Channel do
   How agents in the VM ask MDT for access: a Unix socket that microsandbox
   joins to the VM's vsock port 5000 (`msb create --vsock`). The VM has no
   network route to MDT, so this is the only way in, and all it offers is
-  reading the grants and the host's description, asking for a grant, and
-  asking to run a command on the host.
+  reading the grants and the host's description, asking for a grant,
+  asking to run a command on the host, and opening pull requests
+  (`MDTClient.Sandbox.PullRequests`).
 
   Inside the VM, `/mnt/mdt/bin/mdt` (`priv/sandbox/mdt-cli`) speaks it with
   socat, one ask per connection:
@@ -51,7 +52,7 @@ defmodule MDTClient.Sandbox.Channel do
     Grant,
     HostCommand,
     Instructions,
-    Projects,
+    PullRequests,
     Server,
     Shown,
     Sockets
@@ -218,36 +219,104 @@ defmodule MDTClient.Sandbox.Channel do
   defp encode({{:ran, status}, note, output}), do: "ran #{status}\n#{note}\n#{output}."
   defp encode({status, text}), do: "#{status}\n#{String.trim_trailing(text)}\n"
 
-  defp sync_words(project, result) do
-    branch = result.branch
+  defp opened_words(pull, how) do
+    stats = pull.stats
 
-    copy =
-      case result.followed do
-        :updated -> "/work/#{project.name} was brought up to it."
-        :current -> "/work/#{project.name} was up to date already."
-        {:left, why} -> "/work/#{project.name} was left alone: #{why}"
-        :none -> "The user is on no branch, so /work/#{project.name} follows nothing."
+    first =
+      case how do
+        :opened ->
+          "Opened pull request ##{pull.id}: #{pull.source.branch} into the user's #{pull.base}, in #{pull.repo} on their machine."
+
+        :updated ->
+          "Updated pull request ##{pull.id} (revision #{pull.revision}): #{pull.source.branch} into the user's #{pull.base}."
       end
 
-    "Synced #{project.name}. The user's branches, as committed, are host/…" <>
-      if(branch, do: " (they are on #{branch}: host/#{branch}).", else: ".") <> "\n" <> copy
+    size =
+      "#{count(stats[:commits] || 0, "commit")}, #{count(stats[:files] || 0, "file")} changed."
+
+    conflicts =
+      case stats[:conflicts] || 0 do
+        0 ->
+          ""
+
+        n ->
+          "\nIt conflicts with their #{pull.base} in #{count(n, "file")}. They may send it back with their branch for you to merge."
+      end
+
+    first <>
+      "\n" <>
+      size <>
+      conflicts <>
+      "\nThe user reviews it whole. Commit more and run mdt pr again on this branch to update it." <>
+      "\nSee what they decide with: mdt prs"
   end
 
-  defp handoff_words(handoff) do
+  defp pull_words({pull, facts}) do
     state =
-      case handoff.status do
-        :waiting -> "waiting for the user"
-        :brought -> "taken: the user brought it into their working tree"
-        :sent_back -> "sent back"
-        :declined -> "declined"
-        :replaced -> "replaced by a later handoff of the same branch"
+      case pull.status do
+        :open -> "open, waiting for the user"
+        :changes_requested -> "sent back to you"
+        :merged -> "brought in: " <> PullRequests.landing_words(pull.landed)
+        :closed -> "closed by the user"
       end
 
-    note = if handoff.note in [nil, ""], do: "", else: "\n  The user's note: #{handoff.note}"
+    lines =
+      [
+        "##{pull.id}  #{state}",
+        "  #{pull.title}",
+        "  #{pull.source.branch} into #{pull.base}, in #{pull.repo} on the user's machine; revision #{pull.revision}"
+      ] ++ fact_lines(pull, facts) ++ note_lines(pull)
 
-    "#{handoff.id}  #{state}\n  #{handoff.title} (#{handoff.branch} at #{String.slice(handoff.commit, 0, 10)})" <>
-      note
+    Enum.join(lines, "\n")
   end
+
+  defp fact_lines(_pull, nil), do: []
+
+  defp fact_lines(pull, facts) do
+    behind =
+      if facts.behind > 0,
+        do: [
+          "  Their #{pull.base} has #{count(facts.behind, "commit")} this branch doesn't have."
+        ],
+        else: []
+
+    conflicts =
+      case facts.conflicts do
+        [] -> ["  It merges cleanly with their #{pull.base}."]
+        files -> ["  It conflicts with their #{pull.base} in: " <> Enum.join(files, ", ")]
+      end
+
+    behind ++ conflicts
+  end
+
+  # What the user said the last time they sent it back.
+  defp note_lines(%{status: :changes_requested, timeline: timeline}) do
+    case timeline |> Enum.filter(&(&1.kind == :sent_back)) |> List.last() do
+      nil ->
+        []
+
+      event ->
+        note = if event[:note] in [nil, ""], do: [], else: ["  The user's note: #{event.note}"]
+
+        base =
+          case event[:base] do
+            base when is_binary(base) ->
+              [
+                "  Their #{base}, as committed, is in this repository as host/#{base}: git merge host/#{base}, resolve, commit, then mdt pr."
+              ]
+
+            _ ->
+              []
+          end
+
+        note ++ base
+    end
+  end
+
+  defp note_lines(_pull), do: []
+
+  defp count(1, word), do: "1 #{word}"
+  defp count(n, word), do: "#{n} #{word}s"
 
   defp run?(%{"command" => "run"}), do: true
   defp run?(%{"command" => "wait", "id" => "run-" <> _}), do: true
@@ -266,38 +335,28 @@ defmodule MDTClient.Sandbox.Channel do
 
   def answer("host", _ask, username), do: {0, Server.call(username, :host_text)}
 
-  # A project's sync, asked from a folder of it in the VM: your committed
-  # branches go in. Nothing changes on your machine, so nothing is asked.
-  def answer("sync", ask, username) do
-    case Projects.sync_from(username, ask["cwd"]) do
-      {:ok, project, result} -> {0, sync_words(project, result)}
-      {:error, reason} -> {1, Projects.explain(reason)}
-    end
-  end
-
-  def answer("handoff", ask, username) do
-    case Projects.hand_off(username, %{
+  # A pull request, opened or updated from the folder the agent is in.
+  # Nothing is written on your machine but MDT's own store, so nothing is
+  # asked.
+  def answer("pr", ask, username) do
+    case PullRequests.open(username, %{
            cwd: ask["cwd"],
            title: ask["title"],
            body: ask["body"],
-           agent: ask["agent"]
+           agent: ask["agent"],
+           repo: ask["repo"],
+           base: ask["base"]
          }) do
-      {:ok, handoff} ->
-        {0,
-         "Handed off as #{handoff.id}: the branch #{handoff.branch} at #{String.slice(handoff.commit, 0, 10)}.\n" <>
-           "The user reviews it whole. Later commits are not part of it: hand off again to replace it.\n" <>
-           "See what they decide with: mdt handoffs"}
-
-      {:error, reason} ->
-        {1, Projects.explain(reason)}
+      {:ok, pull, how} -> {0, opened_words(pull, how)}
+      {:error, reason} -> {1, PullRequests.explain(reason)}
     end
   end
 
-  def answer("handoffs", ask, username) do
-    case Projects.handoffs_from(username, ask["cwd"]) do
-      {:ok, project, []} -> {0, "No handoffs in #{project.name} yet."}
-      {:ok, _project, handoffs} -> {0, Enum.map_join(handoffs, "\n\n", &handoff_words/1)}
-      {:error, reason} -> {1, Projects.explain(reason)}
+  def answer("prs", ask, username) do
+    case PullRequests.for_agent(username, ask["cwd"]) do
+      {:ok, []} -> {0, "No pull requests from this repository yet."}
+      {:ok, pulls} -> {0, Enum.map_join(pulls, "\n\n", &pull_words/1)}
+      {:error, reason} -> {1, PullRequests.explain(reason)}
     end
   end
 
@@ -376,7 +435,7 @@ defmodule MDTClient.Sandbox.Channel do
   def answer(_command, _ask, _username),
     do:
       {1,
-       "MDT knows these commands: grants, host, request, run, wait, sync, handoff, handoffs, vm. Run mdt help."}
+       "MDT knows these commands: grants, host, request, run, wait, pr, prs, vm. Run mdt help."}
 
   defp vm_words(name, record) do
     created =

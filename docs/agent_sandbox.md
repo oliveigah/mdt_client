@@ -107,6 +107,11 @@ folders with it, and sits between it and the network.
 | 2026-11-13 | Intercepted hosts keep MDT's own strict reader for the first release. Bandit and Finch were tried and not taken (see [step 5](#step-5)). Narrows the plan made the same day. |
 | 2026-11-13 | On Ubuntu the bubble is made with MDT's own copy of the system's bwrap, at `/usr/lib/mdt/bwrap`, under an AppArmor profile the deb installs: what runs inside may hold the two capabilities the relay uses, and no other. See [step 6](#step-6). |
 | 2026-11-13 | The folders above msb's store are yours alone (`0700`), whatever umask made them. |
+| 2026-11-13 | Projects, sync and handoffs are gone. Agents open pull requests from any git repository in the VM (`mdt pr`), and the repository it is for on your machine is worked out from the path the agent gives or the repository's remotes. Nothing is set up first. Supersedes the three project rows above. |
+| 2026-11-13 | A pull request's commits wait in a store of MDT's own, one per repository of yours, that borrows that repository's objects. Nothing is written into your repository until you bring one in. |
+| 2026-11-13 | You choose how a pull request comes in: where (a worktree as it is, a new worktree on a new branch, or a new branch) and how (only the changes, uncommitted; or the agent's commits). Narrows "Your branches are yours": the agent's commits reach a branch of yours only when you choose them. |
+| 2026-11-13 | A pull request that conflicts can go back with your base branch, pushed into the agent's repository as `host/<branch>`, for the agent to merge. The rest of the way from your machine to the VM (sync) is designed later. |
+| 2026-11-13 | A pull request is never for a repository the VM can write (in a read-write share), or one in or holding a folder shares refuse. MDT runs git there. |
 | 2026-11-13 | Every VM says which it is: MDT records an id for each VM it creates, the VM gets it at boot, and `mdt vm` and every login shell say whether this is the VM MDT runs. The Setup page warns when `~/.ssh/config` reaches the VM through anything but this identity's launcher. |
 
 <a id="first-release"></a>
@@ -136,7 +141,7 @@ it: the proxy, DNS and the agent channel.
 | --------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
 | The VM never holds a credential (file grants excepted, labeled) | Placeholders, swapped by the proxy                                                                                    |
 | Nothing leaves the VM except through MDT, DNS included          | The process running the VM has no network; its ways out are MDT's sockets                                             |
-| Nothing the VM writes runs on your machine unless you chose it  | The VM's work reaches your files only as a handoff you accepted, uncommitted; shares read-only unless you confirm; no command grant until you add one |
+| Nothing the VM writes runs on your machine unless you chose it  | The VM's work reaches your repository only as a pull request you brought in, where and how you chose; shares read-only unless you confirm; no command grant until you add one |
 | A VM escape reaches no home folder and no network               | The bubble                                                                                                            |
 | An approval shows what will happen, with nothing hidden in it   | Facts MDT works out itself, the agent's words kept apart, and text that is written out wherever it hides something ([Text the VM chooses](#text-the-vm-chooses)) |
 
@@ -280,7 +285,8 @@ sparse, attached with `--mount-disk`:
 - **Not readable from the host** while the VM is stopped. Files come out
   through git, or `msb cp` while it runs.
 
-Repositories are not shared at all: see [Projects](#projects).
+Repositories are not shared to work in: agents work on the Work disk and
+give their work back as [pull requests](#pull-requests).
 
 **Shared host folders** stay for what isn't a repository (a dataset, a
 folder of documents), one by one, at the same path as on the host:
@@ -292,183 +298,155 @@ folder of documents), one by one, at the same path as on the host:
   while the VM is stopped).
 
 <a id="projects"></a>
-
-### Projects: a copy in the VM, work handed back like a pull request
-
-A project is a git repository on your machine that you add to the VM. MDT
-makes a copy of it on the Work disk, at `/work/<name>`. No folder is
-shared. The two directions are different on purpose:
-
-```
-your repository                               /work/<name> in the VM
-  your branches   ── sync ──▶    arrive as    host/master, host/…
-  a handoff       ◀── mdt handoff ──          one finished piece of work
-     you review it whole; it comes into your working tree uncommitted
-```
-
-- **Your branches are yours.** MDT never commits, never stages, and never
-  creates, moves or deletes a branch of yours. Nothing from the VM lands
-  on them as a commit.
-- **Transport, both ways:** MDT runs git on your machine, and the other
-  end of git's protocol runs in the VM through msb's pipe
-  (`msb exec --stream VM -- git receive-pack /work/<name>`, and
-  `upload-pack`). No network, no SSH, no share. What crosses is git
-  objects, checked on arrival (`fetch.fsckObjects`), and names. No config,
-  hook, index or working file crosses. MDT writes nothing into your
-  repository's config.
-
-#### Sync: your work into the VM
-
-- Your local branches arrive in the VM as `host/<branch>`. Only committed
-  work goes, unless you tick "include what I haven't committed", which
-  adds a snapshot of your working tree as `host-wip/<branch>` (a commit
-  made from a copy of the index, so nothing in your tree changes).
-- **`/work/<name>` follows your branch.** It starts on the branch your
-  checkout has. A sync fast-forwards it when it is clean and only behind
-  (`receive.denyCurrentBranch=updateInstead`); otherwise the sync leaves
-  it alone and says so.
-- **One worktree per agent session.** Each session starts a worktree and
-  a branch of its own, from your branch as it is then, and works only
-  there:
-  `mdt sync && git worktree add /work/<name>.wt/<task> -b <task> host/master`.
-  Several sessions work side by side this way, and each handoff holds one
-  session's work and nothing else. `/work/<name>` itself is nobody's
-  workplace: it only follows your branch. The agents' instructions say
-  so, and `mdt handoff` holds them to it (below).
-- **When:** a Sync button on the project, and `mdt sync` in the VM, which
-  needs no approval: it only brings your committed branches to the VM.
-  There is no timer.
-- **Not carried:** files git ignores (`_build`, `deps`, `.env`), so each
-  side builds its own; submodules and LFS files, which the VM gets from
-  their own remotes.
-
 <a id="handoffs"></a>
+<a id="pull-requests"></a>
 
-#### Handoffs: the VM's work back to you
+### Pull requests: the VM's work back to you
 
-Work in progress in the VM stays in the VM. What comes back is a
-handoff: one finished piece of work that an agent wraps up, names and
-describes, the way it would open a pull request.
-
-```
-mdt handoff --title "Fix the login redirect" [--body FILE]    from its worktree, everything committed
-mdt handoffs                                                   its handoffs: waiting, taken, sent back (with your note), declined
-```
-
-- **A handoff is one commit, fixed when it is made.** MDT fetches the
-  branch as it is at that moment and records the commit it got. Later
-  commits in the VM don't change what you are looking at; handing off the
-  same branch again replaces it with the new commit, and says so.
-- **One handoff per worktree,** so each is one session's work. `mdt
-  handoff` hands off the branch of the worktree it runs in, and refuses
-  in `/work/<name>` itself. Several can wait at once, one per worktree.
-- **Uncommitted work isn't handed off:** `mdt handoff` refuses a worktree
-  with changes and lists them, so a checkpoint is something the agent
-  meant.
-- **Where it sits on your machine:** as `vm/<branch>`, kept the way git
-  keeps a remote's branches (`refs/remotes/vm/…`). Git won't commit on it
-  (checking it out detaches), `git push` leaves it behind, and tools list
-  it apart from your branches. It exists only while the handoff waits, so
-  any git tool can read the diff too. Nothing else of the VM's is in your
-  repository.
-- **It asks nothing of you right away.** A line on the Projects page and
-  in the activity log. `mdt handoff` returns at once with its id.
+Replaces projects, sync and handoffs (2026-11-13), which asked you to add
+each repository before an agent could give anything back. Now the git
+repository is the project: an agent opens a pull request from any
+repository in the VM, and you choose where and how it comes in.
 
 ```
-mdt_client    your branch: master                                         [Sync]
-
-Handoffs
-  #7  Fix the login redirect      claude · fix-login · 3 commits · 5 files +120 −34 · merges cleanly             waiting
-  #6  Port forwarding, guest side  codex · port-forward · 9 commits · 12 files +800 −20 · conflicts with master   waiting
-  #5  Faster inbox writes          claude · taken yesterday
-
-#7  Fix the login redirect
-  The agent says:  "The redirect dropped the return path when … `mix precommit` passes."
-  Facts:           built on your master as it is now · 5 files, +120 −34
-  Hints:           changes mix.exs, which runs when you build
-  The whole diff, against your branch
-
-  [Bring it into my working tree]     [Send back with a note]     [Decline]
+a repository in the VM, branch fix            your repository on this machine
+  mdt pr --title "Fix the login"  ── git over msb's pipe ──▶  MDT's store for it
+                                                               (nothing in yours yet)
+                                     you bring it in ──▶  a worktree, a new worktree or a new branch;
+                                                          only the changes, or the agent's commits
+  host/master  ◀── sent back with your branch ──          when it conflicts
 ```
 
-- **Facts and claims apart,** as on approvals. Facts are worked out by
-  MDT: the files, the size, what it is built on, whether it merges with
-  your working tree as it is now. The title, the description and the
-  commit messages are the agent's claims. Hints mark files that run on
-  your machine when you build or commit (`mix.exs`, a `Makefile`,
-  `package.json`, `.envrc`, CI and editor task files); they are hints, not
-  a review.
-- **Bring it** takes the whole handoff, never part of it, into your
-  working tree as uncommitted changes, merged with what you have there.
-  Your branch, your index and anything you staged stay as they were, and
-  no commit is made. You look, keep or drop what you like with your usual
-  tools, and commit in your own time, under your name.
-- **Undo** puts your working tree back: MDT keeps the snapshot it took
-  before bringing anything.
-- **When it doesn't merge** with what you have, nothing is written. You
-  send it back, the agent merges your branch in the VM, resolves there
-  and hands off again. You can also bring it anyway, with conflict
-  markers.
-- **A file of yours that git ignores is never written over.** Where a
-  handoff adds a file and you already have one there (a `.env`, say), it
-  is in the way and nothing is written.
-- **Send back with a note:** the note is what the agent reads in
-  `mdt handoffs`. Declining ends it. Either way `vm/<branch>` goes away.
-- **What MDT keeps in your repository** besides `vm/<branch>` are refs no
-  tool lists, under `refs/mdt/`: the handoff's commit, so a bring can be
-  undone after `vm/<branch>` is gone, and the snapshot taken before a
-  bring. They go when the handoff is sent back or declined, when the
-  project is removed, or when the handoff falls out of the last 50.
-- **How a bring works:** a snapshot of your working tree, then
-  `git merge-tree --write-tree SNAPSHOT COMMIT`, which computes the merge
-  without touching anything, then git itself writes the changed paths from
-  the result into the working tree only
-  (`git restore --source=TREE --worktree`). Needs git 2.38 or newer.
-- **Afterwards the agent catches up by merging,** not rebasing:
-  `mdt sync`, then `git merge host/master` in its worktree. Lines you kept
-  as they were merge silently, and `git diff host/master` then shows what
-  you dropped or changed. Its branch's history is never yours, so its
-  shape doesn't matter.
-- **Pushing to GitHub** from the VM through a token grant still works,
-  for a real pull request.
+#### Opening one
 
-Copying files instead (rsync, or a two-way sync tool) was considered and
-not chosen. It writes what the VM wrote straight into your working tree,
-which is what dropping the share was for. Two versions of a file have no
-common base to merge from. And it fights git: one branch's files copied
-onto another's checkout show up as changes.
+```
+mdt pr --title "Fix the login" [--body FILE] [--repo PATH] [--base BRANCH]
+mdt prs                    this repository's pull requests: open, sent back (note, host/BRANCH), brought in, closed
+```
 
-Checked on 2026-11-13 with a throwaway VM (msb 0.7.14, Alpine, git 2.54)
-and a clone of this repository. The transport and the bring were tried;
-the handoff's record, its commands and its screen are design.
+- **From any git repository in the VM,** on a branch, with everything
+  committed. `mdt pr` refuses a detached HEAD and lists what isn't
+  committed, so what you review is what the agent meant.
+- **Which repository of yours it is for,** first match wins:
+  1. `--repo PATH`, a folder on your machine (any folder in the
+     repository);
+  2. a remote of the VM's repository that is a path on your machine, as
+     when the agent cloned from a shared folder;
+  3. the VM repository's own path, when you have a repository there;
+  4. a repository you know with one of its remote URLs (compared as host
+     and path): one open in the Git tool, or one an earlier pull request
+     was for.
+
+  Otherwise it is refused, and the agent is told to pass `--repo` and to
+  ask you for the path.
+- **Never a repository the VM can write.** MDT runs git in it, and a
+  `.git` the VM can write could hold a hook or `core.fsmonitor`. So the
+  repository, its git folder and the folder its worktrees share must not
+  be in or hold a read-write share, MDT's data folder, or a folder shares
+  refuse (`~/.ssh` and the like).
+- **The base** is `--base`, else the branch your repository has checked
+  out. It must be one of your branches, and the pull request must share
+  history with it.
+- **Updating:** `mdt pr` again on the same branch of the same repository
+  in the VM, while the pull request is open or sent back, updates it: a
+  new revision, and it is open again. The title and description stay
+  unless given again. Once brought in or closed, the next `mdt pr` opens a
+  new one.
+- **It asks nothing of you right away.** A line in the activity log and a
+  count beside Pull requests in the sidebar.
+
+#### Where it waits: MDT's store
+
+- One bare repository per repository of yours, in the identity's sandbox
+  folder (`pulls/<name>-<hash>.git`). Its `objects/info/alternates` names
+  your repository's objects, so a pull request brings only what is new,
+  and git sees both histories at once there.
+- The pull request's commit sits at `refs/pulls/<id>`. The fetch is
+  checked (`fetch.fsckObjects`) and runs under a 1 GiB limit on what git
+  may write.
+- **Nothing is written into your repository** before you bring one in.
+  What MDT works out to show you (the merge, a snapshot of your working
+  tree) is written into a folder of its own, deleted after: git runs with
+  `GIT_OBJECT_DIRECTORY` there and the store as an alternate.
+- The store borrows your objects, so a pull request whose base your
+  repository has since dropped (rewritten and pruned) can't be shown any
+  more.
+
+#### The page
+
+A list like a code host's, open and closed apart, each with its
+repository, `branch → base`, size and a conflict mark. Opening one shows:
+
+- **Conversation:** the agent's description (its words, marked as such),
+  what happened since (opened, new revisions, sent back with your note,
+  brought in, closed), and the merge box.
+- **Commits:** the commits it brings over your base.
+- **Files changed:** each file's diff, with line numbers, read by the Git
+  tool's own diff reader. At most 2 MiB and 6,000 lines are shown, and the
+  page says when there is more.
+- **Facts and claims apart:** the title, description and commit messages
+  are the agent's; the files, size, how far your base moved and whether
+  it merges are MDT's. Hints mark files that run when you build or commit.
+
+#### Bringing it in
+
+The merge box first says whether it merges with your base as it is now.
+Then you choose, and it says what that would do before you confirm:
+
+| How \ Where                 | A worktree, as it is                                     | A new worktree, new branch                         | A new branch, checked out nowhere |
+| --------------------------- | -------------------------------------------------------- | -------------------------------------------------- | --------------------------------- |
+| **Only the changes**        | Three-way merged into its files, your uncommitted edits included; index, HEAD and branch untouched | Started from your base, the changes uncommitted in it | (needs a working tree)            |
+| **The agent's commits**     | `git merge` into its branch: a fast-forward when it can be, else a merge commit; refused when it conflicts | Started at the agent's commit                      | At the agent's commit             |
+
+- The choice is previewed without writing anything: conflicts there, a
+  fast-forward, already there, a branch name taken, a folder that exists,
+  a folder in a read-write share.
+- **Only the changes, when they conflict:** nothing is written, unless
+  you bring them in with conflict markers. A new file where you have one
+  git ignores (a `.env`) is in the way, and nothing is written.
+- **Commits never land with conflicts.** Send it back, or take only the
+  changes.
+- Only when you confirm do its commits arrive in your repository, as
+  `refs/mdt/pulls/<id>` while it runs; the ref is deleted after.
+- **Undo,** while it can be done safely: the changes come back out (from
+  a snapshot kept at `refs/mdt/undo/<id>`), a merge is reset with
+  `--keep` while the branch is still where the merge left it, a new
+  worktree is removed and its branch deleted while the branch is still
+  where MDT made it. The pull request is open again.
+
+#### Conflicts, and the agent resolving them
+
+- The conversation shows the files that conflict with your base, and how
+  many commits your base has that the pull request doesn't.
+- **Send back** takes a note, and, ticked by default when it conflicts,
+  your base branch: MDT pushes it, as committed, into the repository the
+  pull request came from, as `refs/remotes/host/<base>`. Nothing else of
+  yours goes. The VM must be running for that part.
+- The agent reads both with `mdt prs`, which also says whether each open
+  pull request conflicts and in which files. It merges (rather than
+  rebases) `host/<base>`, resolves, commits, and runs `mdt pr` again,
+  which updates the same pull request.
+- **Close** ends it without bringing it in; it can be reopened.
+
+#### Checked
+
+The transport is the one handoffs used, checked on 2026-11-13 with a
+throwaway VM (msb 0.7.14, Alpine, git 2.54):
 
 | Check                                                                   | Result                                                                                                              |
 | ----------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
 | Plain `msb exec`                                                        | Holds output until the command ends, so git's protocol stalls. `--stream` sends it at once, unchanged (256 MiB, same SHA-256) |
 | The pipe's speed                                                        | 60 MiB/s into the VM, 138 MiB/s out; 0.03 s for an empty call                                                        |
-| The whole repository into the VM (6 MiB)                                | 0.25 s; 0.03 s when nothing is new                                                                                   |
 | A VM branch out                                                         | 0.05 s; 0.03 s when nothing is new                                                                                   |
-| Snapshot of uncommitted work                                            | `git status` identical before and after; the edit and the new file were in it, `_build` was not                      |
-| Both sides edit the same line                                           | Both transfers pass and no tree changes. The conflict shows only when the agent brings your branch into its own, in the VM, and is resolved there |
 | Hooks, `core.fsmonitor`, `core.pager`, `core.sshCommand` planted in the VM's repository | None ran on the host (6 hooks ran in the VM); the host's `.git/config` and hooks unchanged          |
 | A tree holding `.git/config`, offered by the VM                         | Refused: "fsck error in packed object"                                                                               |
-| `/work/<name>` following                                                | Clean and behind: updated. Uncommitted edit, or commits of its own: left alone. `host/master` updated in all three   |
 
-Bringing a branch's changes in, checked the same day in a plain
-repository (git 2.56; `take_probe.sh`). The VM's branch edited three
-files, added one and deleted one; you had one staged change and two
-unstaged edits. The test wrote four of the five files; a bring writes all:
-
-| Check                                             | Result                                                                  |
-| ------------------------------------------------- | ----------------------------------------------------------------------- |
-| HEAD, the index, your branches, before and after  | Identical; no commit on `master`                                        |
-| Your staged change                                | Still staged                                                            |
-| A file both edited, on different lines            | Both edits there                                                        |
-| A file both edited, on the same line              | Reported as a conflict before anything was written                      |
-| The new file, the deleted file                    | Untracked; removed                                                      |
-| Undo                                              | `git status` back to what it was                                        |
-
-Scripts and output: `test/review/vm_sync` on the `sandbox-review` branch.
+And the store, on this machine (git 2.56): a branch with one new commit
+fetched into a store borrowing a 50-file repository brought 5 objects;
+`merge-base` and `merge-tree` in the store, with a scratch object folder,
+left the repository's objects and refs unchanged; your repository fetched
+the pull request from the store; your base pushed into the VM's
+repository as `host/master`.
 
 ### What MDT hands to the VM
 
@@ -537,11 +515,10 @@ is a package dependency, and the Checks screen says so when it is missing.
   work in, and loads no code from a folder a VM can write. Today the dev
   server runs from the checkout the VM writes, so an agent's edit to
   `lib/`, or to the `msb` in `_build`, runs on your machine.
-- **Agents in the VM** work on MDT as a [project](#projects): a worktree
-  from `host/master`, `mix precommit`, then `mdt handoff`. You review the
-  [handoff](#handoffs), bring it in and commit it yourself. The "work in
-  a worktree" section of `AGENTS.md` is rewritten for it once projects
-  exist.
+- **Agents in the VM** work on MDT in a clone on the Work disk, run `mix
+  precommit`, then open a [pull request](#pull-requests). You review it
+  and bring it in, as changes to commit yourself or as the agent's
+  commits.
 - **Trying a change:** a dev MDT with a data folder of its own
   (`MDT_RUN_DIR`), so its own identities, microsandbox home and VM. On the
   host when the change touches the VM; inside the VM for anything else.
@@ -630,6 +607,14 @@ through a real VM, with the real `mdt` command in it:
 | It comes into your working tree uncommitted, HEAD unmoved; undo puts the tree back | Pass |
 | A hook and `core.fsmonitor` planted in the VM's repository run there, never here | Pass |
 | `mdt sync`, `mdt handoff` and `mdt handoffs`, run in the VM            | Pass   |
+
+Later that day pull requests replaced all of step 3 but `Guest` and
+`HostGit` ([Pull requests](#pull-requests)): `PullRequest`, `PullTarget`,
+`PullStore`, `Landing` and `PullRequests`, the `mdt pr` and `mdt prs`
+commands, and the Pull requests page. Their tests are
+`pull_requests_test.exs` and `sandbox_pulls_live_test.exs`, with a folder
+of this machine in the VM's place, and the pull request part of
+`vm_live_test.exs`.
 
 <a id="step-5"></a>
 
@@ -748,10 +733,10 @@ VM kept is still where it was, in the identity's sandbox folder
   `0.7.15+6626e7cb2`.
 - **MDT's own image.** The real-VM tests use Alpine; the 4.5 GB image and
   a VM made through the pages were not tried.
-- **Not built yet for handoffs:** a desktop notification when one
-  arrives, a folder picker for adding a project, and the handoffs in
-  MDT's Git tool.
-- **Submodules and LFS files** in a project.
+- **Not built yet for pull requests:** a desktop notification when one
+  arrives, a folder picker for a new worktree, pull requests in MDT's Git
+  tool, and cleaning up a store whose repository is gone.
+- **Submodules and LFS files** in a pull request.
 - **A large repository.** At the pipe's speed, 1 GiB would take about
   17 s to go in; not tried.
 - **`msb cp`** for folders that aren't repositories.
@@ -1140,7 +1125,7 @@ MDT, so the pages don't have to think about it:
 | An ask on the agent channel    | Text, whole numbers and yes or no; anything else in it counts as nothing        |
 | A script for your machine      | Never changed: one that hides anything is refused, and the agent is told what   |
 | A folder for that script       | One whose real name hides anything isn't used: the command runs in your home    |
-| A handoff                      | Its title, body, commit messages, file names and diff                           |
+| A pull request                 | Its title, body, commit messages, file names and diff                           |
 | What git says when it fails    | Shown text; what it prints on success stays git's bytes, for MDT to read        |
 | A held request, read or copied | Headers, body, the HTTP text and the curl command                               |
 
@@ -1151,10 +1136,10 @@ A script that mixes alphabets in one word (`gіthub.com` with a Cyrillic
 `і`) gets a hint on its card. That is a hint, not a check.
 
 Sizes are the VM's to choose too. MDT reads at most 32 MiB of what one git
-command prints and fails past that; of a handoff's diff it reads the first
-512 KiB and says so; and a handoff may bring at most 1 GiB of new data
-into your repository (the fetch runs under a file size limit, and what a
-stopped fetch left is removed).
+command prints and fails past that; of a pull request's diff it reads the
+first 2 MiB and 6,000 lines and says so; and a pull request may bring at
+most 1 GiB of new data into MDT's store (the fetch runs under a file size
+limit, and what a stopped fetch left is removed).
 
 ### Approvals
 
@@ -1455,9 +1440,8 @@ mdt request --need "the access, and the host" --reason "…"
 mdt wait ASK_ID [--wait 60]
 mdt run GRANT --reason "…" [-- COMMAND]      see Host commands
 mdt host                                     see Host commands
-mdt sync                                     see Projects
-mdt handoff --title "…" [--body FILE]        see Projects
-mdt handoffs                                 see Projects
+mdt pr --title "…" [--body FILE] [--repo PATH] [--base BRANCH]   see Pull requests
+mdt prs                                      see Pull requests
 mdt vm                                       which VM this is, and whether MDT runs it
 ```
 
@@ -1935,8 +1919,9 @@ date on 2026-11-13, after step 5).
 | `Settings`, `Share`, `Shares`           | The VM's settings and their checks; shared folders and their mounts                   |
 | `Inbox`, `Instructions`                 | What the VM reads at `/mnt/mdt`; the text agents are given                            |
 | `Memory`                                | The VM's own OptMem folder and its seeding                                            |
-| `Project`, `Projects`, `Guest`          | A repository with a copy in the VM; what the pages and the channel call; the VM's side |
-| `HostGit`, `Sync`, `Handoff`            | git on your repository, bounded; your branches into the VM; the VM's work back        |
+| `PullRequests`, `PullRequest`, `Guest`  | What the pages and the channel call; one pull request and its facts; the VM's side     |
+| `PullTarget`, `PullStore`, `Landing`    | Which repository of yours; MDT's store for it; bringing one in, where and how         |
+| `HostGit`                               | git on your repository, bounded                                                       |
 | `Event`                                 | One line of the activity log                                                          |
 | `DesktopNotice`                         | The desktop notification's text for a waiting approval                                |
 

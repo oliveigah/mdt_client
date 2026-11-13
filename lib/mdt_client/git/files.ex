@@ -323,7 +323,12 @@ defmodule MDTClient.Git.Files do
   defp repository_path(_repository, _path),
     do: {:error, Error.new(:invalid_argument, "File path must be a non-empty string")}
 
-  defp parse_diff(output, path, side, limit) do
+  @doc """
+  Reads one file's unified diff, as `git diff` prints it, into a
+  `MDTClient.Git.FileDiff` named `path`, keeping at most `limit` lines.
+  """
+  @spec parse_diff(String.t(), Path.t(), FileDiff.side(), pos_integer()) :: FileDiff.t()
+  def parse_diff(output, path, side, limit) do
     state =
       output
       |> String.split("\n")

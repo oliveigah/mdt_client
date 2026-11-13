@@ -122,16 +122,29 @@ defmodule MDTClient.Sandbox.Shares do
   defp not_root_or_home(_path, _home), do: :ok
 
   defp not_refused(path, home, data_dir) do
-    refused =
-      [
-        {data_dir, "MDT's own data"}
-        | Enum.map(@refused_in_home, fn {rel, what} -> {Path.join(home, rel), what} end)
-      ]
+    case refused(path, home: home, data_dir: data_dir) do
+      nil -> :ok
+      {folder, what} -> {:error, {:refused, folder, what}}
+    end
+  end
 
-    Enum.find_value(refused, :ok, fn {folder, what} ->
-      if within?(path, folder) or within?(folder, path),
-        do: {:error, {:refused, folder, what}}
-    end)
+  @doc """
+  The folder holding what the VM must never reach (credentials, keys, MDT's
+  own data) that `path` is in or holds, with what it holds; nil when there
+  is none. `path` is real (no symlinks). Options as for `validate/4`.
+  """
+  @spec refused(String.t(), keyword()) :: {String.t(), String.t()} | nil
+  def refused(path, opts \\ []) do
+    home = opts |> Keyword.get_lazy(:home, &System.user_home!/0) |> realpath_or_self()
+
+    data_dir =
+      opts |> Keyword.get_lazy(:data_dir, &MDTClient.Accounts.root/0) |> realpath_or_self()
+
+    [
+      {data_dir, "MDT's own data"}
+      | Enum.map(@refused_in_home, fn {rel, what} -> {Path.join(home, rel), what} end)
+    ]
+    |> Enum.find(fn {folder, _what} -> within?(path, folder) or within?(folder, path) end)
   end
 
   defp no_overlap(path, shares) do

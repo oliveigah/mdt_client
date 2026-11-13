@@ -46,12 +46,12 @@ defmodule MDTClient.Sandbox.Server do
   with its output gets a new one.
 
   It also keeps the image's builds (the current one and the two before it),
-  the copies of the VM's Home disk, the projects and their handoffs, and how
+  the copies of the VM's Home disk, the pull requests agents opened, and how
   far the VM's memory was seeded and reviewed.
 
   Slow work (`msb`, podman, copying disks, minting tokens, git) runs outside
   this process, so the pages and the proxy never wait on it. Only
-  `MDTClient.Sandbox`, `Egress`, `Channel`, `Dns` and `Projects` call this
+  `MDTClient.Sandbox`, `Egress`, `Channel`, `Dns` and `PullRequests` call this
   module.
   """
 
@@ -69,7 +69,6 @@ defmodule MDTClient.Sandbox.Server do
     Disks,
     Event,
     Grant,
-    Handoff,
     HostCommand,
     HostInfo,
     HostRun,
@@ -77,7 +76,7 @@ defmodule MDTClient.Sandbox.Server do
     Memory,
     Msb,
     Policy,
-    Project,
+    PullRequest,
     Settings,
     Shares,
     VM
@@ -90,7 +89,7 @@ defmodule MDTClient.Sandbox.Server do
   @file_name "sandbox.bin"
   @poll_every 10_000
   @sweep_every 30_000
-  @handoffs_kept 50
+  @pulls_kept 100
   @max_leaves 64
   @leaf_kept_seconds 7 * 24 * 3_600
   @kill_after_ms 5_000
@@ -177,7 +176,8 @@ defmodule MDTClient.Sandbox.Server do
       builds: builds,
       # A copy whose file is gone can't be brought back: it isn't listed.
       snapshots: Enum.filter(saved[:snapshots] || [], &Disks.snapshot?(folders, &1)),
-      handoffs: saved[:handoffs] || [],
+      pulls: saved[:pulls] || [],
+      pull_seq: saved[:pull_seq] || 0,
       memory: saved[:memory] || %{seed_count: nil, seeded_at: nil, reviewed: 0},
       folders: folders,
       approvals: [],
@@ -251,7 +251,7 @@ defmodule MDTClient.Sandbox.Server do
        builds: state.builds,
        created_ref: state.created_ref,
        snapshots: Enum.sort_by(state.snapshots, & &1.taken_at, {:desc, DateTime}),
-       handoffs: state.handoffs,
+       pulls: state.pulls,
        memory: Map.put(state.memory, :host?, Memory.host_memory?()),
        folders: state.folders,
        proxy: state.proxy,
@@ -593,105 +593,63 @@ defmodule MDTClient.Sandbox.Server do
     end
   end
 
+  ## Pull requests
   #
   # The records only: the git work runs in the caller's process
-  # (`MDTClient.Sandbox.Projects`), never here.
+  # (`MDTClient.Sandbox.PullRequests`), never here.
 
-  def handle_call(:projects, _from, state) do
+  def handle_call(:pulls, _from, state) do
     {:reply,
      %{
-       projects: state.settings.projects,
-       handoffs: state.handoffs,
-       vm: %{name: state.vm.name, status: state.vm.status}
+       pulls: state.pulls,
+       vm: %{name: state.vm.name, status: state.vm.status},
+       dir: Path.dirname(state.folders.optmem),
+       shares: state.settings.shares
      }, state}
   end
 
-  def handle_call({:add_project, %Project{} = project}, _from, state) do
-    if Enum.any?(state.settings.projects, &(&1.path == project.path or &1.name == project.name)) do
-      {:reply, {:error, :already_added}, state}
-    else
-      settings = %{state.settings | projects: state.settings.projects ++ [project]}
-
-      {:reply, {:ok, project},
-       state
-       |> State.change(:settings, fn _ -> settings end)
-       |> State.log(%{outcome: :project, summary: "#{project.name} added as a project"})
-       |> State.changed()}
-    end
+  def handle_call(:next_pull_id, _from, state) do
+    id = state.pull_seq + 1
+    {:reply, id, state |> State.change(:pull_seq, fn _ -> id end) |> State.changed()}
   end
 
-  # Returns the project and its handoffs, for the caller to let go of what
-  # they held in the repository. The copy in the VM stays.
-  def handle_call({:remove_project, name}, _from, state) do
-    case Enum.find(state.settings.projects, &(&1.name == name)) do
-      nil ->
-        {:reply, {:error, :not_found}, state}
+  # A pull request, new or updated. Returns those too old to keep, for the
+  # caller to let go of what the store holds for them.
+  def handle_call({:put_pull, %PullRequest{id: id} = pull, summary}, _from, state) do
+    others = Enum.reject(state.pulls, &(&1.id == id))
+    {kept, dropped} = Enum.split([pull | others], @pulls_kept)
 
-      project ->
-        {gone, kept} = Enum.split_with(state.handoffs, &(&1.project == name))
-        settings = %{state.settings | projects: state.settings.projects -- [project]}
-
-        {:reply, {:ok, project, gone},
-         state
-         |> State.change(:settings, fn _ -> settings end)
-         |> State.change(:handoffs, fn _ -> kept end)
-         |> State.log(%{outcome: :project, summary: "#{name} is no longer a project"})
-         |> State.changed()}
-    end
+    {:reply, {:ok, dropped},
+     state
+     |> State.change(:pulls, fn _ -> kept end)
+     |> State.log(%{outcome: :pull, summary: summary})
+     |> State.changed()}
   end
 
-  def handle_call({:project_synced, name, summary}, _from, state) do
-    projects =
-      Enum.map(state.settings.projects, fn
-        %Project{name: ^name} = project -> %{project | synced_at: State.now()}
-        other -> other
-      end)
-
+  # What the list shows of one, worked out again: nothing to log.
+  def handle_call({:pull_stats, id, stats}, _from, state) do
     {:reply, :ok,
      state
-     |> State.change(:settings, fn _ -> %{state.settings | projects: projects} end)
-     |> State.log(%{outcome: :project, summary: summary})
+     |> State.change(:pulls, fn state ->
+       Enum.map(state.pulls, &if(&1.id == id, do: %{&1 | stats: stats}, else: &1))
+     end)
      |> State.changed()}
   end
 
-  # A new handoff takes the place of one still waiting for the same branch.
-  # Returns those it replaced and those too old to keep, for the caller to
-  # let go of.
-  def handle_call({:put_handoff, %Handoff{} = handoff}, _from, state) do
-    {replaced, others} =
-      Enum.split_with(state.handoffs, fn other ->
-        other.status == :waiting and other.project == handoff.project and
-          other.branch == handoff.branch
-      end)
-
-    replaced = Enum.map(replaced, &%{&1 | status: :replaced, decided_at: State.now()})
-    {kept, dropped} = Enum.split([handoff | replaced ++ others], @handoffs_kept)
-    who = if handoff.agent in [nil, ""], do: "An agent", else: handoff.agent
-
-    {:reply, {:ok, replaced, dropped},
-     state
-     |> State.change(:handoffs, fn _ -> kept end)
-     |> State.log(%{
-       outcome: :handoff,
-       summary: "#{who} handed off \"#{handoff.title}\" in #{handoff.project}"
-     })
-     |> State.changed()}
-  end
-
-  def handle_call({:update_handoff, id, changes, summary}, _from, state) do
-    case Enum.find(state.handoffs, &(&1.id == id)) do
+  def handle_call({:update_pull, id, fun, summary}, _from, state) do
+    case Enum.find(state.pulls, &(&1.id == id)) do
       nil ->
         {:reply, {:error, :not_found}, state}
 
-      handoff ->
-        updated = struct!(handoff, changes)
+      pull ->
+        updated = fun.(pull)
 
         {:reply, {:ok, updated},
          state
-         |> State.change(:handoffs, fn _ ->
-           Enum.map(state.handoffs, &if(&1.id == id, do: updated, else: &1))
+         |> State.change(:pulls, fn state ->
+           Enum.map(state.pulls, &if(&1.id == id, do: updated, else: &1))
          end)
-         |> State.log(%{outcome: :handoff, summary: summary})
+         |> State.log(%{outcome: :pull, summary: summary})
          |> State.changed()}
     end
   end

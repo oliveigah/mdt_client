@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # mdt: ask MDT, the user's control panel, for access. Written by MDT to
 # /mnt/mdt/bin/mdt. It reaches MDT over vsock (socat), and can only read the
-# grants and the host's description, ask the user to turn a grant on, and
-# ask them to run a command on their machine. See MDTClient.Sandbox.Channel.
+# grants and the host's description, ask the user to turn a grant on, ask
+# them to run a command on their machine, and open pull requests. See
+# MDTClient.Sandbox.Channel.
 set -u
 
 channel=${MDT_CHANNEL:-VSOCK-CONNECT:2:5000}
@@ -45,20 +46,19 @@ mdt - ask MDT, the user's control panel, for access
   mdt wait ID [--wait 60]
       Keep waiting for the answer to an earlier ask or run.
 
-  mdt sync
-      In a project under /work: bring in the user's branches as they are
-      committed now. They arrive as host/BRANCH. The project's own folder
-      follows the user's branch while it is clean; your worktrees don't move.
+  mdt pr --title "what this is" [--body FILE] [--repo PATH] [--base BRANCH]
+      In a git repository here, on a branch with everything committed: offer
+      that branch to the user as a pull request. --repo is the repository on
+      the user's machine it is for; without it MDT works it out from this
+      repository's remotes. --base is their branch it goes into (the one
+      they have checked out, by default). --body takes the description from
+      a file (- for stdin). Run it again on the same branch to update the
+      pull request with new commits.
 
-  mdt handoff --title "what this is" [--body FILE]
-      In a worktree of your own: hand its branch back to the user, like
-      opening a pull request. Everything must be committed. The user reviews
-      it whole and brings it into their working tree, or sends it back with
-      a note. --body takes the description from a file (- for stdin).
-
-  mdt handoffs
-      Your project's handoffs: waiting, taken, sent back (with the user's
-      note), declined.
+  mdt prs
+      The pull requests from this repository: open, sent back (with the
+      user's note, and their branch as host/BRANCH when they sent it),
+      brought in, closed; and whether each conflicts with their branch.
 
   mdt vm
       Which VM this is, and whether it is the one MDT runs. When the network
@@ -67,7 +67,7 @@ mdt - ask MDT, the user's control panel, for access
 
 Exit status of grants, request and wait on an ask: 0 the grant is on, 1 the
 ask was wrong, 2 still waiting for the user, 3 declined or given up, 4 MDT
-isn't answering (locked or closed). Of sync, handoff and handoffs: 0 done,
+isn't answering (locked or closed). Of pr and prs: 0 done,
 1 not done (the reason is printed), 4 MDT isn't answering. Of vm: 0 this is
 the VM MDT runs, 1 there is no record to compare, 3 this is not the VM MDT
 runs, 4 MDT isn't answering.
@@ -253,7 +253,7 @@ command=${1:-help}
 wrong=1
 [ "$command" = run ] && wrong=122
 
-grant="" need="" reason="" minutes=60 wait=60 id="" dir="" timeout=120 title="" body=""
+grant="" need="" reason="" minutes=60 wait=60 id="" dir="" timeout=120 title="" body="" repo="" base=""
 words=()
 while [ $# -gt 0 ]; do
   case $1 in
@@ -263,6 +263,10 @@ while [ $# -gt 0 ]; do
     --title=*) title=${1#*=}; shift ;;
     --body) body=${2-}; shift 2 || shift ;;
     --body=*) body=${1#*=}; shift ;;
+    --repo) repo=${2-}; shift 2 || shift ;;
+    --repo=*) repo=${1#*=}; shift ;;
+    --base) base=${2-}; shift 2 || shift ;;
+    --base=*) base=${1#*=}; shift ;;
     --need) need=${2-}; shift 2 || shift ;;
     --need=*) need=${1#*=}; shift ;;
     --minutes) minutes=$(number --minutes "${2-}" "$wrong") || exit "$wrong"; shift 2 || shift ;;
@@ -351,14 +355,7 @@ case $command in
       *) send "{\"command\":\"wait\",\"id\":$(json "$id"),\"wait\":$wait}" ;;
     esac
     ;;
-  sync)
-    send "{\"command\":\"sync\",\"cwd\":$(json "$(pwd -P)")}"
-    ;;
-  handoff)
-    if [ -z "$title" ]; then
-      echo "mdt: give it a title: mdt handoff --title \"what this is\"" >&2
-      exit 1
-    fi
+  pr)
     text=""
     if [ "$body" = - ]; then
       text=$(cat)
@@ -366,10 +363,10 @@ case $command in
       text=$(cat -- "$body") || exit 1
     fi
     identify
-    send "{\"command\":\"handoff\",\"cwd\":$(json "$(pwd -P)"),\"title\":$(json "$title"),\"body\":$(json "$text"),$(identity)}"
+    send "{\"command\":\"pr\",\"cwd\":$(json "$(pwd -P)"),\"title\":$(json "$title"),\"body\":$(json "$text"),\"repo\":$(json "$repo"),\"base\":$(json "$base"),$(identity)}"
     ;;
-  handoffs)
-    send "{\"command\":\"handoffs\",\"cwd\":$(json "$(pwd -P)")}"
+  prs)
+    send "{\"command\":\"prs\",\"cwd\":$(json "$(pwd -P)")}"
     ;;
   vm)
     vm_id=""

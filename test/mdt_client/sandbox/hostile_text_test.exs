@@ -17,13 +17,13 @@ defmodule MDTClient.Sandbox.HostileTextTest do
     Describe,
     Dns,
     Guest,
-    Handoff,
     HostCommand,
     HostGit,
-    Project,
+    Landing,
+    PullRequest,
+    PullStore,
     RequestView,
-    Shown,
-    Sync
+    Shown
   }
 
   alias MDTClient.Sandbox.Egress.Connection
@@ -314,7 +314,7 @@ defmodule MDTClient.Sandbox.HostileTextTest do
       end
 
       # And through the channel, as a line.
-      for command <- ["request", "run", "wait", "sync", "handoff", "handoffs", "grants", "nope"] do
+      for command <- ["request", "run", "wait", "pr", "prs", "grants", "nope"] do
         line =
           Jason.encode!(%{
             command: command,
@@ -430,7 +430,7 @@ defmodule MDTClient.Sandbox.HostileTextTest do
     end
   end
 
-  describe "a handoff" do
+  describe "a pull request" do
     @me [
       {"GIT_AUTHOR_NAME", "Someone"},
       {"GIT_AUTHOR_EMAIL", "someone@example.test"},
@@ -448,9 +448,9 @@ defmodule MDTClient.Sandbox.HostileTextTest do
       end
     end
 
-    # Your repository, synced into a folder standing in for the VM, and an
-    # agent's worktree there.
-    defp project do
+    # Your repository, MDT's store for it, and the agent's clone in a folder
+    # standing in for the VM, on a branch of its own.
+    defp repository do
       base = Path.join(System.tmp_dir!(), "hostile-#{System.unique_integer([:positive])}")
       on_exit(fn -> File.rm_rf!(base) end)
       repo = Path.join(base, "host/app")
@@ -460,95 +460,108 @@ defmodule MDTClient.Sandbox.HostileTextTest do
       git(repo, ["add", "--all"])
       git(repo, ["commit", "-q", "-m", "first"])
 
-      vm = Path.join(base, "vm/work")
+      vm = Path.join(base, "vm")
       File.mkdir_p!(vm)
-      guest = Guest.local(vm)
-      {:ok, project} = Project.new(repo, [])
-      {:ok, _} = Sync.run(project, guest)
+      clone = Path.join(vm, "app")
+      {_, 0} = System.cmd("git", ["clone", "-q", repo, clone], env: Guest.git_env())
+      git(clone, ["checkout", "-q", "-b", "task"])
 
-      tree = Path.join(Project.worktrees_path(project, guest), "task")
-
-      git(Project.guest_path(project, guest), [
-        "worktree",
-        "add",
-        "-q",
-        "-b",
-        "task",
-        tree,
-        "host/master"
-      ])
-
-      %{repo: repo, guest: guest, project: project, tree: tree}
+      store = PullStore.path(Path.join(base, "sandbox"), repo)
+      :ok = PullStore.ensure(store, repo)
+      %{repo: repo, guest: Guest.local(vm), clone: clone, store: store}
     end
 
-    defp hand_off(context, opts \\ []) do
-      git(context.tree, ["add", "--all"])
-      git(context.tree, ["commit", "-q", "-m", Keyword.get(opts, :message, "work")])
+    defp open(context, opts \\ []) do
+      git(context.clone, ["add", "--all"])
+      git(context.clone, ["commit", "-q", "-m", Keyword.get(opts, :message, "work")])
+      folder = Path.join(context.clone, ".git")
+      limit = Keyword.get(opts, :size_limit_mib, 1024)
 
-      Handoff.receive(
-        context.project,
-        context.guest,
-        %{cwd: context.tree, title: "The work", body: "", agent: "an agent"},
-        Keyword.take(opts, [:size_limit_mib])
-      )
+      with {:ok, head} <-
+             PullStore.receive(context.store, context.guest, folder, "task", 1, limit) do
+        {:ok,
+         %PullRequest{
+           id: 1,
+           title: "The work",
+           repo: context.repo,
+           base: "master",
+           source: %{folder: folder, top: context.clone, branch: "task"},
+           head: head,
+           opened_at: DateTime.utc_now()
+         }}
+      end
     end
 
     test "shows all it holds: file names, commit messages and the diff" do
-      context = project()
-      File.write!(Path.join(context.tree, <<"caf", 0xE9, ".txt">>), "latin-1 name\n")
-      File.write!(Path.join(context.tree, "safe" <> @rlo <> "txt.sh"), "echo hi\n")
-      File.write!(Path.join(context.tree, "latin1.txt"), <<"caf", 0xE9, " ", 0xFF, "\n">>)
+      context = repository()
+      File.write!(Path.join(context.clone, <<"caf", 0xE9, ".txt">>), "latin-1 name\n")
+      File.write!(Path.join(context.clone, "safe" <> @rlo <> "txt.sh"), "echo hi\n")
+      File.write!(Path.join(context.clone, "latin1.txt"), <<"caf", 0xE9, " ", 0xFF, "\n">>)
 
       File.write!(
-        Path.join(context.tree, "screen.txt"),
+        Path.join(context.clone, "screen.txt"),
         "clear" <> @esc <> "[2J\r\n" <> @zwsp <> "\n"
       )
 
-      assert {:ok, handoff} = hand_off(context, message: "fix " <> @rlo <> "kcah a ton")
+      assert {:ok, pull} = open(context, message: "fix " <> @rlo <> "kcah a ton")
 
-      facts = Handoff.facts(context.project, handoff)
+      assert {:ok, facts} = PullRequest.facts(context.store, pull)
       assert length(facts.files) == 4
       assert_shown(facts)
-      assert Enum.any?(facts.messages, &(&1 =~ "\\u{202E}"))
+      assert Enum.any?(facts.commits, &(&1.subject =~ "\\u{202E}"))
 
-      assert {:ok, diff} = Handoff.diff(context.project, handoff)
+      assert {:ok, diff} = PullRequest.diff(context.store, pull, facts.merge_base)
       assert_shown(diff)
-      assert diff =~ "\\u{1B}[2J"
+      assert length(diff.files) == 4
+
+      assert Enum.any?(diff.files, fn file ->
+               Enum.any?(file.hunks, fn hunk ->
+                 Enum.any?(hunk.lines, &(&1.text =~ "\\u{1B}[2J"))
+               end)
+             end)
 
       # And it still comes in whole, under the names it has.
-      assert {:ok, _undo} = Handoff.bring(context.project, handoff)
+      assert {:ok, _} = PullStore.copy_into(context.store, context.repo, 1)
+      assert {:ok, _undo} = Landing.bring(context.repo, 1, pull.head, false)
       assert File.read!(Path.join(context.repo, <<"caf", 0xE9, ".txt">>)) == "latin-1 name\n"
     end
 
     test "has only the start of a long diff read, and says so" do
-      context = project()
+      context = repository()
 
       File.write!(
-        Path.join(context.tree, "big.txt"),
+        Path.join(context.clone, "big.txt"),
         String.duplicate("a line of text\n", 200_000)
       )
 
-      assert {:ok, handoff} = hand_off(context)
+      assert {:ok, pull} = open(context)
+      assert {:ok, facts} = PullRequest.facts(context.store, pull)
 
-      assert {:ok, diff} = Handoff.diff(context.project, handoff)
-      assert byte_size(diff) < 600 * 1024
-      assert diff =~ "the diff goes on"
-      assert_shown(diff)
+      assert {:ok, %{files: [big], cut?: true}} =
+               PullRequest.diff(context.store, pull, facts.merge_base)
+
+      assert big.truncated?
+      assert big.hunks |> Enum.map(&length(&1.lines)) |> Enum.sum() <= 6_000
     end
 
     test "is refused when it brings more than the limit, and leaves nothing of it behind" do
-      context = project()
-      File.write!(Path.join(context.tree, "blob.bin"), :crypto.strong_rand_bytes(3 * 1024 * 1024))
+      context = repository()
+
+      File.write!(
+        Path.join(context.clone, "blob.bin"),
+        :crypto.strong_rand_bytes(3 * 1024 * 1024)
+      )
+
       refs = git(context.repo, ["for-each-ref"])
 
-      assert hand_off(context, size_limit_mib: 1) == {:error, :too_large}
-      assert Handoff.explain(:too_large) =~ "more than 1 GiB"
+      assert open(context, size_limit_mib: 1) == {:error, :too_large}
+      assert PullRequest.explain(:too_large) =~ "more than 1 GiB"
       assert git(context.repo, ["for-each-ref"]) == refs
-      assert Path.wildcard(Path.join(context.repo, ".git/objects/**/tmp_*")) == []
+      assert Path.wildcard(Path.join(context.store, "objects/**/tmp_*")) == []
 
-      # Under the limit, the same handoff arrives.
-      File.write!(Path.join(context.tree, "note.txt"), "more\n")
-      assert {:ok, _handoff} = hand_off(context, size_limit_mib: 16)
+      # Under the limit, the same branch arrives.
+      File.write!(Path.join(context.clone, "note.txt"), "more\n")
+      assert {:ok, _pull} = open(context, size_limit_mib: 16)
     end
   end
 

@@ -260,8 +260,7 @@ defmodule MDTClientWeb.SandboxLive.Components do
   def outcome_style(:grant), do: {"Grant", "bg-violet/15 text-violet-strong"}
   def outcome_style(:vm), do: {"VM", "bg-hover text-muted"}
   def outcome_style(:command), do: {"Host", "bg-bad-soft/50 text-bad"}
-  def outcome_style(:project), do: {"Project", "bg-hover text-muted"}
-  def outcome_style(:handoff), do: {"Handoff", "bg-accent-soft/60 text-accent-strong"}
+  def outcome_style(:pull), do: {"Pull request", "bg-accent-soft/60 text-accent-strong"}
 
   @doc "The VM's status as a dot and a word."
   attr :vm, VM, required: true

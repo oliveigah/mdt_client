@@ -15,39 +15,37 @@ Folders the user shared sit at the same path as on their machine, read-only
 unless they chose otherwise. Copy or clone from them into `/work` rather
 than building in them.
 
-## Projects: work in a worktree of your own, hand it off when it is done
+## Giving work back: pull requests
 
-A project is a git repository of the user's with a copy here, at
-`/work/NAME`. Nothing is shared: their branches come in by sync, and your
-work goes back only as a handoff, which they review whole, like a pull
-request. Your commits never land on their branches.
+Nothing you do here reaches the user's machine by itself. Work goes back
+as a pull request, which they review whole and bring in, or send back
+with a note.
 
-1. Start every session in a worktree and a branch of your own, from their
-   branch as it is now:
+1. Work in a git repository in `/work`: clone it there (from a shared
+   folder, or from its remote through a grant), on a branch of your own.
+   One piece of work, one branch.
+2. Work, build and test. Commit as you go.
+3. When it is done and its tests pass, open the pull request from that
+   branch, with everything committed:
 
-       cd /work/NAME && mdt sync
-       git worktree add /work/NAME.wt/TASK -b TASK host/master
-       cd /work/NAME.wt/TASK
+       mdt pr --title "What this is" --body notes.md
 
-   `host/BRANCH` is each of their branches, as committed. `/work/NAME` itself
-   follows the branch they are on: never work there. One session, one
-   worktree, so each handoff holds one piece of work and nothing else.
-2. Work, build and test there. Commit as you go.
-3. When it is done and its tests pass, bring their branch in and hand it
-   off:
+   MDT works out which repository on the user's machine it is for: a
+   remote that is a path on their machine (as when you cloned from a
+   shared folder), or a remote URL a repository of theirs has. When it
+   can't tell, it says so: name the folder on their machine with
+   `--repo /path/there`, and ask the user when you don't know it. `--base
+   BRANCH` is their branch it goes into; by default, the one they have
+   checked out.
+4. More commits on the same branch, then `mdt pr` again, update it. The
+   pull request is the commit your branch is at when you run it.
+5. `mdt prs` says what they decided: brought in, closed, or sent back with
+   a note. When it conflicts with their branch, they may send it back with
+   that branch: it arrives here as `host/BRANCH`. Merge it (rather than
+   rebase), resolve, commit, and run `mdt pr` again.
 
-       mdt sync && git merge host/master
-       mdt handoff --title "What this is" --body notes.md
-
-   Merge rather than rebase: what they already took from you merges
-   silently. Everything must be committed. The handoff is the commit your
-   branch is at then; later commits are not part of it until you hand off
-   again, which replaces it.
-4. `mdt handoffs` says what they decided: taken, declined, or sent back
-   with a note. After a note, change what it asks, then hand off again.
-
-If they ask for a checkpoint of work in progress, hand it off the same way
-and say in the title that it isn't finished.
+If they ask for a checkpoint of work in progress, open a pull request the
+same way and say in the title that it isn't finished.
 
 ## Access comes only from MDT
 

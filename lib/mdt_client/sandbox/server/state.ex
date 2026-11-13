@@ -288,7 +288,8 @@ defmodule MDTClient.Sandbox.Server.State do
         builds: state.builds,
         current: state.image.tag,
         snapshots: state.snapshots,
-        handoffs: state.handoffs,
+        pulls: state.pulls,
+        pull_seq: state.pull_seq,
         memory: state.memory
       })
 

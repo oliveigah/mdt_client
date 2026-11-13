@@ -104,11 +104,15 @@ defmodule MDTClient.Sandbox.HostGit do
   files, not ignored ones. It is made through a copy of the index, so your
   index, HEAD and files stay exactly as they were. With nothing changed, it
   is HEAD itself.
+
+  `env` goes to every git run, as when the objects it makes go somewhere
+  other than your repository (`MDTClient.Sandbox.PullStore.view/2`).
   """
-  @spec snapshot(Path.t()) :: {:ok, String.t()} | {:error, String.t()}
-  def snapshot(repo) do
+  @spec snapshot(Path.t(), [{String.t(), String.t()}]) :: {:ok, String.t()} | {:error, String.t()}
+  def snapshot(repo, env \\ []) do
     temporary = Path.join(System.tmp_dir!(), "mdt-index-#{System.unique_integer([:positive])}")
-    env = [{"GIT_INDEX_FILE", temporary}]
+    outer = env
+    env = [{"GIT_INDEX_FILE", temporary} | outer]
 
     try do
       with head when is_binary(head) <- line(repo, ["rev-parse", "--verify", "--quiet", "HEAD"]),
@@ -117,7 +121,7 @@ defmodule MDTClient.Sandbox.HostGit do
            {:ok, _} <- run(repo, ["add", "--all"], env: env),
            {:ok, tree} <- run(repo, ["write-tree"], env: env),
            tree = String.trim(tree),
-           {:ok, head_tree} <- run(repo, ["rev-parse", "HEAD^{tree}"]) do
+           {:ok, head_tree} <- run(repo, ["rev-parse", "HEAD^{tree}"], env: outer) do
         if tree == String.trim(head_tree) do
           {:ok, head}
         else
@@ -125,7 +129,7 @@ defmodule MDTClient.Sandbox.HostGit do
                  run(
                    repo,
                    ["commit-tree", tree, "-p", head, "-m", "Your working tree, as MDT read it"],
-                   env: @identity
+                   env: @identity ++ outer
                  ) do
             {:ok, String.trim(commit)}
           end

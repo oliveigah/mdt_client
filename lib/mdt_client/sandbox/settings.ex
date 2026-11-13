@@ -31,7 +31,6 @@ defmodule MDTClient.Sandbox.Settings do
             work_gib: 64,
             hold_seconds: 180,
             shares: [],
-            projects: [],
             optmem_path: nil,
             host_notes: "",
             desktop_notifications: true
@@ -48,7 +47,6 @@ defmodule MDTClient.Sandbox.Settings do
           work_gib: pos_integer(),
           hold_seconds: pos_integer(),
           shares: [Share.t()],
-          projects: [MDTClient.Sandbox.Project.t()],
           optmem_path: String.t() | nil,
           host_notes: String.t(),
           desktop_notifications: boolean()

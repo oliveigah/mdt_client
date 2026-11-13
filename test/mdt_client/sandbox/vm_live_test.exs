@@ -15,7 +15,7 @@ defmodule MDTClient.Sandbox.VMLiveTest do
 
   alias MDTClient.Accounts
   alias MDTClient.Sandbox
-  alias MDTClient.Sandbox.{Bubble, Disks, Guest, Handoff, Msb, Project, Projects, Server, Sync}
+  alias MDTClient.Sandbox.{Bubble, Disks, Guest, HostGit, Msb, PullRequest, PullRequests, Server}
   alias MDTClient.Vault.Store
 
   @moduletag :vm
@@ -190,12 +190,11 @@ defmodule MDTClient.Sandbox.VMLiveTest do
       assert File.regular?(Path.join(folders.optmem, "memory/LOG.txt"))
     end
 
-    ## A project: your branches in through msb's pipe, a handoff back
+    ## A pull request: the VM's work back through msb's pipe
 
-    repo =
-      Path.join(share, "../vm-project-#{System.unique_integer([:positive])}") |> Path.expand()
-
-    on_exit(fn -> File.rm_rf!(repo) end)
+    # Your repository, in the folder shared read-only, where the agent
+    # clones it from: that clone's remote says which repository it is for.
+    repo = Path.join(share, "app")
     File.mkdir_p!(repo)
 
     git = fn dir, args ->
@@ -213,57 +212,70 @@ defmodule MDTClient.Sandbox.VMLiveTest do
     File.write!(Path.join(repo, "a.txt"), "from your machine\n")
     git.(repo, ["add", "--all"])
     git.(repo, ["commit", "-q", "-m", "first"])
-    {:ok, project} = Project.new(repo, [])
-    guest = Guest.vm(username, name)
+
+    # The sandbox doesn't run this VM, so it is named to it.
+    Application.put_env(:mdt_client, PullRequests, guest: Guest.vm(username, name))
+    on_exit(fn -> Application.delete_env(:mdt_client, PullRequests) end)
 
     assert {:ok, _} = exec.("apk add --no-cache git >/dev/null 2>&1; git --version")
-    assert {:ok, %{branch: "master", followed: :updated}} = Sync.run(project, guest)
-    assert {:ok, "from your machine\n"} = exec.("cat /work/#{project.name}/a.txt")
-    assert {:ok, %{followed: :current}} = Sync.run(project, guest)
-
-    # An agent's session: its own worktree, a commit, a handoff.
-    tree = "/work/#{project.name}.wt/fix"
 
     assert {:ok, _} =
              exec.("""
-             cd /work/#{project.name} &&
-             git worktree add -q -b fix #{tree} host/master &&
-             cd #{tree} && echo 'from the vm' >> a.txt && echo new > b.txt && git add --all &&
-             git -c user.name=Agent -c user.email=agent@vm.invalid commit -q -m 'the fix'
+             git -c safe.directory='*' clone -q #{repo} /work/app && cd /work/app &&
+             git checkout -q -b fix && echo 'from the vm' >> a.txt && echo new > b.txt &&
+             git add --all && git -c user.name=Agent -c user.email=agent@vm.invalid commit -q -m 'the fix'
              """)
 
-    assert {:ok, %Handoff{branch: "fix"} = handoff} =
-             Handoff.receive(project, guest, %{cwd: tree, title: "The fix", agent: "test"})
+    refs = git.(repo, ["for-each-ref"])
 
-    assert %{commits: 1, conflicts: [], files: [%{path: "a.txt"}, %{path: "b.txt"}]} =
-             Handoff.facts(project, handoff)
+    assert {:ok, %PullRequest{repo: ^repo, base: "master", stats: %{commits: 1, files: 2}} = pull,
+            :opened} =
+             PullRequests.open(username, %{cwd: "/work/app", title: "The fix", agent: "test"})
+
+    assert git.(repo, ["for-each-ref"]) == refs
 
     head = git.(repo, ["rev-parse", "HEAD"])
-    assert {:ok, undo} = Handoff.bring(project, handoff)
+    here = %{how: :changes, where: {:worktree, repo}}
+    assert {:ok, _} = PullRequests.land(username, pull.id, here)
     assert File.read!(Path.join(repo, "a.txt")) == "from your machine\nfrom the vm\n"
     assert git.(repo, ["status", "--porcelain"]) == " M a.txt\n?? b.txt\n"
     assert git.(repo, ["rev-parse", "HEAD"]) == head
-    assert :ok = Handoff.undo(project, undo)
+    assert {:ok, _} = PullRequests.undo(username, pull.id)
     assert git.(repo, ["status", "--porcelain"]) == ""
+
+    # Your branch moved; sent back with it, it arrives in the VM's repository.
+    File.write!(Path.join(repo, "c.txt"), "yours\n")
+    git.(repo, ["add", "--all"])
+    git.(repo, ["commit", "-q", "-m", "second"])
+    assert {:ok, _} = PullRequests.send_back(username, pull.id, "Merge mine.", true)
+    assert {:ok, sent} = exec.("git -C /work/app rev-parse host/master")
+    assert sent == git.(repo, ["rev-parse", "master"])
 
     # What the VM plants in its repository runs there, never here.
     assert {:ok, _} =
              exec.("""
-             cd /work/#{project.name} &&
+             cd /work/app &&
              printf '#!/bin/sh\\ntouch /tmp/planted-hook-ran\\n' > .git/hooks/reference-transaction &&
              chmod +x .git/hooks/reference-transaction &&
              git config core.fsmonitor 'touch /tmp/planted-fsmonitor-ran; false' &&
-             cd #{tree} && echo more >> b.txt &&
-             git -c user.name=Agent -c user.email=agent@vm.invalid commit -q -am more
+             git -c user.name=Agent -c user.email=agent@vm.invalid merge -q host/master &&
+             echo more >> b.txt && git -c user.name=Agent -c user.email=agent@vm.invalid commit -q -am more
              """)
 
     File.rm("/tmp/planted-hook-ran")
     File.rm("/tmp/planted-fsmonitor-ran")
-    assert {:ok, _} = Sync.run(project, guest)
-    assert {:ok, _} = Handoff.receive(project, guest, %{cwd: tree, title: "More", agent: "test"})
+
+    assert {:ok, %PullRequest{revision: 2, status: :open}, :updated} =
+             PullRequests.open(username, %{cwd: "/work/app", agent: "test"})
+
+    assert {:ok, _} =
+             PullRequests.land(username, pull.id, %{how: :commits, where: {:worktree, repo}})
+
+    assert File.read!(Path.join(repo, "b.txt")) == "new\nmore\n"
     refute File.exists?("/tmp/planted-hook-ran")
     refute File.exists?("/tmp/planted-fsmonitor-ran")
     assert {:ok, "ran in the vm\n"} = exec.("test -e /tmp/planted-hook-ran && echo ran in the vm")
+    Application.delete_env(:mdt_client, PullRequests)
 
     ## The disks across a stop, a start and a recreate
 
@@ -369,7 +381,7 @@ defmodule MDTClient.Sandbox.VMLiveTest do
 
     assert [%{id: _}] = Sandbox.snapshot(username).snapshots
 
-    # A project, with the agent's side done by the real `mdt` command in the VM.
+    # A pull request, opened by the real `mdt` command in the VM.
     repo = Path.join(System.tmp_dir!(), "vm-flow-#{System.unique_integer([:positive])}")
     on_exit(fn -> File.rm_rf!(repo) end)
     File.mkdir_p!(repo)
@@ -397,27 +409,35 @@ defmodule MDTClient.Sandbox.VMLiveTest do
     assert said =~ "This is the VM MDT runs" and said =~ "vm #{second}"
     assert {:ok, login} = exec.("bash -lic true 2>&1")
     assert login =~ "This is the VM MDT runs"
-    assert {:ok, %Project{name: project}} = Projects.add(username, repo)
-    assert {:ok, %{followed: :updated}} = Projects.sync(username, project)
+
+    # The agent's repository starts from yours, sent through msb's pipe; it
+    # has no remote, so `mdt pr` is told which repository it is for.
+    guest = Guest.vm(username, name)
+    assert {:ok, _} = exec.("git init -q -b main /work/app")
+
+    assert {:ok, _} =
+             HostGit.run(repo, ["push", guest.git_url.("/work/app"), "master:refs/heads/start"],
+               env: guest.env
+             )
 
     assert {:ok, handed} =
              exec.("""
-             cd /work/#{project} && git worktree add -q -b task /work/#{project}.wt/task host/master &&
-             cd /work/#{project}.wt/task && echo 'the vm' >> a.txt &&
+             cd /work/app && git checkout -q -b task start && echo 'the vm' >> a.txt &&
              git -c user.name=Agent -c user.email=agent@vm.invalid commit -q -am 'the task' &&
-             /mnt/mdt/bin/mdt sync && /mnt/mdt/bin/mdt handoff --title 'The task' && /mnt/mdt/bin/mdt handoffs
+             /mnt/mdt/bin/mdt pr --title 'The task' --repo #{repo} && /mnt/mdt/bin/mdt prs
              """)
 
-    assert handed =~ "Synced #{project}" and handed =~ "Handed off as" and
-             handed =~ "waiting for the user"
+    assert handed =~ "Opened pull request #1" and handed =~ "open, waiting for the user"
 
-    assert [%Handoff{id: id, title: "The task", branch: "task", status: :waiting}] =
-             Sandbox.snapshot(username).handoffs
+    assert [%PullRequest{id: id, title: "The task", source: %{branch: "task"}, status: :open}] =
+             Sandbox.snapshot(username).pulls
 
-    assert {:ok, %Handoff{status: :brought}} = Projects.bring(username, id)
+    assert {:ok, %PullRequest{status: :merged}} =
+             PullRequests.land(username, id, %{how: :commits, where: {:worktree, repo}})
+
     assert File.read!(Path.join(repo, "a.txt")) == "yours\nthe vm\n"
-    assert git.(["status", "--porcelain"]) == " M a.txt\n"
-    assert git.(["log", "--oneline"]) |> String.split("\n", trim: true) |> length() == 1
+    assert git.(["status", "--porcelain"]) == ""
+    assert git.(["log", "-1", "--format=%s %an"]) == "the task Agent\n"
 
     # A command grant, asked through the real `mdt` in the VM. With none,
     # nothing can be asked; with a script of yours, the agent sends no text,

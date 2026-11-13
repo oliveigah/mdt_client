@@ -45,7 +45,7 @@ defmodule MDTClientWeb.Router do
       live "/tools/notes", NotesLive
       live "/tools/sandbox", SandboxLive, :overview
       live "/tools/sandbox/approvals", SandboxLive, :approvals
-      live "/tools/sandbox/projects", SandboxLive, :projects
+      live "/tools/sandbox/pulls", SandboxLive, :pulls
       live "/tools/sandbox/grants", SandboxLive, :grants
       live "/tools/sandbox/grants/:id", SandboxLive, :grant
       live "/tools/sandbox/activity", SandboxLive, :activity
