@@ -22,6 +22,27 @@ defmodule MDTClientWeb.GitLive.PushTest do
     render_async(view)
   end
 
+  defp open_repository(view, path) do
+    render_hook(view, "open_repository", %{"path" => path})
+    render_async(view)
+  end
+
+  defp push_from_menu(view, item) do
+    view |> element("#git-push-options") |> render_click()
+    view |> element("#git-menu-#{item}") |> render_click()
+    render_async(view)
+  end
+
+  # Publishes a commit, then rewrites it locally, so the next push replaces
+  # remote history. Returns the commit the remote holds and the local one.
+  defp diverge!(base, path, initial) do
+    origin!(base, path)
+    published = commit_file(path, "published.txt", "published\n", "published")
+    git!(path, ["push"])
+    git!(path, ["reset", "--hard", initial])
+    {published, commit_file(path, "revised.txt", "revised\n", "revised")}
+  end
+
   defp remote_head(base, branch \\ "main"),
     do: git!(Path.join(base, "remote.git"), ["rev-parse", branch])
 
@@ -182,5 +203,121 @@ defmodule MDTClientWeb.GitLive.PushTest do
 
     refute has_element?(view, "#git-confirm")
     assert has_element?(view, "#notices [role=alert]")
+  end
+
+  ## The push menu
+
+  test "pushing without hooks from the menu skips a pre-push hook a plain push runs", context do
+    %{base: base, path: path, view: view, initial_commit: initial} = context
+    origin!(base, path)
+    local = commit_file(path, "local.txt", "local\n", "local")
+    failing_hook!(path, "pre-push")
+    open_and_push(view, path)
+
+    refute has_element?(view, "#git-confirm")
+    assert has_element?(view, "#notices [role=alert]")
+    assert remote_head(base) == initial
+
+    push_from_menu(view, "push-no-verify")
+    assert remote_head(base) == local
+  end
+
+  test "push and set upstream offers every remote even when the branch tracks one", context do
+    %{base: base, path: path, view: view} = context
+    origin!(base, path)
+    git!(path, ["remote", "add", "backup", Path.join(base, "remote.git")])
+    open_repository(view, path)
+
+    view |> element("#git-push-options") |> render_click()
+    view |> element("#git-menu-push-set-upstream") |> render_click()
+    assert has_element?(view, "#git-confirm-title", "Change the upstream of main?")
+    assert has_element?(view, "#git-confirm-upstream-b3JpZ2lu")
+
+    view |> element("#git-confirm-upstream-YmFja3Vw") |> render_click()
+    render_async(view)
+    refute has_element?(view, "#git-confirm")
+    assert git!(path, ["config", "branch.main.remote"]) == "backup"
+  end
+
+  test "force push with lease replaces what the last fetch saw and refuses unseen work",
+       context do
+    %{base: base, path: path, view: view, initial_commit: initial} = context
+    {_published, revised} = diverge!(base, path, initial)
+    open_repository(view, path)
+
+    push_from_menu(view, "force-push-with-lease")
+    refute has_element?(view, "#git-confirm")
+    assert remote_head(base) == revised
+
+    unseen = push_commit!(Path.join(base, "elsewhere"), "main", "unseen.txt", "unseen")
+    commit_file(path, "again.txt", "again\n", "again")
+
+    push_from_menu(view, "force-push-with-lease")
+    assert has_element?(view, "#git-confirm-title", "The remote branch changed")
+    assert remote_head(base) == unseen
+  end
+
+  test "a plain force push from the menu asks first", context do
+    %{base: base, path: path, view: view, initial_commit: initial} = context
+    {published, revised} = diverge!(base, path, initial)
+    open_repository(view, path)
+
+    push_from_menu(view, "force-push")
+    assert has_element?(view, "#git-confirm-accept", "Force push")
+    view |> element("#git-confirm-cancel") |> render_click()
+    assert remote_head(base) == published
+
+    push_from_menu(view, "force-push")
+    view |> element("#git-confirm-accept") |> render_click()
+    render_async(view)
+    refute has_element?(view, "#git-confirm")
+    assert remote_head(base) == revised
+  end
+
+  test "forcing needs an upstream on a remote", context do
+    %{base: base, path: path, view: view} = context
+    remote = Path.join(base, "remote.git")
+    File.mkdir_p!(remote)
+    git!(remote, ["init", "--bare", "--initial-branch=main"])
+    git!(path, ["remote", "add", "origin", remote])
+    open_repository(view, path)
+
+    view |> element("#git-push-options") |> render_click()
+    assert has_element?(view, "#git-menu-force-push-with-lease[disabled]")
+    assert has_element?(view, "#git-menu-force-push[disabled]")
+    refute has_element?(view, "#git-menu-push-no-verify[disabled]")
+    refute has_element?(view, "#git-menu-push-set-upstream[disabled]")
+  end
+
+  test "a first push without hooks keeps skipping them once a remote is chosen", context do
+    %{base: base, path: path, view: view, initial_commit: initial} = context
+    remote = Path.join(base, "remote.git")
+    File.mkdir_p!(remote)
+    git!(remote, ["init", "--bare", "--initial-branch=main"])
+    git!(path, ["remote", "add", "origin", remote])
+    failing_hook!(path, "pre-push")
+    open_repository(view, path)
+
+    push_from_menu(view, "push-no-verify")
+    view |> element("#git-confirm-upstream-b3JpZ2lu") |> render_click()
+    render_async(view)
+
+    refute has_element?(view, "#git-confirm")
+    assert remote_head(base) == initial
+    assert git!(path, ["config", "branch.main.remote"]) == "origin"
+  end
+
+  test "a rejected push without hooks keeps skipping them on retry", context do
+    %{base: base, path: path, view: view, initial_commit: initial} = context
+    {_published, revised} = diverge!(base, path, initial)
+    failing_hook!(path, "pre-push")
+    open_repository(view, path)
+
+    push_from_menu(view, "push-no-verify")
+    view |> element("#git-confirm-force-with-lease") |> render_click()
+    render_async(view)
+
+    refute has_element?(view, "#git-confirm")
+    assert remote_head(base) == revised
   end
 end

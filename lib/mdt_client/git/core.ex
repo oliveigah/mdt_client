@@ -560,17 +560,23 @@ defmodule MDTClient.Git.Core do
     end
   end
 
-  @doc "Creates a commit from the current index."
+  @doc """
+  Creates a commit from the current index.
+
+  `:no_verify` skips the repository's `pre-commit` and `commit-msg` hooks.
+  """
   @spec commit(Repository.t(), String.t(), keyword()) :: mutation_result()
   def commit(%Repository{} = repository, message, opts \\ []) do
     with {:ok, message} <- commit_message(message),
          {:ok, amend?} <- boolean_option(opts, :amend, false),
          {:ok, allow_empty?} <- boolean_option(opts, :allow_empty, false),
+         {:ok, no_verify?} <- boolean_option(opts, :no_verify, false),
          {:ok, signing_args} <- signing_args(Keyword.get(opts, :sign, false)) do
       args =
         ["commit"] ++
           if_args(amend?, "--amend") ++
-          if_args(allow_empty?, "--allow-empty") ++ signing_args ++ ["-m", message]
+          if_args(allow_empty?, "--allow-empty") ++
+          if_args(no_verify?, "--no-verify") ++ signing_args ++ ["-m", message]
 
       run_mutation(repository, :commit, args)
     end
@@ -847,6 +853,7 @@ defmodule MDTClient.Git.Core do
   `:destination` names the remote branch. `:force` overwrites remote history;
   `:force_with_lease` accepts a boolean or `{destination, expected_commit}` to
   protect the exact remote state the caller reviewed (an empty commit means absent).
+  `:no_verify` skips the repository's `pre-push` hook.
   """
   @spec push(Repository.t(), keyword()) :: mutation_result()
   def push(%Repository{} = repository, opts \\ []) do
@@ -855,6 +862,7 @@ defmodule MDTClient.Git.Core do
            push_lease_args(repository, Keyword.get(opts, :force_with_lease, false)),
          :ok <- validate_push_force(force?, lease_args),
          {:ok, upstream?} <- boolean_option(opts, :set_upstream, false),
+         {:ok, no_verify?} <- boolean_option(opts, :no_verify, false),
          {:ok, branch_args} <-
            push_branch_args(
              repository,
@@ -866,7 +874,8 @@ defmodule MDTClient.Git.Core do
         ["push", "--porcelain"] ++
           if_args(force?, "--force") ++
           lease_args ++
-          if_args(upstream?, "--set-upstream") ++ remote_args ++ branch_args
+          if_args(upstream?, "--set-upstream") ++
+          if_args(no_verify?, "--no-verify") ++ remote_args ++ branch_args
 
       run_mutation(repository, :push, args, env: [{"LC_ALL", "C"}])
     end

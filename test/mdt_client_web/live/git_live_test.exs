@@ -1525,6 +1525,56 @@ defmodule MDTClientWeb.GitLiveTest do
     assert count(view, "#git-commits [role=option]") == 2
   end
 
+  test "a commit draft survives a refresh", context do
+    %{view: view, path: path} = context
+    File.write!(Path.join(path, "committed.txt"), "committed\n")
+    open(view, path)
+
+    view |> element("#git-panel-changes") |> render_click()
+    view |> element("#git-unstaged-all") |> render_click()
+    render_async(view)
+
+    view
+    |> form("#git-commit-form", %{"message" => "half written", "no_verify" => "true"})
+    |> render_change()
+
+    view |> element("#git-refresh") |> render_click()
+    render_async(view)
+
+    assert has_element?(view, "#git-commit-message", "half written")
+    assert has_element?(view, "#git-commit-no-verify[checked]")
+  end
+
+  test "skipping hooks commits past a refusing pre-commit hook, once", context do
+    %{view: view, path: path, initial_commit: initial} = context
+    failing_hook!(path, "pre-commit")
+    File.write!(Path.join(path, "committed.txt"), "committed\n")
+    open(view, path)
+
+    view |> element("#git-panel-changes") |> render_click()
+    view |> element("#git-unstaged-all") |> render_click()
+    render_async(view)
+
+    view |> form("#git-commit-form", %{"message" => "checked"}) |> render_submit()
+    render_async(view)
+    assert git!(path, ["rev-parse", "HEAD"]) == initial
+    assert has_element?(view, "#notices [role=alert]")
+
+    view
+    |> form("#git-commit-form", %{"message" => "unchecked", "no_verify" => "true"})
+    |> render_submit()
+
+    render_async(view)
+    assert git!(path, ["log", "-1", "--format=%s"]) == "unchecked"
+
+    File.write!(Path.join(path, "next.txt"), "next\n")
+    view |> element("#git-refresh") |> render_click()
+    render_async(view)
+    view |> element("#git-unstaged-all") |> render_click()
+    render_async(view)
+    refute has_element?(view, "#git-commit-no-verify[checked]")
+  end
+
   ## SSH credentials
 
   test "saves an SSH key pair for every repository tab", context do

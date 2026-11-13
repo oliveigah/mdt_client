@@ -615,13 +615,29 @@ defmodule MDTClientWeb.GitLive do
     {:noreply, run(socket, tab, {:stash, selected_paths(tab), nil_if_empty(message), untracked?})}
   end
 
+  # The draft lives here, so a refresh or background fetch that redraws the form
+  # keeps what was typed and ticked.
+  @impl true
+  def handle_event("commit_draft", params, socket) do
+    {:noreply,
+     update_tab(
+       socket,
+       &%{
+         &1
+         | commit_message: params["message"] || "",
+           commit_no_verify?: params["no_verify"] == "true"
+       }
+     )}
+  end
+
   @impl true
   def handle_event("commit_staged", params, socket) do
     tab = socket.assigns.tab
     message = String.trim(params["message"] || "")
+    no_verify? = params["no_verify"] == "true"
 
-    socket = update_tab(socket, &%{&1 | commit_message: message})
-    {:noreply, run(socket, tab, {:commit, message})}
+    socket = update_tab(socket, &%{&1 | commit_message: message, commit_no_verify?: no_verify?})
+    {:noreply, run(socket, tab, {:commit, message, [no_verify: no_verify?]})}
   end
 
   ## Prepared actions
@@ -661,6 +677,19 @@ defmodule MDTClientWeb.GitLive do
   end
 
   ## Commands
+
+  # Choosing an upstream is asked even when the branch already tracks one.
+  @impl true
+  def handle_event("choose_upstream", _params, socket) do
+    case socket.assigns.tab do
+      %{pending: nil} = tab ->
+        confirm = Push.upstream_choice(tab)
+        {:noreply, put_tab(socket, tab.id, &%{&1 | confirm: confirm, menu: nil})}
+
+      _busy_or_closed ->
+        {:noreply, update_tab(socket, &%{&1 | menu: nil})}
+    end
+  end
 
   @impl true
   def handle_event("checkout_branch", %{"name" => name}, socket) do
@@ -1132,6 +1161,7 @@ defmodule MDTClientWeb.GitLive do
       stash_message: "",
       stashing?: false,
       commit_message: "",
+      commit_no_verify?: false,
       stashes_open?: true,
       diff: nil,
       commit_changes: nil,
@@ -1178,7 +1208,7 @@ defmodule MDTClientWeb.GitLive do
   defp dispatch(socket, tab, action) do
     confirm =
       case action do
-        {:push, []} -> Push.upstream_confirmation(tab)
+        {:push, opts} -> Push.confirmation(tab, opts)
         _other -> confirmation(action)
       end
 
@@ -1477,7 +1507,7 @@ defmodule MDTClientWeb.GitLive do
   defp perform(repository, {:squash, revisions, message}),
     do: Core.squash(repository, revisions, message)
 
-  defp perform(repository, {:commit, message}), do: Core.commit(repository, message)
+  defp perform(repository, {:commit, message, opts}), do: Core.commit(repository, message, opts)
   defp perform(repository, {:stage, paths}), do: Core.stage(repository, paths)
   defp perform(repository, {:unstage, paths}), do: Core.unstage(repository, paths)
   defp perform(repository, {:discard, paths}), do: Core.discard(repository, paths)
@@ -1634,7 +1664,7 @@ defmodule MDTClientWeb.GitLive do
   defp apply_result(tab, {:ok, %CommandResult{} = result}) do
     # The draft that produced the commit or stash is spent once Git accepted it.
     case result.action do
-      :commit -> %{tab | commit_message: ""}
+      :commit -> %{tab | commit_message: "", commit_no_verify?: false}
       :stash -> %{tab | stash_message: "", stashing?: false}
       _other -> tab
     end
@@ -1704,6 +1734,9 @@ defmodule MDTClientWeb.GitLive do
   defp requested("refresh", _params, _tab), do: :refresh
   defp requested("pull", _params, _tab), do: {:pull, :ff_only}
   defp requested("push", _params, _tab), do: {:push, []}
+  defp requested("push_no_verify", _params, _tab), do: {:push, [no_verify: true]}
+  defp requested("force_push_with_lease", _params, tab), do: Push.force(tab, :lease)
+  defp requested("force_push", _params, tab), do: Push.force(tab, :force)
   defp requested("continue", _params, _tab), do: :continue
   defp requested("skip", _params, _tab), do: :skip
   defp requested("abort", _params, _tab), do: :abort
@@ -2140,7 +2173,15 @@ defmodule MDTClientWeb.GitLive do
 
   defp label(:refresh), do: "Refreshing"
   defp label({:pull, _strategy}), do: "Pulling"
-  defp label({:push, _opts}), do: "Pushing"
+
+  defp label({:push, opts}) do
+    cond do
+      opts[:force] || opts[:force_with_lease] -> "Force pushing"
+      opts[:no_verify] -> "Pushing without hooks"
+      true -> "Pushing"
+    end
+  end
+
   defp label({:use_ssh_remote, _remote}), do: "Switching remote to SSH"
   defp label({:checkout_branch, _name}), do: "Checking out"
   defp label({:checkout_commit, _id}), do: "Checking out"
@@ -2157,7 +2198,10 @@ defmodule MDTClientWeb.GitLive do
   defp label({:reset, _revision, mode}), do: "#{String.capitalize(to_string(mode))} resetting"
   defp label({:edit_message, _revision, _message}), do: "Rewriting message"
   defp label({:squash, _revisions, _message}), do: "Squashing"
-  defp label({:commit, _message}), do: "Committing"
+
+  defp label({:commit, _message, opts}),
+    do: if(opts[:no_verify], do: "Committing without hooks", else: "Committing")
+
   defp label({:stage, _paths}), do: "Staging"
   defp label({:unstage, _paths}), do: "Unstaging"
   defp label({:discard, _paths}), do: "Discarding"
@@ -2174,6 +2218,7 @@ defmodule MDTClientWeb.GitLive do
   defp menu_kind("branch"), do: :branch
   defp menu_kind("commit"), do: :commit
   defp menu_kind("file"), do: :file
+  defp menu_kind("push"), do: :push
   defp menu_kind("stash"), do: :stash
   defp menu_kind(_kind), do: nil
 

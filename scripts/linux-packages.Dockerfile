@@ -1,13 +1,13 @@
 # syntax=docker/dockerfile:1
 
-# MDT ships its own microsandbox runtime: a pinned msb with MDT's patch and
-# its libkrunfw (see scripts/build-microsandbox.sh). It links only glibc, so
+# MDT ships its own microsandbox runtime: msb from a pinned commit of MDT's
+# fork, and its libkrunfw (see scripts/build-microsandbox.sh). It links only glibc, so
 # it is built once, on the older glibc of the two package targets, and both
 # packages carry the same files.
 FROM docker.io/library/ubuntu:22.04 AS microsandbox-build
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential ca-certificates curl git \
+    build-essential ca-certificates curl git strace \
     && rm -rf /var/lib/apt/lists/*
 
 RUN curl --proto '=https' --tlsv1.2 --fail --silent --show-error \
@@ -20,7 +20,6 @@ ENV CARGO_HTTP_MULTIPLEXING=false CARGO_NET_RETRY=10
 
 WORKDIR /src
 COPY scripts/build-microsandbox.sh ./scripts/
-COPY priv/sandbox/microsandbox-live-sharing.patch ./priv/sandbox/
 ARG TARGETARCH
 RUN --mount=type=cache,id=mdt-cargo-registry,target=/root/.cargo/registry \
     --mount=type=cache,id=mdt-cargo-git,target=/root/.cargo/git \

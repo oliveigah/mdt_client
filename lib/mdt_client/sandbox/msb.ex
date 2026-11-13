@@ -5,9 +5,10 @@ defmodule MDTClient.Sandbox.Msb do
   the sandbox process.
 
   MDT ships its own runtime, built by `scripts/build-microsandbox.sh` into
-  `priv/microsandbox`: a pinned `msb` with MDT's live-sharing patch, and
-  that release's libkrunfw, which `msb` finds beside its `bin/`. Whatever
-  `msb` is on the PATH is never used.
+  `priv/microsandbox`: `msb` from a pinned commit of MDT's fork
+  (oliveigah/microsandbox, an upstream release plus the fix for files the
+  host replaces), and that release's libkrunfw, which `msb` finds beside
+  its `bin/`. Whatever `msb` is on the PATH is never used.
 
   Its state (VMs, images, SSH keys) lives in MDT's own microsandbox home,
   not `~/.microsandbox`, so an `msb` you install yourself, at any version,

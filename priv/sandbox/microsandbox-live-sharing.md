@@ -1,14 +1,19 @@
 # Microsandbox live-sharing fix
 
-The patch beside this file targets Microsandbox **v0.7.14**, commit
-`60fc5071b34e6cc2671c84c8dc07709795d45d27`. It is a local runtime patch;
-no upstream release or installation is implied.
+The fix now lives in MDT's fork of microsandbox, as commit
+[`6626e7cb2`](https://github.com/oliveigah/microsandbox/commit/6626e7cb280069f522c03a815c760ace8931b370)
+("fix: ESTALE for host replaced files") on top of v0.7.15. It was first
+written as a local patch against v0.7.14 (commit `60fc507`); the validation
+below is from that version. The fork commit changes the same two returns in
+`passthroughfs/unix/inode.rs` and carries the same tests, plus one for a file
+the host really deletes. Until upstream takes the fix, MDT builds `msb` from
+that commit.
 
 Host atomic replacements previously made cached guest inode references return
 ENOENT. Git treated the apparently missing index as empty. Our live probe
 reproduced this on all 100 host-side index replacements.
 
-The patch:
+The fix:
 
 - Retains Microsandbox's normal five-second entry/attribute caches. The
   earlier zero-timeout policy was removed after excessive CPU use was measured.
@@ -34,26 +39,34 @@ watchers need their own polling configuration or separate validation.
 
 ## How MDT ships it
 
-MDT carries the patched runtime itself; nothing is installed over your own
-`msb`. `scripts/build-microsandbox.sh` clones v0.7.14, checks the revision,
-applies this patch, runs the filesystem suite, and builds the CLI with
-release optimizations (no whole-program LTO). The guest agent it embeds
-and the `libkrunfw` beside it are the release's own files, checked against
-pinned SHA-256s; the patch changes neither. The result goes to
-`priv/microsandbox` (`bin/msb`, `lib/libkrunfw.so.5.6.1`), which the
-release, and so the .deb and .rpm, carry. See the sandbox doc's Runtime
-section for the home and launcher MDT runs it with.
+MDT carries the runtime itself; nothing is installed over your own `msb`.
+`scripts/build-microsandbox.sh` fetches the pinned fork commit by hash,
+refuses a checkout with local changes, runs the filesystem suite, and builds
+the CLI with release optimizations (no whole-program LTO). The guest agent
+it embeds and the `libkrunfw` beside it are the v0.7.15 release's own files,
+checked against pinned SHA-256s; the fix changes neither. The result goes to
+`priv/microsandbox` (`bin/msb`, `lib/libkrunfw.so.5.6.1`, and `VERSION`,
+`0.7.15+6626e7cb2`), which the release, and so the .deb and .rpm, carry. See
+the sandbox doc's Runtime section for the home and launcher MDT runs it with.
 
 ```sh
 ./scripts/build-microsandbox.sh
 ```
 
-It needs Git, Rust/Cargo, a C compiler, and internet access to GitHub and
-crates.io. A VM picks up a new build when it next starts; stop and start it
-in MDT, then reconnect Zed.
+It needs Git, Rust/Cargo, a C compiler, strace (two filesystem tests use it;
+they are skipped without it), and internet access to GitHub and crates.io.
+`MDT_MSB_SOURCE` may point at your own clone of the fork, as long as it is at
+the pinned commit with no local changes. A VM picks up a new build when it
+next starts; stop and start it in MDT, then reconnect Zed.
 
-The validation below predates bundling: it ran with this patch installed
-over the host's own `msb` 0.7.14, which is the same build.
+Checked for the fork commit on 2026-11-13, in the VM: without the fix (its
+parent with only the new tests added), the three tests for replaced and
+deleted files fail with ENOENT (2) instead of ESTALE (116); with it, all 686
+filesystem tests pass. The built `msb` reports 0.7.15 and accepts every flag
+MDT passes. It has not yet run a VM on the host.
+
+The validation below predates the fork: it ran with the v0.7.14 patch
+installed over the host's own `msb`.
 
 ## Validation
 

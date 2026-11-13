@@ -79,7 +79,8 @@ folders with it, and sits between it and the network.
 | 2026-11-12 | Host commands cover most of what file grants were for (move the work to the value, not the value to the VM). File grants stay for long-lived processes in the VM. |
 | 2026-11-13 | Ports listening in the VM are forwarded by themselves to the VM's own loopback address on your machine (`127.77.X.Y`), with the same numbers. No hostname.      |
 | 2026-11-13 | Forwarding goes over msb's SSH server with an OpenSSH control master and MDT's own key, not msb's published ports, which need restarts and miss loopback.      |
-| 2026-11-13 | MDT ships its own msb (v0.7.14 with the live-sharing patch, and its libkrunfw) and keeps its state in its own microsandbox home. An `msb` you install is never used. |
+| 2026-11-13 | MDT ships its own msb (v0.7.14 with the live-sharing patch, and its libkrunfw) and keeps its state in its own microsandbox home. An `msb` you install is never used. Now built from the fork (below). |
+| 2026-11-13 | `msb` is built from MDT's fork (oliveigah/microsandbox, commit `6626e7cb2`: v0.7.15 plus the ESTALE fix) until upstream takes the fix. Replaces the patch file. |
 | 2026-11-13 | Disk is a setting: the root disk (64 GiB, sparse) and a write budget per read-write folder per boot (64 GiB), instead of microsandbox's silent 4 GiB for both. |
 
 ## Built so far
@@ -925,16 +926,21 @@ within a few seconds, and goes away when it stops.
 
 MDT brings its own microsandbox; nothing needs installing on the machine.
 
-- **What ships:** `msb` v0.7.14 built from source with MDT's
-  [live-sharing patch](../priv/sandbox/microsandbox-live-sharing.md), and
-  that release's `libkrunfw.so.5.6.1` (the guest kernel). The patch is why
-  it isn't the stock release: without it, git in the VM can see an empty
-  index after the host replaces it (see the blocker below).
+- **What ships:** `msb` built from MDT's fork,
+  [oliveigah/microsandbox](https://github.com/oliveigah/microsandbox) at
+  commit `6626e7cb2`: v0.7.15 plus the
+  [live-sharing fix](../priv/sandbox/microsandbox-live-sharing.md), and
+  v0.7.15's `libkrunfw.so.5.6.1` (the guest kernel). The fix is why it
+  isn't the stock release: without it, git in the VM can see an empty index
+  after the host replaces it (see the blocker below). It goes back to stock
+  once upstream ships the fix.
 - **Built by** `scripts/build-microsandbox.sh` into `priv/microsandbox`
   (`bin/msb`, `lib/libkrunfw.so.5.6.1`), so the release carries it and
   `msb` finds its kernel beside `bin/`. Everything is pinned there: the
-  source revision, and the SHA-256 of the guest agent (embedded in `msb`)
-  and of `libkrunfw`. The package build runs it once, on Ubuntu 22.04, the
+  fork commit (fetched by hash, refused with local changes), and the SHA-256
+  of the guest agent (embedded in `msb`) and of `libkrunfw`. `VERSION`
+  (`0.7.15+6626e7cb2`) names the build, so `scripts/host-mdt.sh` rebuilds
+  when the pin moves. The package build runs it once, on Ubuntu 22.04, the
   older glibc of the two packages; `msb` links only glibc. In a source
   checkout, run it once yourself.
 - **Its own home:** VMs, images and msb's SSH keys live in
@@ -947,9 +953,11 @@ MDT brings its own microsandbox; nothing needs installing on the machine.
   MDT rewrites it on start, so its path survives an update that moves the
   runtime.
 - **Never** the `msb` on your PATH: MDT has no fallback to it.
-- **Upgrading microsandbox** means changing the pins in the script and
-  checking the patch still applies. A VM keeps running on the binary it
-  started with until it is stopped.
+- **Upgrading microsandbox** means rebasing the fix in the fork onto the
+  new release, then changing the commit, `UPSTREAM` and the two checksums in
+  the script. A VM keeps running on the binary it started with until it is
+  stopped. A newer `msb` may migrate the database in MDT's home, so going
+  back to an older one isn't safe.
 
 ### Shared folders
 
@@ -995,8 +1003,8 @@ notifications. The patched runtime was subsequently validated as described below
 Microsandbox v0.7.14's directory mount backend inherits five-second entry
 and attribute caches. Its mount options expose no cache override.
 
-A [local runtime patch](../priv/sandbox/microsandbox-live-sharing.md) now
-retains those normal metadata caches and returns `ESTALE` for stale Linux
+A [runtime fix](../priv/sandbox/microsandbox-live-sharing.md), first a local
+patch and now a commit in MDT's fork, retains those normal metadata caches and returns `ESTALE` for stale Linux
 inode references so the guest can retry lookup. The earlier zero-timeout
 variant was removed after a resource sample measured about 5.8 host CPU cores
 in the VM process. The candidate is now built with release optimizations.

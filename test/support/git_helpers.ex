@@ -76,6 +76,13 @@ defmodule MDTClient.GitHelpers do
     commit
   end
 
+  @doc "Installs the hook `name` in the worktree at `path`, refusing whatever it is asked."
+  def failing_hook!(path, name) do
+    hook = Path.join([path, ".git", "hooks", name])
+    File.write!(hook, "#!/bin/sh\necho \"#{name} hook refused\"\nexit 1\n")
+    File.chmod!(hook, 0o755)
+  end
+
   def empty_commits(path, count) do
     for index <- 1..count do
       git!(path, ["commit", "--allow-empty", "--quiet", "-m", "empty #{index}"])

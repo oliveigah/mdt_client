@@ -15,6 +15,7 @@ defmodule MDTClientWeb.GitLive.Components do
   alias MDTClient.Git.Stash
   alias MDTClient.Git.Tag
   alias MDTClientWeb.GitLive.Graph.Layout
+  alias MDTClientWeb.GitLive.Push
 
   @row_height 28
   @lane_width 16
@@ -1071,17 +1072,44 @@ defmodule MDTClientWeb.GitLive.Components do
           >
             <.icon name="hero-arrow-down-circle" class="size-3.5" /> Pull
           </button>
-          <button
-            type="button"
-            id="git-push"
-            phx-click="request"
-            phx-value-action="push"
-            disabled={not is_nil(@pending) or @snapshot.detached?}
-            title="Push the current branch"
-            class={toolbar_button()}
-          >
-            <.icon name="hero-arrow-up-circle" class="size-3.5" /> Push
-          </button>
+          <div class="group/push flex items-stretch rounded transition-colors has-[button:enabled:hover]:bg-hover/60">
+            <button
+              type="button"
+              id="git-push"
+              phx-click="request"
+              phx-value-action="push"
+              disabled={not is_nil(@pending) or @snapshot.detached?}
+              title="Push the current branch"
+              class={[toolbar_button(), "rounded-r-none"]}
+            >
+              <.icon name="hero-arrow-up-circle" class="size-3.5" /> Push
+            </button>
+            <button
+              type="button"
+              id="git-push-options"
+              phx-click="open_menu"
+              phx-value-kind="push"
+              phx-value-id="current"
+              disabled={not is_nil(@pending) or @snapshot.detached?}
+              aria-haspopup="menu"
+              aria-expanded={to_string(match?(%{kind: :push}, @menu))}
+              title="More ways to push"
+              aria-label="More ways to push"
+              class={[
+                toolbar_button(),
+                "rounded-l-none border-l border-transparent px-1 group-hover/push:border-line-soft",
+                match?(%{kind: :push}, @menu) && "bg-active text-ink"
+              ]}
+            >
+              <.icon
+                name="hero-chevron-down"
+                class={[
+                  "size-3 transition-transform duration-150",
+                  match?(%{kind: :push}, @menu) && "rotate-180"
+                ]}
+              />
+            </button>
+          </div>
         </div>
 
         <div class="mx-0.5 h-4 w-px bg-line"></div>
@@ -2456,6 +2484,84 @@ defmodule MDTClientWeb.GitLive.Components do
     """
   end
 
+  attr :branch, :map, required: true
+  attr :tab, :map, required: true
+
+  # Pushing without hooks and choosing an upstream work on any branch; forcing
+  # needs an upstream on a remote, the history it replaces.
+  defp push_menu(assigns) do
+    assigns = assign(assigns, :target, Push.upstream_target(assigns.tab))
+
+    ~H"""
+    <.context_menu
+      id="git-push-menu"
+      anchor={@tab.menu[:anchor] || "git-push-options"}
+      at={@tab.menu[:at]}
+      label={"Ways to push #{@branch.name}"}
+    >
+      <.menu_item
+        id="git-menu-push-no-verify"
+        icon="hero-forward"
+        title="Push without running the pre-push hook (git push --no-verify)"
+        phx-click="request"
+        phx-value-action="push_no_verify"
+      >
+        Push without hooks
+      </.menu_item>
+      <.menu_item
+        id="git-menu-push-set-upstream"
+        icon="hero-link"
+        disabled={@tab.remotes == []}
+        title={
+          if(@tab.remotes == [],
+            do: "This repository has no remote",
+            else: "Choose the remote branch to push to and track from now on"
+          )
+        }
+        phx-click="choose_upstream"
+      >
+        Push and set upstream…
+      </.menu_item>
+
+      <.menu_separator />
+
+      <.menu_item
+        id="git-menu-force-push-with-lease"
+        icon="hero-shield-check"
+        disabled={is_nil(@target)}
+        title={
+          if(@target,
+            do:
+              "Replace #{@target.remote}/#{@target.destination} only if it still matches " <>
+                "your last fetch",
+            else: "#{@branch.name} has no upstream on a remote to replace"
+          )
+        }
+        phx-click="request"
+        phx-value-action="force_push_with_lease"
+      >
+        Force push with lease
+      </.menu_item>
+      <.menu_item
+        id="git-menu-force-push"
+        icon="hero-exclamation-triangle"
+        danger
+        disabled={is_nil(@target)}
+        title={
+          if(@target,
+            do: "Replace #{@target.remote}/#{@target.destination} even if it changed",
+            else: "#{@branch.name} has no upstream on a remote to replace"
+          )
+        }
+        phx-click="request"
+        phx-value-action="force_push"
+      >
+        Force push…
+      </.menu_item>
+    </.context_menu>
+    """
+  end
+
   ## Context menus
 
   @doc """
@@ -2477,6 +2583,8 @@ defmodule MDTClientWeb.GitLive.Components do
         <.file_menu file={file} side={@tab.menu.side} tab={@tab} />
       <% {:stash, stash} -> %>
         <.stash_menu stash={stash} tab={@tab} />
+      <% {:push, branch} -> %>
+        <.push_menu branch={branch} tab={@tab} />
       <% nil -> %>
     <% end %>
     """
@@ -2507,6 +2615,13 @@ defmodule MDTClientWeb.GitLive.Components do
     case Enum.find(tab.stashes, &(&1.commit == id)) do
       nil -> nil
       stash -> {:stash, stash}
+    end
+  end
+
+  defp menu_target(%{menu: %{kind: :push}} = tab) do
+    case Enum.find(tab.snapshot.branches, & &1.current?) do
+      nil -> nil
+      branch -> {:push, branch}
     end
   end
 
@@ -3244,6 +3359,7 @@ defmodule MDTClientWeb.GitLive.Components do
       <form
         :if={@staged != []}
         id="git-commit-form"
+        phx-change="commit_draft"
         phx-submit="commit_staged"
         class="flex flex-col gap-1.5 rounded-md border border-line-soft p-2"
       >
@@ -3252,10 +3368,25 @@ defmodule MDTClientWeb.GitLive.Components do
           name="message"
           id="git-commit-message"
           rows="3"
+          phx-debounce="300"
           placeholder="Commit message"
           aria-label="Commit message"
           class="w-full rounded border border-line bg-deep px-2 py-1 font-mono text-[11px] leading-relaxed text-ink outline-none transition-colors placeholder:text-faint focus:border-accent/60"
         >{@tab.commit_message}</textarea>
+        <label
+          for="git-commit-no-verify"
+          title="Commit without running the pre-commit and commit-msg hooks (git commit --no-verify)"
+          class="flex w-fit cursor-pointer select-none items-center gap-2 text-[11px] text-muted transition-colors hover:text-ink"
+        >
+          <input
+            type="checkbox"
+            id="git-commit-no-verify"
+            name="no_verify"
+            value="true"
+            checked={@tab.commit_no_verify?}
+            class="size-3.5 cursor-pointer accent-accent"
+          /> Skip hooks
+        </label>
         <.button
           type="submit"
           id="git-commit-submit"
