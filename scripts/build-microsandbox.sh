@@ -29,7 +29,8 @@ REVISION=6626e7cb280069f522c03a815c760ace8931b370
 # The upstream release it is based on: its guest agent and libkrunfw, and what
 # `msb --version` prints.
 UPSTREAM=0.7.15
-# This runtime's identity, written to VERSION; scripts/host-mdt.sh compares it.
+# This runtime's identity, written to VERSION: a build whose VERSION differs
+# is stale.
 VERSION=$UPSTREAM+${REVISION:0:9}
 LIBKRUNFW=libkrunfw.so.5.6.1
 # From the v0.7.15 release's asset digests.

@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 # mdt: ask MDT, the user's control panel, for access. Written by MDT to
 # /mnt/mdt/bin/mdt. It reaches MDT over vsock (socat), and can only read the
-# grants, the host's description and the forwarded ports, ask the user to
-# turn a grant on, and ask them to run a command on their machine. See
-# MDTClient.Sandbox.Channel.
+# grants and the host's description, ask the user to turn a grant on, and
+# ask them to run a command on their machine. See MDTClient.Sandbox.Channel.
 set -u
 
 channel=${MDT_CHANNEL:-VSOCK-CONNECT:2:5000}
@@ -25,10 +24,6 @@ mdt - ask MDT, the user's control panel, for access
 
   mdt host
       The user's machine: OS, architecture, shell, shared folders, tools.
-
-  mdt ports
-      Servers listening in this VM that show up on the user's machine, with
-      their URLs there, and those that don't, with why.
 
   mdt run --reason "why it must run on the user's machine" [--dir DIR] [--timeout 120] [--wait 60] [--] COMMAND [ARG...]
   mdt run --reason "..." [options] <<'EOF'
@@ -276,9 +271,6 @@ case $command in
     ;;
   host)
     send '{"command":"host"}'
-    ;;
-  ports)
-    send '{"command":"ports"}'
     ;;
   request | ask)
     identify

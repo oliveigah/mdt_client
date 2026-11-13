@@ -138,7 +138,6 @@ defmodule MDTClientWeb.SandboxLive do
                   grant_map={@grant_map}
                   waiting={@waiting}
                   running={@running}
-                  ports={@ports}
                   recent={@recent}
                   stats={@stats}
                   now={@now}

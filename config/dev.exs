@@ -18,6 +18,11 @@ config :mdt_client, MDTClientWeb.Endpoint,
     tailwind: {Tailwind, :install_and_run, [:mdt_client, ~w(--watch)]}
   ]
 
+# Live reload watches only the folders its patterns (config/runtime.exs) look
+# in, not the whole project: an agent's edit in its worktree under .worktrees/
+# would otherwise reload the page.
+config :phoenix_live_reload, :dirs, ["lib", "priv/static"]
+
 # ## SSL Support
 #
 # In order to use HTTPS in development, a self-signed

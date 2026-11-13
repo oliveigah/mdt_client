@@ -5,35 +5,47 @@ This is a web application written using the Phoenix web framework.
 - Use `mix precommit` alias when you are done with all changes and fix any pending issues
 - Use the already included and available `:req` (`Req`) library for HTTP requests, **avoid** `:httpoison`, `:tesla`, and `:httpc`. Req is included by default and is the preferred HTTP client for Phoenix apps
 
-### The MDT that runs is not this checkout
+### In the agent sandbox, work in a worktree
 
-The user's MDT, the one holding the vault and the agent sandbox's VM, runs
-from a separate clone at `~/projects/mdt/mdt_host`, pinned to a commit and
-managed with `scripts/host-mdt.sh` (`install [COMMIT]`, `start`, `status`).
-Edits here reach it only when the user commits them and installs that commit,
-which means stopping it, and its VM, first. Never edit, build, restart or
-share into the VM that clone, and never start a server from this checkout on
-port 4000 or with the real `~/.mdt_client`.
+You are in MDT's agent sandbox when `/mnt/mdt` exists. The user's MDT, the
+one running your VM, runs from this checkout, and its dev server loads
+whatever lands here. So never edit, build or test in the checkout itself: an
+unfinished edit would run in the process holding your own VM, and a build
+with other tools would break the user's `_build`.
 
-`.tool-versions` names the Erlang and Elixir the host builds with. `_build`
-and `deps` are shared with the VM, so both sides must build with exactly
-those versions.
+1. Start every task in a worktree of your own, from the checkout:
 
-### Working inside the agent sandbox
+       git worktree add .worktrees/<name> -b <name> master
+       cd .worktrees/<name> && mise install && mix deps.get
 
-You are in MDT's agent sandbox when `/mnt/mdt` exists. This checkout is
-mounted read-write from the host, `_build` and `deps` included.
+   It must be under `.worktrees/`: that folder is shared with the user, and
+   ignored by git and by the dev server. A worktree anywhere else lives only
+   on the VM's disk, where the user can't see it and recreating the VM
+   deletes it.
+2. Work, build and test only there. `.tool-versions` pins the Erlang and
+   Elixir the user builds with; never build with another
+   (`mise exec elixir@...`). To see it running, use the run-mdt skill with a
+   port and folder of your own (`PORT=41xx MDT_RUN_DIR=/tmp/mdt-run-<name>`).
+   The user can't open it from their machine (see `docs/todo.md`), so show
+   it with screenshots.
+3. The VM cannot run VMs: creating, starting and stopping a VM, the proxy in
+   front of a real VM and the `mdt` CLI over vsock can't be tried here. Cover
+   them with tests (they run without msb), and say in your handoff what the
+   user should check once it's merged.
+4. When it's ready and `mix precommit` passes, commit on your branch, then
+   bring it onto `master` from the worktree:
 
-- Run `mise install` here before any `mix` command, and never build this
-  checkout with another version (`mise exec elixir@...`): the host's builds
-  would break.
-- To see a change running, use the run-mdt skill: port 4100, throwaway data in
-  `/tmp/mdt-run`. MDT forwards it to the user; `mdt ports` gives the URL.
-- The VM cannot run VMs. Creating, starting and stopping a VM, the proxy in
-  front of a real VM and the `mdt` CLI over vsock can't be exercised here:
-  cover them with tests (they run without msb), and say in your handoff what
-  needs checking on the host once the user installs your commit.
-- Leave the host alone: don't run `msb`, and don't touch `~/.mdt_client`.
+       git rebase master
+       git -C ../.. merge --ff-only <name>
+
+   That is when the user's MDT picks it up. If the merge refuses, because
+   `master` moved or the user has uncommitted changes in the same files,
+   rebase again or stop and tell the user. Never stash, reset, check out or
+   force anything in the checkout.
+5. Then clean up from the checkout:
+   `cd ../.. && git worktree remove .worktrees/<name> && git branch -d <name>`.
+
+Don't run `msb`, and don't touch `~/.mdt_client`: both are the user's.
 
 ### Phoenix v1.8 guidelines
 

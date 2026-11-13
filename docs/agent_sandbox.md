@@ -77,8 +77,7 @@ folders with it, and sits between it and the network.
 | 2026-11-12 | Per command, you choose whether its output goes straight back to the agent or waits for you to release it.                                                       |
 | 2026-11-12 | MDT describes your machine to agents (`mdt host`, `/mnt/mdt/host.md`): OS, architecture, shell, shares, tools, your notes. Agents never probe it themselves.     |
 | 2026-11-12 | Host commands cover most of what file grants were for (move the work to the value, not the value to the VM). File grants stay for long-lived processes in the VM. |
-| 2026-11-13 | Ports listening in the VM are forwarded by themselves to the VM's own loopback address on your machine (`127.77.X.Y`), with the same numbers. No hostname.      |
-| 2026-11-13 | Forwarding goes over msb's SSH server with an OpenSSH control master and MDT's own key, not msb's published ports, which need restarts and miss loopback.      |
+| 2026-11-13 | Port forwarding from the VM is dropped for now. What was built, and the options, are in `docs/todo.md`.                                                          |
 | 2026-11-13 | MDT ships its own msb (v0.7.14 with the live-sharing patch, and its libkrunfw) and keeps its state in its own microsandbox home. An `msb` you install is never used. Now built from the fork (below). |
 | 2026-11-13 | `msb` is built from MDT's fork (oliveigah/microsandbox, commit `6626e7cb2`: v0.7.15 plus the ESTALE fix) until upstream takes the fix. Replaces the patch file. |
 | 2026-11-13 | Disk is a setting: the root disk (64 GiB, sparse) and a write budget per read-write folder per boot (64 GiB), instead of microsandbox's silent 4 GiB for both. |
@@ -98,7 +97,6 @@ folders with it, and sits between it and the network.
 | Image                | `MDTClient.Sandbox.Image`                        | See [The image](#the-image).                                                                                                                                                                              |
 | Inbox                | `MDTClient.Sandbox.Inbox`                        | `/mnt/mdt/env.sh`, `bin/mdt`, `git/<host>` for the credential helper, `tokens/<grant>` for every token grant, `files/` for file grants that are on, `host.md`.                                           |
 | Host commands        | `…HostCommand`, `…HostRun`, `…HostInfo`          | Checking and describing an ask (place, facts, hints); running it under `timeout` with capped output and a killable process group; the machine's description. See [Host commands](#host-commands).      |
-| Ports                | `…Ports`, `…Forwarder`, `…Forwarder.SSH`         | The VM's address, reading `ss`, what to forward and why not; one process per running VM keeping the SSH connection and its forwards. See [Ports](#ports).                                              |
 | Notifications        | `…DesktopNotice`, `Desktop.Notifications`        | One per approval waiting for you, closed once it is decided; a click brings MDT forward on it. A small D-Bus client of MDT's own (`MDTClient.DBus`). See [Desktop notifications](#desktop-notifications). |
 
 Tried live on 2026-11-12: build, create, lock (VM stopped), unlock, start;
@@ -655,7 +653,6 @@ mdt request --need "the access, and the host" --reason "…"
 mdt wait ASK_ID [--wait 60]
 mdt run --reason "…" -- COMMAND              see Host commands
 mdt host                                     see Host commands
-mdt ports                                    see Ports
 ```
 
 - `request` asks you to turn a grant on, by id or name. It shows as an
@@ -800,82 +797,9 @@ the same bytes as the `grants` and `request` asks already checked there.
 `mdt host` prints, and `/mnt/mdt/host.md` holds: OS and version,
 architecture, kernel, login shell, home folder, the shared folders and
 their modes, and which of a fixed list of command-line tools are on your
-login shell's `PATH`, with their versions. Then the VM's address on your
-machine (see [Ports](#ports)) and your own notes about the machine, from
-Settings. MDT collects it when it unlocks, and when you ask from Settings;
-agents never probe the host to find out.
-
-## Ports
-
-A server an agent starts in the VM shows up on your machine by itself. A
-Phoenix server on port 4000 in the VM is `http://127.77.12.34:4000` here
-within a few seconds, and goes away when it stops.
-
-### The address
-
-- Each identity's VM has a fixed address on your machine, `127.77.X.Y`,
-  derived from the identity. Linux sends all of `127.0.0.0/8` to loopback,
-  so it needs no setup. Ports keep their numbers without colliding with
-  your machine's own: your `localhost:4000` stays yours.
-- The overview shows the address and the ports up there. Agents learn it
-  from `mdt host` (`/mnt/mdt/host.md`), and `mdt ports` lists what is
-  forwarded, so they can give you the URL.
-- No name for it. A name needs root once (`/etc/hosts`), and dev servers
-  that check the Host header (Vite, Rails, Django) refuse unknown names but
-  accept addresses. `*.localhost` names always go to `127.0.0.1`, which
-  brings the collisions back.
-- Browsers treat the address as a site of its own, so the VM's pages never
-  see the cookies of your other local apps, and as a secure context (all of
-  `127.0.0.0/8` is), so service workers and WebAuthn work.
-
-### What is forwarded
-
-- Every TCP port listening in the VM, read every 2 seconds with `ss -ltnpH`,
-  with the process that holds it. A server on the VM's `127.0.0.1` or `::1`
-  works: connections are made from inside the VM, to loopback when the
-  server listens there or on every address.
-- Each to the same port on the address. Listed with the reason, and not
-  forwarded:
-    - ports below 1024: listening on one needs root on your machine
-      (`ip_unprivileged_port_start`);
-    - a port your machine already holds on every address;
-    - anything past 64 ports.
-
-### How it works
-
-- MDT keeps one SSH connection to the VM: OpenSSH as a control master,
-  through `msb ssh serve VM --stdio`. msb's SSH server carries forwarded
-  connections (`direct-tcpip`) over its own channel to the VM's agent, which
-  connects inside the VM; the VM's network isn't involved. Forwards are
-  added and removed on that connection (`ssh -O forward|cancel`), and the
-  listing runs over it too.
-- It uses a key of its own, made on first use in the identity's sandbox
-  folder and added with `msb ssh authorize` on each start. It reads no
-  `~/.ssh/config` (`-F /dev/null`) and never prompts (`BatchMode`).
-- It runs while the VM runs. If the connection drops, MDT connects again
-  every few seconds. Stopping the VM, locking MDT or quitting it ends the
-  connection, and its forwards with it; if MDT dies, a wrapper ends ssh.
-- Not msb's own published ports (`--port`): each new one needs a restart,
-  and they arrive on the VM's network interface, so servers on the VM's
-  loopback can't be reached.
-
-### Safety
-
-- Connections go one way, from your machine into the VM. Nothing new
-  reaches your machine from the VM.
-- Forwards listen on the VM's address only, never on every address, so
-  other machines can't reach them.
-- As with any local dev server, any program on your machine can connect,
-  and a VM page in your browser is untrusted content, like a website. MDT's
-  own pages stay out of its reach: their session cookie is
-  `SameSite=Strict`, the endpoint checks origins, and LiveView needs a token
-  from MDT's own page. The desktop app's webview doesn't share your
-  browser's cookies anyway.
-- MDT's key opens SSH to every VM in MDT's microsandbox home (every
-  identity's on this machine), since msb keeps one list of keys per home.
-  VMs of an `msb` you run yourself keep their own list. The key is as
-  sensitive as the keys in `~/.ssh`, and sits in the identity's folder,
-  readable by you only. Anything running as you can already run `msb exec`.
+login shell's `PATH`, with their versions. Then your own notes about the
+machine, from Settings. MDT collects it when it unlocks, and when you ask
+from Settings; agents never probe the host to find out.
 
 ## VM
 
@@ -939,8 +863,8 @@ MDT brings its own microsandbox; nothing needs installing on the machine.
   `msb` finds its kernel beside `bin/`. Everything is pinned there: the
   fork commit (fetched by hash, refused with local changes), and the SHA-256
   of the guest agent (embedded in `msb`) and of `libkrunfw`. `VERSION`
-  (`0.7.15+6626e7cb2`) names the build, so `scripts/host-mdt.sh` rebuilds
-  when the pin moves. The package build runs it once, on Ubuntu 22.04, the
+  (`0.7.15+6626e7cb2`) names the build: a `priv/microsandbox/VERSION` that
+  differs means the pin moved and the runtime needs rebuilding. The package build runs it once, on Ubuntu 22.04, the
   older glibc of the two packages; `msb` links only glibc. In a source
   checkout, run it once yourself.
 - **Its own home:** VMs, images and msb's SSH keys live in
@@ -1108,9 +1032,7 @@ The tool is an entry in `MDTClient.Tools`.
 - **Overview:**
     - VM status: start, stop, "recreate to apply";
     - waiting approvals of both types;
-    - grants that are on, with time left;
-    - the VM's address on this machine and the ports forwarded there, as
-      links, with those that aren't and why.
+    - grants that are on, with time left.
 - **Grants:**
     - the list, each with what it is for, a switch and duration choices
       (15 min, 1 h, 4 h, until turned off);
@@ -1158,8 +1080,6 @@ Each has one job. Proposed modules sit under `lib/mdt_client/sandbox/`.
 | `HostCommand`          | Checks an ask to run a command and describes it: where it runs, facts, hints           |
 | `HostRun`              | Runs an approved command on the host: time limit, capped output, process group         |
 | `HostInfo`             | What agents are told about this machine (`mdt host`, `host.md`)                        |
-| `Ports`                | The VM's address here; reads `ss` and decides what to forward, and why not             |
-| `Forwarder`            | Keeps the SSH connection to a running VM and its forwards in step with the VM's ports  |
 | `VMMemory`             | The OptMem folder and its Transfer participant                                         |
 | `DesktopNotice`        | The desktop notification's text for a waiting approval                                 |
 
@@ -1177,8 +1097,8 @@ Each has one job. Proposed modules sit under `lib/mdt_client/sandbox/`.
    network grant off closes its open connections.
 6. A locked MDT swaps nothing. A stopped MDT leaves the VM without internet.
 7. Nothing in the VM can reach MDT's web server. The agent channel offers only
-   reading the grants (never values), the host's description and the
-   forwarded ports, asking for a grant, and asking to run a command.
+   reading the grants (never values) and the host's description, asking for
+   a grant, and asking to run a command.
 8. Nothing in the VM can approve its own requests.
 9. Nothing runs on the host for the VM without your approval of its exact
    text, each time. What runs is the text on the card.

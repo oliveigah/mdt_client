@@ -40,3 +40,6 @@ mdt_client-*.tar
 # In case you use Node.js/npm, you want to ignore these.
 npm-debug.log
 /assets/node_modules/
+
+# Agents in the sandbox work in worktrees here; see AGENTS.md.
+/.worktrees/
