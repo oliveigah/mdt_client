@@ -2,6 +2,7 @@
 **
 !scripts/
 !scripts/linux-packages.Dockerfile
+!scripts/build-microsandbox.sh
 !mix.exs
 !mix.lock
 !.gitignore
@@ -20,3 +21,5 @@ priv/static/assets/
 priv/static/cache_manifest.json
 src-tauri/target/
 src-tauri/gen/
+# Built inside the image, for the package's glibc.
+priv/microsandbox/

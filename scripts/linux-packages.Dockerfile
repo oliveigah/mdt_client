@@ -1,5 +1,34 @@
 # syntax=docker/dockerfile:1
 
+# MDT ships its own microsandbox runtime: a pinned msb with MDT's patch and
+# its libkrunfw (see scripts/build-microsandbox.sh). It links only glibc, so
+# it is built once, on the older glibc of the two package targets, and both
+# packages carry the same files.
+FROM docker.io/library/ubuntu:22.04 AS microsandbox-build
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential ca-certificates curl git \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl --proto '=https' --tlsv1.2 --fail --silent --show-error \
+      --retry 5 --retry-delay 2 --retry-all-errors \
+      https://sh.rustup.rs -o /tmp/rustup.sh \
+    && sh /tmp/rustup.sh -y --profile minimal --default-toolchain 1.98.1 \
+    && rm /tmp/rustup.sh
+ENV PATH="/root/.cargo/bin:${PATH}"
+ENV CARGO_HTTP_MULTIPLEXING=false CARGO_NET_RETRY=10
+
+WORKDIR /src
+COPY scripts/build-microsandbox.sh ./scripts/
+COPY priv/sandbox/microsandbox-live-sharing.patch ./priv/sandbox/
+ARG TARGETARCH
+RUN --mount=type=cache,id=mdt-cargo-registry,target=/root/.cargo/registry \
+    --mount=type=cache,id=mdt-cargo-git,target=/root/.cargo/git \
+    --mount=type=cache,id=mdt-microsandbox-target-${TARGETARCH},target=/src/tmp/microsandbox-target \
+    --mount=type=cache,id=mdt-microsandbox-downloads,target=/src/tmp/microsandbox-downloads \
+    bash scripts/build-microsandbox.sh /out/microsandbox
+
+
 # Releases include Erlang native libraries. Build each package on the distro
 # family where it will run so those libraries use the target OpenSSL ABI.
 FROM docker.io/hexpm/elixir:1.19.4-erlang-28.2-ubuntu-jammy-20260509 AS deb-build
@@ -43,6 +72,7 @@ COPY config ./config
 COPY lib ./lib
 COPY assets ./assets
 COPY priv ./priv
+COPY --from=microsandbox-build /out/microsandbox ./priv/microsandbox
 COPY src-tauri ./src-tauri
 COPY .gitignore ./
 
@@ -135,6 +165,7 @@ COPY config ./config
 COPY lib ./lib
 COPY assets ./assets
 COPY priv ./priv
+COPY --from=microsandbox-build /out/microsandbox ./priv/microsandbox
 COPY src-tauri ./src-tauri
 COPY .gitignore ./
 

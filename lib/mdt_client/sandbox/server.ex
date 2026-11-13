@@ -193,6 +193,7 @@ defmodule MDTClient.Sandbox.Server do
     state = write_inbox(state)
     if is_nil(saved[:ca]), do: persist(state)
     state = if external?(), do: probe_host(state), else: state
+    if external?(), do: write_launcher()
     Enum.each(state.grants, &schedule_expiry/1)
     # After a restart of this process, the proxy tells it again how it is.
     MDTClient.Sandbox.Egress.report_again(username)
@@ -207,6 +208,21 @@ defmodule MDTClient.Sandbox.Server do
 
   @impl true
   def handle_continue(:check, state), do: {:noreply, check(state)}
+
+  # The launcher Zed's SSH config names; a failure only matters there. A
+  # missing runtime is shown in the UI already.
+  defp write_launcher do
+    case Msb.write_launcher() do
+      :ok ->
+        :ok
+
+      {:error, :no_runtime} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("could not write the msb launcher: #{inspect(reason)}", system: :sandbox)
+    end
+  end
 
   # Tests run without touching microsandbox.
   defp external?,
@@ -244,7 +260,7 @@ defmodule MDTClient.Sandbox.Server do
        memory: Map.put(state.memory, :host?, Memory.host_memory?()),
        folders: state.folders,
        proxy: Map.update!(state.proxy, :port, &(&1 || state.settings.proxy_port)),
-       tools: %{msb: Msb.executable(), podman: Image.podman?()},
+       tools: %{msb: Msb.executable(), launcher: Msb.launcher(), podman: Image.podman?()},
        inbox: inbox_dir(state),
        host: Map.put(state.host, :text, host_text(state)),
        ports: state.ports
@@ -1976,6 +1992,8 @@ defmodule MDTClient.Sandbox.Server do
       shell: "/bin/bash",
       cpus: state.settings.cpus,
       memory_gib: state.settings.memory_gib,
+      disk_gib: state.settings.disk_gib,
+      write_budget_gib: state.settings.write_budget_gib,
       proxy_port: state.settings.proxy_port,
       vsock: Channel.socket_path(state.username),
       mounts:
@@ -2432,6 +2450,8 @@ defmodule MDTClient.Sandbox.Server do
     fields = [
       {:cpus, attrs["cpus"], &cast_int(&1, 1, 64)},
       {:memory_gib, attrs["memory_gib"], &cast_int(&1, 1, 512)},
+      {:disk_gib, attrs["disk_gib"], &cast_int(&1, 4, 4096)},
+      {:write_budget_gib, attrs["write_budget_gib"], &cast_int(&1, 1, 4096)},
       {:hold_seconds, attrs["hold_seconds"], &cast_int(&1, 30, 600)},
       {:proxy_port, attrs["proxy_port"], &cast_int(&1, 1024, 65_535)},
       {:containerfile, attrs["containerfile"], &cast_containerfile/1},

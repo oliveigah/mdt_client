@@ -414,7 +414,7 @@ defmodule MDTClientWeb.SandboxLive.Settings do
 
         <.card id="settings-vm" title="Size and timing">
           <.form for={@vm_form} id="vm-form" phx-submit="save_settings" class="space-y-4">
-            <div class="grid gap-4 sm:grid-cols-4">
+            <div class="grid gap-4 sm:grid-cols-3">
               <div>
                 <.input field={@vm_form[:cpus]} type="number" label="CPUs" min="1" max="64" />
                 <p :if={@vm_errors[:cpus]} class="mt-1 text-[11px] text-bad">{@vm_errors[:cpus]}</p>
@@ -429,6 +429,30 @@ defmodule MDTClientWeb.SandboxLive.Settings do
                 />
                 <p :if={@vm_errors[:memory_gib]} class="mt-1 text-[11px] text-bad">
                   {@vm_errors[:memory_gib]}
+                </p>
+              </div>
+              <div>
+                <.input
+                  field={@vm_form[:disk_gib]}
+                  type="number"
+                  label="Root disk, GiB"
+                  min="4"
+                  max="4096"
+                />
+                <p :if={@vm_errors[:disk_gib]} class="mt-1 text-[11px] text-bad">
+                  {@vm_errors[:disk_gib]}
+                </p>
+              </div>
+              <div>
+                <.input
+                  field={@vm_form[:write_budget_gib]}
+                  type="number"
+                  label="Folder writes, GiB"
+                  min="1"
+                  max="4096"
+                />
+                <p :if={@vm_errors[:write_budget_gib]} class="mt-1 text-[11px] text-bad">
+                  {@vm_errors[:write_budget_gib]}
                 </p>
               </div>
               <div>
@@ -457,16 +481,19 @@ defmodule MDTClientWeb.SandboxLive.Settings do
               </div>
             </div>
             <p class="text-[10px] leading-4 text-faint">
+              The root disk holds what the image and the VM write outside its folders (apt packages, /tmp, /var); it takes space on this machine only as it fills, and starts empty when the VM is recreated. Folder writes is how much the VM may add to each read-write folder (Home, Cache, its memory, your shares) per boot, so a runaway agent can't fill your disk. Both need the VM recreated.
+            </p>
+            <p class="text-[10px] leading-4 text-faint">
               Hold is how long a request waits for your decision before it gives up; the image sets HEX_HTTP_TIMEOUT above it, since Hex otherwise gives up after 15 seconds. A new proxy port needs the VM recreated, since microsandbox pins it at creation.
             </p>
             <div class="flex items-center gap-2">
               <span class="flex-1 text-[11px] text-muted">
                 <%= if @tools.msb do %>
-                  <.icon name="hero-check-circle-micro" class="size-3.5 text-ok" /> msb at
+                  <.icon name="hero-check-circle-micro" class="size-3.5 text-ok" /> MDT's msb at
                   <span class="font-mono">{@tools.msb}</span>
                 <% else %>
                   <.icon name="hero-exclamation-triangle-micro" class="size-3.5 text-warn" />
-                  msb is not installed
+                  MDT's microsandbox runtime is missing
                 <% end %>
               </span>
               <.button type="submit" id="vm-save" variant="primary">Save</.button>

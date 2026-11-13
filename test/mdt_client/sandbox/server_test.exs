@@ -111,6 +111,46 @@ defmodule MDTClient.Sandbox.ServerTest do
     assert Sandbox.snapshot(username).vm.stale?
   end
 
+  test "a new disk size or folder write budget needs the VM recreated", %{username: username} do
+    pid = GenServer.whereis(Store.via(Server, username))
+
+    # The spec the VM was created with: today's settings, image box:1.
+    :sys.replace_state(pid, fn state ->
+      spec = %{
+        name: state.vm.name,
+        image: "box:1",
+        shell: "/bin/bash",
+        cpus: state.settings.cpus,
+        memory_gib: state.settings.memory_gib,
+        disk_gib: state.settings.disk_gib,
+        write_budget_gib: state.settings.write_budget_gib,
+        proxy_port: state.settings.proxy_port,
+        vsock: MDTClient.Sandbox.Channel.socket_path(username),
+        mounts: [
+          {Path.join(state.dir, "inbox"), "/mnt/mdt", :ro},
+          {state.folders.home, "/root", :rw},
+          {state.folders.optmem, "/root/.optmem", :rw},
+          {state.folders.cache, "/cache", :rw}
+        ]
+      }
+
+      %{
+        state
+        | vm: %{state.vm | exists?: true},
+          image: %{state.image | tag: "box:1"},
+          created_spec: :erlang.phash2(spec)
+      }
+    end)
+
+    refute Sandbox.snapshot(username).vm.stale?
+    assert {:ok, _settings} = Sandbox.update_settings(username, %{"disk_gib" => "128"})
+    assert Sandbox.snapshot(username).vm.stale?
+    assert %{disk_gib: 128, write_budget_gib: 64} = Sandbox.snapshot(username).settings
+
+    assert {:error, %{write_budget_gib: _}} =
+             Sandbox.update_settings(username, %{"write_budget_gib" => "0"})
+  end
+
   test "creating checks the choices before touching anything", %{username: username} do
     assert Sandbox.recreate_vm(username) == {:error, :no_image}
 

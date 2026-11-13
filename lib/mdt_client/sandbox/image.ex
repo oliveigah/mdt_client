@@ -103,11 +103,11 @@ defmodule MDTClient.Sandbox.Image do
   The shell script that builds `ref` from `dir` and loads it into
   microsandbox. It leaves `versions.txt` (what mise installed) and `size` in
   `dir`, read without running anything from the image. Paths are quoted, so
-  spaces in a home folder are fine.
+  spaces in a home folder are fine. It runs with `Msb.env/0`, whose
+  `MSB_PATH` is MDT's `msb`.
   """
   @spec build_script(Path.t(), String.t()) :: String.t()
   def build_script(dir, ref) do
-    msb = Msb.executable() || "msb"
     archive = Path.join(dir, "image.tar")
     q = &shell_quote/1
 
@@ -122,7 +122,7 @@ defmodule MDTClient.Sandbox.Image do
     echo "==> handing the image to microsandbox"
     rm -f #{q.(archive)}
     podman save --format docker-archive --output #{q.(archive)} #{q.(ref)}
-    #{q.(msb)} load --input #{q.(archive)} --tag #{q.(ref)}
+    "$MSB_PATH" load --input #{q.(archive)} --tag #{q.(ref)}
     rm -f #{q.(archive)}
     echo "==> ready: #{ref}"
     """

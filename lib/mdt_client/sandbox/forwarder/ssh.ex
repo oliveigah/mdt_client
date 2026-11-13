@@ -144,7 +144,7 @@ defmodule MDTClient.Sandbox.Forwarder.SSH do
 
   defp msb do
     case Msb.executable() do
-      nil -> {:error, "msb isn't installed"}
+      nil -> {:error, "MDT's msb is missing"}
       path -> {:ok, path}
     end
   end

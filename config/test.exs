@@ -19,6 +19,11 @@ config :mdt_client, MDTClient.Sandbox.Server,
   proxy_port: 0,
   channel_dir: Path.join(System.tmp_dir!(), "mdt-test-channels")
 
+# A runtime built into priv/microsandbox stays out of tests; the ones about
+# msb make their own.
+config :mdt_client, MDTClient.Sandbox.Msb,
+  runtime_dir: Path.join(System.tmp_dir!(), "mdt_client_test_msb_#{System.pid()}")
+
 # Host commands, minted values and the tool probe run `bash -lc`, which reads
 # the login profile of whoever runs the tests and prints whatever it prints.
 # A home that doesn't exist keeps it out; /etc/profile still runs.

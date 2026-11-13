@@ -420,7 +420,8 @@ if __name__ == '__main__':
     parser.add_argument('mode', choices=('local', 'guest', 'host', 'check'))
     parser.add_argument('root', nargs='?', type=Path)
     parser.add_argument('--sandbox', help='Sandbox name for the paired host-side check')
-    parser.add_argument('--msb', default='msb', help='Host msb executable for the paired check')
+    parser.add_argument('--msb', default=os.path.expanduser('~/.mdt_client/bin/msb'),
+                        help="Host msb for the paired check (default: MDT's launcher)")
     args = parser.parse_args()
     if args.mode == 'host':
         if args.root is None:

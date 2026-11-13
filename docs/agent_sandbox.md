@@ -79,6 +79,8 @@ folders with it, and sits between it and the network.
 | 2026-11-12 | Host commands cover most of what file grants were for (move the work to the value, not the value to the VM). File grants stay for long-lived processes in the VM. |
 | 2026-11-13 | Ports listening in the VM are forwarded by themselves to the VM's own loopback address on your machine (`127.77.X.Y`), with the same numbers. No hostname.      |
 | 2026-11-13 | Forwarding goes over msb's SSH server with an OpenSSH control master and MDT's own key, not msb's published ports, which need restarts and miss loopback.      |
+| 2026-11-13 | MDT ships its own msb (v0.7.14 with the live-sharing patch, and its libkrunfw) and keeps its state in its own microsandbox home. An `msb` you install is never used. |
+| 2026-11-13 | Disk is a setting: the root disk (64 GiB, sparse) and a write budget per read-write folder per boot (64 GiB), instead of microsandbox's silent 4 GiB for both. |
 
 ## Built so far
 
@@ -91,7 +93,7 @@ folders with it, and sits between it and the network.
 | Describing requests  | `MDTClient.Sandbox.Describe`                     | Facts (git ref updates, GraphQL operation, REST endpoint), the agent's claims, the "allow similar" pattern. It decides nothing.                                                                           |
 | Showing requests     | `MDTClient.Sandbox.RequestView`                  | Headers with placeholders named, bodies decoded (JSON, GraphQL, form, git pkt-lines, text, hex), curl and raw HTTP with `$VARIABLE` for the placeholder.                                                 |
 | Agent channel        | `MDTClient.Sandbox.Channel`                      | A Unix socket per identity, joined to the VM's vsock port 5000. Speaks the `mdt` command's one-line protocol.                                                                                            |
-| VM                   | `MDTClient.Sandbox.Msb`                          | `msb create --replace --proxy … --net public,private --vsock …`, one `--volume` per share, `/mnt/mdt` read-only, the VM's OptMem, placeholders as `--env`. Stopped when the identity locks or MDT quits.   |
+| VM                   | `MDTClient.Sandbox.Msb`                          | MDT's own `msb` (see [Runtime](#runtime)). `msb create --replace --proxy … --net public,private --vsock …`, one `--volume` per share, `/mnt/mdt` read-only, the VM's OptMem, placeholders as `--env`. Stopped when the identity locks or MDT quits. |
 | Image                | `MDTClient.Sandbox.Image`                        | See [The image](#the-image).                                                                                                                                                                              |
 | Inbox                | `MDTClient.Sandbox.Inbox`                        | `/mnt/mdt/env.sh`, `bin/mdt`, `git/<host>` for the credential helper, `tokens/<grant>` for every token grant, `files/` for file grants that are on, `host.md`.                                           |
 | Host commands        | `…HostCommand`, `…HostRun`, `…HostInfo`          | Checking and describing an ask (place, facts, hints); running it under `timeout` with capped output and a killable process group; the machine's description. See [Host commands](#host-commands).      |
@@ -825,15 +827,16 @@ within a few seconds, and goes away when it stops.
   `SameSite=Strict`, the endpoint checks origins, and LiveView needs a token
   from MDT's own page. The desktop app's webview doesn't share your
   browser's cookies anyway.
-- MDT's key opens SSH to every msb VM of yours, since msb keeps one list of
-  keys. It is as sensitive as the keys in `~/.ssh`, and sits in the
-  identity's folder, readable by you only. Anything running as you can
-  already run `msb exec`.
+- MDT's key opens SSH to every VM in MDT's microsandbox home (every
+  identity's on this machine), since msb keeps one list of keys per home.
+  VMs of an `msb` you run yourself keep their own list. The key is as
+  sensitive as the keys in `~/.ssh`, and sits in the identity's folder,
+  readable by you only. Anything running as you can already run `msb exec`.
 
 ## VM
 
-- **Checks:** KVM is available, `msb` is at a supported version, the image
-  exists.
+- **Checks:** KVM is available, MDT's `msb` is there (see
+  [Runtime](#runtime)), the image exists.
 - **Image:** see [Image and VM state](#image-and-vm-state). The checks
   showed what TLS needs: the `ca-certificates` package (without it Erlang
   finds no CAs at all), MDT's CA in the system bundle (curl, git, `gh`,
@@ -849,7 +852,21 @@ within a few seconds, and goes away when it stops.
     - the OptMem folder;
     - Home at `/root` and Cache at `/cache`;
     - `--vsock` for the agent channel;
-    - CPU and memory limits.
+    - CPU and memory limits;
+    - `--root-disk` and a `quota=` on every read-write mount (see Disk).
+- **Disk:** two settings, both applied by recreating.
+    - *Root disk* (64 GiB): what the image and the VM write outside its
+      folders, apt packages, `/tmp` and `/var` included. A sparse ext4
+      image, so it takes host space only as it fills; it starts empty on
+      every recreate. microsandbox's default is 4 GiB.
+    - *Folder writes* (64 GiB): how much the VM may add to each read-write
+      folder (Home, Cache, OptMem, shares) per boot, beyond what was there
+      at its first write. Past it, writes fail with `ENOSPC`, and `df` in the
+      VM shows the budget, not your disk. It keeps a runaway agent from
+      filling your disk. microsandbox applies 4 GiB to every mount unless
+      told otherwise; read-only folders get none.
+    - Checked on the host: `--root-disk 64G` and `quota=64G` showed 62.9G
+      and 64G free in the VM.
 - **Nothing in the root filesystem is kept.** `msb modify` cannot change
   mounts, the proxy, vsock or network settings. Changing any of them means
   removing the VM and creating it again from the image, which takes seconds
@@ -860,6 +877,36 @@ within a few seconds, and goes away when it stops.
   shown as "recreate to apply". The VM stops when MDT quits.
 - **Started from Zed:** `msb ssh` boots a stopped VM by itself. That VM still
   goes through the proxy, so with MDT closed it has no internet.
+
+### Runtime
+
+MDT brings its own microsandbox; nothing needs installing on the machine.
+
+- **What ships:** `msb` v0.7.14 built from source with MDT's
+  [live-sharing patch](../priv/sandbox/microsandbox-live-sharing.md), and
+  that release's `libkrunfw.so.5.6.1` (the guest kernel). The patch is why
+  it isn't the stock release: without it, git in the VM can see an empty
+  index after the host replaces it (see the blocker below).
+- **Built by** `scripts/build-microsandbox.sh` into `priv/microsandbox`
+  (`bin/msb`, `lib/libkrunfw.so.5.6.1`), so the release carries it and
+  `msb` finds its kernel beside `bin/`. Everything is pinned there: the
+  source revision, and the SHA-256 of the guest agent (embedded in `msb`)
+  and of `libkrunfw`. The package build runs it once, on Ubuntu 22.04, the
+  older glibc of the two packages; `msb` links only glibc. In a source
+  checkout, run it once yourself.
+- **Its own home:** VMs, images and msb's SSH keys live in
+  `~/.mdt_client/microsandbox` (`MSB_HOME`), not `~/.microsandbox`. An
+  `msb` you install, at any version, neither sees MDT's VMs nor migrates
+  their database. Every call also sets `MSB_PATH`, the binary VMs are
+  spawned with.
+- **Launcher:** `~/.mdt_client/bin/msb` runs MDT's `msb` with that home.
+  The Zed SSH config uses it, and so can you (`~/.mdt_client/bin/msb ls`).
+  MDT rewrites it on start, so its path survives an update that moves the
+  runtime.
+- **Never** the `msb` on your PATH: MDT has no fallback to it.
+- **Upgrading microsandbox** means changing the pins in the script and
+  checking the patch still applies. A VM keeps running on the binary it
+  started with until it is stopped.
 
 ### Shared folders
 
@@ -922,19 +969,14 @@ exclusive creates in both directions. Evidence:
 MDT's image environment and shell profile now explicitly choose Zed polling
 (`ZED_FILE_WATCHER_MODE=poll`, `ZED_FILE_WATCHER_POLL_MS=5000`). This handles
 editor refresh without guest inotify mutation events; other file watchers
-need their own polling configuration or validation. The host installer also
-sets these variables in an existing VM's saved environment, so testing the
-fix does not require rebuilding the image. Stop/start the VM after installing
-the runtime, reconnect Zed, and rerun the cross-host check when upgrading.
-The earlier variant passed content/index/lock checks and the user confirmed
-automatic Zed refresh. The optimized cached variant still needs live sharing
-and CPU checks after installation. Refresh and intended share-scope steps
-are documented with the patch.
+need their own polling configuration or validation. The earlier variant
+passed content/index/lock checks and the user confirmed automatic Zed
+refresh.
 
-The reproducible build and host installer are
-`scripts/build-microsandbox-sharing.sh` and
-`scripts/install-microsandbox-sharing.sh`. After restarting, one host command
-runs both halves of the content/index/lock check:
+MDT now ships the patched runtime itself (see [Runtime](#runtime)), built
+by `scripts/build-microsandbox.sh`. Rerun the cross-host check after
+changing it. With the VM running, one host command runs both halves of the
+content/index/lock check (its `--msb` defaults to MDT's launcher):
 
 ```sh
 python3 scripts/sandbox_shared_fs_probe.py check --sandbox SANDBOX_NAME
@@ -995,6 +1037,10 @@ Everything belongs to the signed-in identity:
   file grants), the VM's OptMem, Home and Cache. Home holds the VM's own
   logins (Codex, Claude). Its snapshots sit next to it, readable by MDT
   only. On this machine the disk itself is encrypted.
+
+Shared by every identity on the machine, not encrypted: MDT's microsandbox
+home (`~/.mdt_client/microsandbox`: VMs, images, msb's SSH keys) and the
+launcher (`~/.mdt_client/bin/msb`).
 
 Locking MDT pauses every grant. Without the CA key, MDT tunnels everything.
 Placeholders then reach providers unswapped and fail to authenticate, which

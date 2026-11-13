@@ -60,7 +60,7 @@ defmodule MDTClientWeb.SandboxLive.Overview do
             </span>
           </div>
           <p id="vm-image" class="mt-1 font-mono text-[11px] text-muted">
-            {if @vm.exists?, do: @created_ref || "unknown image", else: @image.tag} · {@settings.cpus} CPUs · {@settings.memory_gib} GiB · {length(
+            {if @vm.exists?, do: @created_ref || "unknown image", else: @image.tag} · {@settings.cpus} CPUs · {@settings.memory_gib} GiB · {@settings.disk_gib} GiB disk · {length(
               @settings.shares
             )} shared folders
           </p>
@@ -135,7 +135,9 @@ defmodule MDTClientWeb.SandboxLive.Overview do
         First, build the image in Settings: your Containerfile plus MDT's layer, with podman.
         Then create the VM. It boots with its traffic pinned to MDT's proxy, your picked folders at their own paths, its own Home, Cache and memory, and nothing else of yours.
         <span :if={not @tools.podman} class="text-bad">podman isn't installed.</span>
-        <span :if={is_nil(@tools.msb)} class="text-bad">msb isn't installed.</span>
+        <span :if={is_nil(@tools.msb)} class="text-bad">
+          This MDT has no microsandbox runtime; in a source checkout, run scripts/build-microsandbox.sh.
+        </span>
       </div>
       <div
         :if={@vm.stale?}
@@ -315,7 +317,7 @@ defmodule MDTClientWeb.SandboxLive.Overview do
     <.connect_card
       vm={@vm}
       settings={@settings}
-      msb={@tools.msb}
+      launcher={@tools.launcher}
     />
     """
   end
@@ -443,11 +445,12 @@ defmodule MDTClientWeb.SandboxLive.Overview do
 
   attr :vm, :any, required: true
   attr :settings, :any, required: true
-  attr :msb, :string, default: nil
+  attr :launcher, :string, required: true
 
-  # Everything needed to open the VM in Zed, filled in for this VM.
+  # Everything needed to open the VM in Zed, filled in for this VM. The
+  # launcher runs MDT's own msb with MDT's microsandbox home.
   defp connect_card(assigns) do
-    msb = assigns.msb || "~/.microsandbox/bin/msb"
+    msb = assigns.launcher
 
     folders =
       case assigns.settings.shares do
@@ -516,7 +519,7 @@ defmodule MDTClientWeb.SandboxLive.Overview do
           id="connect-authorize"
           text={@authorize}
         >
-          Microsandbox keeps its own list of keys; this adds your public key to it.
+          Microsandbox keeps its own list of keys; this adds your public key to MDT's. The command is MDT's own msb, which MDT keeps at this path across updates.
         </.connect_step>
         <.connect_step
           n={2}

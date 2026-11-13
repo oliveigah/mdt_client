@@ -69,6 +69,9 @@ defmodule MDTClient.Sandbox.ImageTest do
     assert build.ref == "box:2026-11-12.1"
     assert build.versions =~ "erlang"
     assert build.size == 4_510_000_000
-    assert Image.build_script(dir, build.ref) =~ "--format docker"
+    script = Image.build_script(dir, build.ref)
+    assert script =~ "--format docker"
+    # Loaded by MDT's msb, which Msb.env/0 names; never one on the PATH.
+    assert script =~ ~s("$MSB_PATH" load --input)
   end
 end

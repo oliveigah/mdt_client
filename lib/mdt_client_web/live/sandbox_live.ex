@@ -858,7 +858,10 @@ defmodule MDTClientWeb.SandboxLive do
           )
 
         {:error, :no_msb} ->
-          put_notice(socket, :error, "msb is not installed", body: "Install microsandbox first.")
+          put_notice(socket, :error, "MDT's microsandbox runtime is missing",
+            body:
+              "Packaged MDT ships it. In a source checkout, run scripts/build-microsandbox.sh."
+          )
       end
 
     {:noreply, refresh(socket)}
@@ -1002,6 +1005,8 @@ defmodule MDTClientWeb.SandboxLive do
         %{
           "cpus" => settings.cpus,
           "memory_gib" => settings.memory_gib,
+          "disk_gib" => settings.disk_gib,
+          "write_budget_gib" => settings.write_budget_gib,
           "hold_seconds" => settings.hold_seconds,
           "proxy_port" => settings.proxy_port
         },

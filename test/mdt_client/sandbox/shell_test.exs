@@ -53,15 +53,20 @@ defmodule MDTClient.Sandbox.ShellTest do
         shell: "/bin/bash",
         cpus: 4,
         memory_gib: 8,
+        disk_gib: 64,
+        write_budget_gib: 32,
         proxy_port: 18080,
-        mounts: [{"/host/project", "/project", :ro}],
+        mounts: [{"/host/project", "/project", :ro}, {"/host/cache", "/cache", :rw}],
         env: [{"GH_TOKEN", "placeholder"}]
       })
 
     assert ["/bin/bash" | _] = args |> Enum.drop_while(&(&1 != "--shell")) |> tl()
+    assert ["64G" | _] = args |> Enum.drop_while(&(&1 != "--root-disk")) |> tl()
 
-    assert ["/host/project:/project:ro" | _] =
-             args |> Enum.drop_while(&(&1 != "--volume")) |> tl()
+    # Read-only folders take no writes; read-write ones get the write budget
+    # instead of microsandbox's 4 GiB.
+    volumes = for {"--volume", volume} <- Enum.zip(args, tl(args)), do: volume
+    assert volumes == ["/host/project:/project:ro", "/host/cache:/cache:quota=32G"]
 
     assert ["GH_TOKEN=placeholder" | _] = args |> Enum.drop_while(&(&1 != "--env")) |> tl()
   end

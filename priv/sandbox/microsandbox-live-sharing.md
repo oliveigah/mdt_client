@@ -32,38 +32,28 @@ MDT separately configures Zed's remote server with
 still do not generate guest inotify mutation events. Other development
 watchers need their own polling configuration or separate validation.
 
-## Build and apply on the host
+## How MDT ships it
 
-The candidate is under `tmp/microsandbox-sharing-runtime/msb`. The installer
-now requires a release-build marker and rejects the earlier debug candidate.
-For an optimized native build, run:
-
-```sh
-bash scripts/build-microsandbox-sharing.sh
-```
-
-The Linux build script pins and patches its own source checkout under `tmp`, runs
-the filesystem suite, and builds the CLI. Cargo downloads the matching
-prebuilt guest agent; the patch does not change that agent or firmware.
-It needs Git, a recent Rust/Cargo toolchain, a C compiler, and internet access
-to the public source/artifact registries.
-
-Install from a **host terminal**, passing the sandbox name shown by MDT:
+MDT carries the patched runtime itself; nothing is installed over your own
+`msb`. `scripts/build-microsandbox.sh` clones v0.7.14, checks the revision,
+applies this patch, runs the filesystem suite, and builds the CLI with
+release optimizations (no whole-program LTO). The guest agent it embeds
+and the `libkrunfw` beside it are the release's own files, checked against
+pinned SHA-256s; the patch changes neither. The result goes to
+`priv/microsandbox` (`bin/msb`, `lib/libkrunfw.so.5.6.1`), which the
+release, and so the .deb and .rpm, carry. See the sandbox doc's Runtime
+section for the home and launcher MDT runs it with.
 
 ```sh
-bash scripts/install-microsandbox-sharing.sh SANDBOX_NAME
+./scripts/build-microsandbox.sh
 ```
 
-An optional second argument selects the existing `msb` executable explicitly.
-The installer verifies the candidate and patch checksums, accepts only v0.7.14, saves the original as
-`msb.before-mdt-sharing`, atomically installs the candidate and sets polling
-in the VM's saved environment. It does not stop the VM. If the candidate
-cannot run on the host, it builds natively first.
+It needs Git, Rust/Cargo, a C compiler, and internet access to GitHub and
+crates.io. A VM picks up a new build when it next starts; stop and start it
+in MDT, then reconnect Zed.
 
-Stop and start the sandbox in MDT, then reconnect Zed. This ends any active
-agent commands in that VM. The existing Home/Cache and project mounts are
-kept. An image rebuild is unnecessary for the live check; future image
-builds and MDT's shell profile also carry the polling defaults.
+The validation below predates bundling: it ran with this patch installed
+over the host's own `msb` 0.7.14, which is the same build.
 
 ## Validation
 
