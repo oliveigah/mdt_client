@@ -21,7 +21,7 @@ defmodule MDTClient.Sandbox.HostCommand do
   Pure apart from reading the filesystem to resolve the directory.
   """
 
-  alias MDTClient.Sandbox.{Grant, Share, Shares}
+  alias MDTClient.Sandbox.{Approval, Grant, Share, Shares}
 
   @max_script 16 * 1024
   @default_timeout 120
@@ -45,7 +45,10 @@ defmodule MDTClient.Sandbox.HostCommand do
           optional(:dir) => term(),
           optional(:timeout) => term(),
           optional(:reason) => term(),
-          optional(:agent) => term()
+          optional(:agent) => term(),
+          optional(:thread) => term(),
+          optional(:thread_id) => term(),
+          optional(:folder) => term()
         }
 
   @type checked :: %{
@@ -54,6 +57,7 @@ defmodule MDTClient.Sandbox.HostCommand do
           timeout: pos_integer(),
           reason: String.t(),
           agent: String.t(),
+          thread: Approval.thread() | nil,
           title: String.t(),
           pattern: String.t(),
           facts: [{String.t(), String.t()}],
@@ -113,6 +117,7 @@ defmodule MDTClient.Sandbox.HostCommand do
            timeout: timeout,
            reason: reason,
            agent: if(agent == "", do: "An agent", else: agent),
+           thread: Approval.thread(ask),
            title: title(script),
            pattern: "run " <> Integer.to_string(:erlang.phash2({script, dir, timeout}), 36),
            facts: [

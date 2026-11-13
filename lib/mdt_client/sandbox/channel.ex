@@ -13,8 +13,9 @@ defmodule MDTClient.Sandbox.Channel do
       `{"command": "host"}`, `{"command": "ports"}`,
       `{"command": "request", "grant": "...",
       "need": "...", "minutes": 60, "reason": "...", "agent": "...",
-      "wait": 60}`, `{"command": "run", "script": "...", "dir": "...",
-      "timeout": 120, "reason": "...", "agent": "...", "wait": 60}` or
+      "thread": "...", "thread_id": "...", "folder": "...", "wait": 60}`, `{"command": "run", "script": "...", "dir": "...",
+      "timeout": 120, "reason": "...", "agent": "...", "thread": "...",
+      "thread_id": "...", "folder": "...", "wait": 60}` or
       `{"command": "wait", "id": "...", "wait": 60}`;
     * MDT answers with the exit status the command should end with on the
       first line, then text for the agent, and closes.
@@ -240,7 +241,10 @@ defmodule MDTClient.Sandbox.Channel do
       dir: ask["dir"],
       timeout: ask["timeout"],
       reason: ask["reason"],
-      agent: ask["agent"]
+      agent: ask["agent"],
+      thread: ask["thread"],
+      thread_id: ask["thread_id"],
+      folder: ask["folder"]
     }
 
     case Server.call(username, {:request_command, request}) do
@@ -255,7 +259,10 @@ defmodule MDTClient.Sandbox.Channel do
       need: ask["need"],
       minutes: ask["minutes"],
       reason: ask["reason"],
-      agent: ask["agent"]
+      agent: ask["agent"],
+      thread: ask["thread"],
+      thread_id: ask["thread_id"],
+      folder: ask["folder"]
     }
 
     case Server.call(username, {:request_access, request}) do

@@ -252,7 +252,14 @@ defmodule MDTClientWeb.SandboxLiveTest do
           Server.call(
             username,
             {:request_access,
-             %{grant: grant.id, reason: "push the fix", agent: "codex", minutes: 30}}
+             %{
+               grant: grant.id,
+               reason: "push the fix",
+               agent: "codex",
+               minutes: 30,
+               thread: "Fix the push flow",
+               folder: "/work/klife"
+             }}
           )
 
         Server.call(username, {:await, ask.id, 5_000}, 6_000)
@@ -263,6 +270,8 @@ defmodule MDTClientWeb.SandboxLiveTest do
 
     assert has_element?(view, "#approval-#{ask.id}", "Turn on GitHub for 30 min")
     assert has_element?(view, "#approval-claims-#{ask.id}", "push the fix")
+    assert has_element?(view, "#approval-thread-#{ask.id}-title", "Fix the push flow")
+    assert has_element?(view, "#approval-thread-#{ask.id}-folder", "/work/klife")
     assert has_element?(view, "#activation-minutes-#{ask.id}-30[checked]")
 
     view

@@ -5,6 +5,36 @@ This is a web application written using the Phoenix web framework.
 - Use `mix precommit` alias when you are done with all changes and fix any pending issues
 - Use the already included and available `:req` (`Req`) library for HTTP requests, **avoid** `:httpoison`, `:tesla`, and `:httpc`. Req is included by default and is the preferred HTTP client for Phoenix apps
 
+### The MDT that runs is not this checkout
+
+The user's MDT, the one holding the vault and the agent sandbox's VM, runs
+from a separate clone at `~/projects/mdt/mdt_host`, pinned to a commit and
+managed with `scripts/host-mdt.sh` (`install [COMMIT]`, `start`, `status`).
+Edits here reach it only when the user commits them and installs that commit,
+which means stopping it, and its VM, first. Never edit, build, restart or
+share into the VM that clone, and never start a server from this checkout on
+port 4000 or with the real `~/.mdt_client`.
+
+`.tool-versions` names the Erlang and Elixir the host builds with. `_build`
+and `deps` are shared with the VM, so both sides must build with exactly
+those versions.
+
+### Working inside the agent sandbox
+
+You are in MDT's agent sandbox when `/mnt/mdt` exists. This checkout is
+mounted read-write from the host, `_build` and `deps` included.
+
+- Run `mise install` here before any `mix` command, and never build this
+  checkout with another version (`mise exec elixir@...`): the host's builds
+  would break.
+- To see a change running, use the run-mdt skill: port 4100, throwaway data in
+  `/tmp/mdt-run`. MDT forwards it to the user; `mdt ports` gives the URL.
+- The VM cannot run VMs. Creating, starting and stopping a VM, the proxy in
+  front of a real VM and the `mdt` CLI over vsock can't be exercised here:
+  cover them with tests (they run without msb), and say in your handoff what
+  needs checking on the host once the user installs your commit.
+- Leave the host alone: don't run `msb`, and don't touch `~/.mdt_client`.
+
 ### Phoenix v1.8 guidelines
 
 - **Always** begin your LiveView templates with `<Layouts.app flash={@flash} ...>` which wraps all inner content

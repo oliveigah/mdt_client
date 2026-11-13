@@ -17,6 +17,8 @@ export const TABLE_CELL_PADDING = 10
 // How far a line attached to a row runs straight out of the table before
 // heading for its other end, so it reads as leaving that row.
 export const ROW_STUB = 18
+// How far a loop from an element back to itself runs clear of its outline.
+export const LOOP_REACH = 36
 
 export const isShape = (element) => SHAPES.includes(element.type)
 export const isArrow = (element) => element.type === "arrow"
@@ -35,10 +37,16 @@ export function normalizeRect(a, b) {
 
 export function bounds(element) {
   if (isArrow(element)) {
-    return normalizeRect({x: element.x1, y: element.y1}, {x: element.x2, y: element.y2})
+    const points = [{x: element.x1, y: element.y1}, ...bends(element), {x: element.x2, y: element.y2}]
+    const xs = points.map((point) => point.x)
+    const ys = points.map((point) => point.y)
+    return normalizeRect({x: Math.min(...xs), y: Math.min(...ys)}, {x: Math.max(...xs), y: Math.max(...ys)})
   }
   return {x: element.x, y: element.y, width: element.width, height: element.height}
 }
+
+// The points an arrow bends at on its way from its start to its end.
+export const bends = (arrow) => arrow.points ?? []
 
 export function center(element) {
   const box = bounds(element)
@@ -88,6 +96,23 @@ export function distanceToBox(box, point) {
   return Math.hypot(dx, dy)
 }
 
+// Where the segment from `from`, inside `box`, to `to` leaves the box, or
+// null when `to` is inside it too.
+export function leaveBox(box, from, to) {
+  if (containsPoint(box, to)) return null
+
+  const dx = to.x - from.x
+  const dy = to.y - from.y
+  const exits = []
+  if (dx > 0) exits.push((box.x + box.width - from.x) / dx)
+  if (dx < 0) exits.push((box.x - from.x) / dx)
+  if (dy > 0) exits.push((box.y + box.height - from.y) / dy)
+  if (dy < 0) exits.push((box.y - from.y) / dy)
+
+  const t = Math.min(...exits)
+  return {x: from.x + dx * t, y: from.y + dy * t}
+}
+
 export function distanceToSegment(point, a, b) {
   const dx = b.x - a.x
   const dy = b.y - a.y
@@ -105,7 +130,7 @@ export function hitTest(element, point, tolerance = 0) {
 
   switch (element.type) {
     case "arrow":
-      return distanceToSegment(point, {x: element.x1, y: element.y1}, {x: element.x2, y: element.y2}) <=
+      return polylineDistance([{x: element.x1, y: element.y1}, ...bends(element), {x: element.x2, y: element.y2}], point) <=
         tolerance + 2
 
     case "ellipse": {
@@ -182,6 +207,164 @@ export function borderPoint(element, toward, gap = 0) {
   return {x: origin.x + dx * scale, y: origin.y + dy * scale}
 }
 
+// The outline of an element, the closest point on it to any other, and the
+// way out of it there. A rectangle's rounded corners count as square.
+
+function nearestOnSegment(point, a, b) {
+  const dx = b.x - a.x
+  const dy = b.y - a.y
+  const lengthSquared = dx * dx + dy * dy
+  if (lengthSquared === 0) return {x: a.x, y: a.y}
+
+  const t = Math.max(0, Math.min(1, ((point.x - a.x) * dx + (point.y - a.y) * dy) / lengthSquared))
+  return {x: a.x + t * dx, y: a.y + t * dy}
+}
+
+// No formula gives the nearest point of an ellipse: it is found by walking
+// round it, then narrowing down on the closest stretch.
+function nearestOnEllipse(element, point) {
+  const middle = center(element)
+  const rx = Math.max(element.width / 2, 0.5)
+  const ry = Math.max(element.height / 2, 0.5)
+  const at = (angle) => ({x: middle.x + rx * Math.cos(angle), y: middle.y + ry * Math.sin(angle)})
+  const away = (angle) => {
+    const spot = at(angle)
+    return Math.hypot(spot.x - point.x, spot.y - point.y)
+  }
+
+  const steps = 64
+  const step = (Math.PI * 2) / steps
+  let best = 0
+  for (let index = 1; index < steps; index++) {
+    if (away(index * step) < away(best)) best = index * step
+  }
+
+  let low = best - step
+  let high = best + step
+  for (let round = 0; round < 40; round++) {
+    const left = low + (high - low) / 3
+    const right = high - (high - low) / 3
+    if (away(left) < away(right)) high = right
+    else low = left
+  }
+  return at((low + high) / 2)
+}
+
+// The point of the element's outline closest to `point`, inside it or out.
+export function nearestOutlinePoint(element, point) {
+  if (element.type === "ellipse") return nearestOnEllipse(element, point)
+
+  const {x, y, width, height} = element
+  const corners = element.type === "diamond"
+    ? [{x: x + width / 2, y}, {x: x + width, y: y + height / 2}, {x: x + width / 2, y: y + height}, {x, y: y + height / 2}]
+    : [{x, y}, {x: x + width, y}, {x: x + width, y: y + height}, {x, y: y + height}]
+
+  let nearest = null
+  let distance = Infinity
+  corners.forEach((corner, index) => {
+    const spot = nearestOnSegment(point, corner, corners[(index + 1) % corners.length])
+    const away = Math.hypot(spot.x - point.x, spot.y - point.y)
+    if (away < distance) {
+      nearest = spot
+      distance = away
+    }
+  })
+  return nearest
+}
+
+export function distanceToOutline(element, point) {
+  const spot = nearestOutlinePoint(element, point)
+  return Math.hypot(spot.x - point.x, spot.y - point.y)
+}
+
+// The way straight out of the element at `point`, a point on its outline,
+// one unit long. A rectangle's corner belongs to its left or right side.
+export function outlineNormal(element, point) {
+  const middle = center(element)
+  const halfWidth = Math.max(element.width / 2, 0.5)
+  const halfHeight = Math.max(element.height / 2, 0.5)
+  const dx = point.x - middle.x
+  const dy = point.y - middle.y
+  let nx, ny
+
+  if (element.type === "ellipse") {
+    nx = dx / (halfWidth * halfWidth)
+    ny = dy / (halfHeight * halfHeight)
+  } else if (element.type === "diamond") {
+    nx = Math.sign(dx) / halfWidth
+    ny = Math.sign(dy) / halfHeight
+  } else if (Math.abs(dx) / halfWidth >= Math.abs(dy) / halfHeight) {
+    nx = Math.sign(dx)
+    ny = 0
+  } else {
+    nx = 0
+    ny = Math.sign(dy)
+  }
+
+  const length = Math.hypot(nx, ny)
+  return length === 0 ? {x: 0, y: -1} : {x: nx / length, y: ny / length}
+}
+
+// Which side of its box a point on an element's outline is on, by the way
+// out of it there.
+export function outlineSide(element, point) {
+  const normal = outlineNormal(element, point)
+  if (Math.abs(normal.x) >= Math.abs(normal.y)) return normal.x >= 0 ? "e" : "w"
+  return normal.y >= 0 ? "s" : "n"
+}
+
+// Anchors: the spot an arrow end is pinned to, so it stays there rather than
+// sliding round the outline toward whatever the arrow heads for. An anchor
+// holds fractions of the box of what the end is attached to, so it keeps its
+// place as the element moves and resizes: `{x: 0.5, y: 0}` is the middle of
+// the top. On a row of a table only the side counts, left below a half and
+// right from it, since a row is met level with its middle.
+
+const fraction = (offset, extent) =>
+  extent > 0 ? Math.round(Math.max(0, Math.min(1, offset / extent)) * 10000) / 10000 : 0.5
+
+export const validAnchor = (anchor) =>
+  anchor && Number.isFinite(anchor.x) && Number.isFinite(anchor.y) ? anchor : null
+
+// The anchor for the spot of the outline closest to `point`, or for the side
+// of row `row` it is nearer, when given.
+export function anchorAt(element, row, point) {
+  if (row >= 0) return {x: point.x >= element.x + element.width / 2 ? 1 : 0, y: 0.5}
+
+  const spot = nearestOutlinePoint(element, point)
+  return {x: fraction(spot.x - element.x, element.width), y: fraction(spot.y - element.y, element.height)}
+}
+
+// Where an end pinned at `anchor` sits, `gap` straight out from the outline.
+// An anchor off the outline, as one written by hand may be, counts from the
+// closest point on it.
+export function anchorPoint(element, row, anchor, gap = 0) {
+  if (row >= 0) {
+    const box = rowBox(element, row)
+    return {x: anchor.x >= 0.5 ? box.x + box.width + gap : box.x - gap, y: box.y + box.height / 2}
+  }
+
+  const spot = nearestOutlinePoint(element, {
+    x: element.x + anchor.x * element.width,
+    y: element.y + anchor.y * element.height,
+  })
+  const normal = outlineNormal(element, spot)
+  return {x: spot.x + normal.x * gap, y: spot.y + normal.y * gap}
+}
+
+// The middle of each side, where an anchor near one settles: `reach` is how
+// near, along the outline, in canvas units.
+const SIDE_MIDDLES = [{x: 0.5, y: 0}, {x: 1, y: 0.5}, {x: 0.5, y: 1}, {x: 0, y: 0.5}]
+
+export function snapAnchor(element, anchor, reach) {
+  const spot = anchorPoint(element, -1, anchor)
+  for (const middle of SIDE_MIDDLES) {
+    const target = anchorPoint(element, -1, middle)
+    if (Math.hypot(target.x - spot.x, target.y - spot.y) <= reach) return middle
+  }
+  return anchor
+}
+
 // Tables: a header holding the title over rows of two cells, the type and
 // the name. Their height follows from the rows; `split` is where the name
 // column starts, measured from the left edge, laid out by the editor.
@@ -245,50 +428,117 @@ export function portPoint(element, {side, row}, gap) {
 }
 
 // The ends of an arrow, following the elements it is attached to. An end
-// attached to a whole element aims at its middle and stops at the outline;
-// one attached to a row of a table meets the side of that row. `lookup`
-// finds an element by id.
+// pinned to an anchor stays on it. One that floats on a whole element aims
+// at its middle from the next point along, its first or last bend or else
+// the other end, and stops at the outline; one floating on a row of a table
+// meets the side of that row facing that point. `lookup` finds an element by
+// id.
 export function resolveArrow(arrow, lookup) {
-  const start = arrow.start ? lookup(arrow.start) : null
-  const end = arrow.end ? lookup(arrow.end) : null
-  const startRow = start ? rowIndex(start, arrow.startRow) : -1
-  const endRow = end ? rowIndex(end, arrow.endRow) : -1
+  const start = arrowEnd(arrow, "start", lookup)
+  const end = arrowEnd(arrow, "end", lookup)
 
-  // An element can only be joined to itself from one row to another.
-  if (start && start === end && (startRow < 0 || endRow < 0)) {
+  // An element is only joined to itself between two spots of its own.
+  if (start.element && start.element === end.element && !(placed(start) && placed(end))) {
     return {x1: arrow.x1, y1: arrow.y1, x2: arrow.x2, y2: arrow.y2}
   }
 
-  const aim = (element, row, x, y) => {
-    if (!element) return {x, y}
-    const middle = center(element)
-    return row < 0 ? middle : {x: middle.x, y: rowBox(element, row).y + tableRowHeight(element) / 2}
-  }
-  const meet = (element, row, toward) =>
-    row < 0 ? borderPoint(element, toward, ARROW_GAP) : rowAnchor(element, row, toward, ARROW_GAP)
-
-  const from = aim(start, startRow, arrow.x1, arrow.y1)
-  const to = aim(end, endRow, arrow.x2, arrow.y2)
-  const a = start ? meet(start, startRow, to) : from
-  const b = end ? meet(end, endRow, from) : to
-
+  const points = bends(arrow)
+  const a = meet(start, points[0] ?? aim(end))
+  const b = meet(end, points[points.length - 1] ?? aim(start))
   return {x1: a.x, y1: a.y, x2: b.x, y2: b.y}
 }
 
-// The points an arrow is drawn through: its ends, with a short straight run
-// out of any row it is attached to. Expects the ends already resolved.
-export function arrowRoute(arrow, lookup) {
-  const first = {x: arrow.x1, y: arrow.y1}
-  const last = {x: arrow.x2, y: arrow.y2}
+// One end of an arrow: the element it is attached to, the row's index on it,
+// or -1, the anchor it is pinned to and the point it was last drawn at.
+function arrowEnd(arrow, which, lookup) {
+  const first = which === "start"
+  const id = first ? arrow.start : arrow.end
+  const element = id ? lookup(id) ?? null : null
 
-  const stub = (id, rowId, point) => {
-    const table = id ? lookup(id) : null
-    if (!table || rowIndex(table, rowId) < 0) return []
-    const outward = point.x > table.x + table.width / 2 ? ROW_STUB : -ROW_STUB
-    return [{x: point.x + outward, y: point.y}]
+  return {
+    element,
+    row: element ? rowIndex(element, first ? arrow.startRow : arrow.endRow) : -1,
+    anchor: element ? validAnchor(first ? arrow.startAnchor : arrow.endAnchor) : null,
+    free: first ? {x: arrow.x1, y: arrow.y1} : {x: arrow.x2, y: arrow.y2},
   }
+}
 
-  return [first, ...stub(arrow.start, arrow.startRow, first), ...stub(arrow.end, arrow.endRow, last), last]
+// Whether an end has a spot of its own on its element: pinned, or on a row.
+const placed = (end) => end.row >= 0 || end.anchor !== null
+
+// What the other end of an arrow heads for, from this one.
+function aim({element, row, anchor, free}) {
+  if (!element) return free
+  if (anchor) return anchorPoint(element, row, anchor, ARROW_GAP)
+  const middle = center(element)
+  return row < 0 ? middle : {x: middle.x, y: rowBox(element, row).y + tableRowHeight(element) / 2}
+}
+
+function meet({element, row, anchor, free}, toward) {
+  if (!element) return free
+  if (anchor) return anchorPoint(element, row, anchor, ARROW_GAP)
+  return row < 0 ? borderPoint(element, toward, ARROW_GAP) : rowAnchor(element, row, toward, ARROW_GAP)
+}
+
+// Where the short straight run out of a row an end is attached to finishes,
+// or null for an end on anything else. Expects the ends already resolved.
+export function rowStub(arrow, which, lookup) {
+  const first = which === "start"
+  const id = first ? arrow.start : arrow.end
+  const table = id ? lookup(id) : null
+  if (!table || rowIndex(table, first ? arrow.startRow : arrow.endRow) < 0) return null
+
+  const point = first ? {x: arrow.x1, y: arrow.y1} : {x: arrow.x2, y: arrow.y2}
+  const outward = point.x > table.x + table.width / 2 ? ROW_STUB : -ROW_STUB
+  return {x: point.x + outward, y: point.y}
+}
+
+// The points an arrow is drawn through: its ends, with a short straight run
+// out of any row it is attached to, and its bends between. Expects the ends
+// already resolved.
+export function arrowRoute(arrow, lookup) {
+  const stubs = [rowStub(arrow, "start", lookup), rowStub(arrow, "end", lookup)]
+  return [
+    {x: arrow.x1, y: arrow.y1},
+    ...(stubs[0] ? [stubs[0]] : []),
+    ...bends(arrow).map(({x, y}) => ({x, y})),
+    ...(stubs[1] ? [stubs[1]] : []),
+    {x: arrow.x2, y: arrow.y2},
+  ]
+}
+
+// The bends of an arrow that takes an element round to itself, out of its
+// way: each end runs straight out of its side to `reach` past the outline,
+// and the line goes on round the corners between, the shorter way. `from`
+// and `to` are the ends, or the ends of their runs out of a row, each with
+// the side of the box it leaves from, "n", "e", "s" or "w".
+const SIDES = ["n", "e", "s", "w"]
+
+export function loopBends(element, from, to, reach = LOOP_REACH) {
+  const box = inflate(bounds(element), reach)
+  const right = box.x + box.width
+  const bottom = box.y + box.height
+  // The corner after each side, going clockwise.
+  const corners = [{x: right, y: box.y}, {x: right, y: bottom}, {x: box.x, y: bottom}, {x: box.x, y: box.y}]
+  const out = ({point, side}) => ({
+    n: {x: point.x, y: Math.min(point.y, box.y)},
+    e: {x: Math.max(point.x, right), y: point.y},
+    s: {x: point.x, y: Math.max(point.y, bottom)},
+    w: {x: Math.min(point.x, box.x), y: point.y},
+  })[side]
+
+  const first = SIDES.indexOf(from.side)
+  const last = SIDES.indexOf(to.side)
+  const clockwise = []
+  const counter = []
+  for (let side = first; side !== last; side = (side + 1) % 4) clockwise.push(corners[side])
+  for (let side = first; side !== last; side = (side + 3) % 4) counter.push(corners[(side + 3) % 4])
+
+  const route = (turns) => [out(from), ...turns, out(to)]
+  const length = (points) => points.slice(1).reduce((sum, point, index) =>
+    sum + Math.hypot(point.x - points[index].x, point.y - points[index].y), 0)
+  const [one, other] = [route(clockwise), route(counter)]
+  return length(other) < length(one) ? other : one
 }
 
 export function polylineDistance(points, point) {

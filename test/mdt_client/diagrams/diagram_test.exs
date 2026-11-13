@@ -117,6 +117,41 @@ defmodule MDTClient.Diagrams.DiagramTest do
     assert %{"start" => nil, "startRow" => nil, "head" => "end"} = by_id["loose"]
   end
 
+  test "arrows keep where their ends are pinned and the points they bend at" do
+    elements =
+      Diagram.elements([
+        %{"id" => "box", "type" => "rectangle"},
+        %{
+          "id" => "pinned",
+          "type" => "arrow",
+          "start" => "box",
+          "startAnchor" => %{"x" => 0.123456, "y" => -3},
+          "end" => "box",
+          "endAnchor" => %{"x" => 1, "y" => 0.5},
+          "points" => [%{"x" => 10.006, "y" => -20}, %{"x" => "?"}, "junk", %{"x" => 1, "y" => 2}]
+        },
+        %{
+          "id" => "loose",
+          "type" => "arrow",
+          "start" => "gone",
+          "startAnchor" => %{"x" => 0.5, "y" => 0},
+          "endAnchor" => %{"x" => 0.5},
+          "points" => "none"
+        }
+      ])
+
+    by_id = Map.new(elements, &{&1["id"], &1})
+
+    assert %{
+             "startAnchor" => %{"x" => 0.1235, "y" => +0.0},
+             "endAnchor" => %{"x" => 1.0, "y" => 0.5},
+             "points" => [%{"x" => 10.01, "y" => -20}, %{"x" => 1, "y" => 2}]
+           } = by_id["pinned"]
+
+    assert %{"start" => nil, "startAnchor" => nil, "endAnchor" => nil, "points" => []} =
+             by_id["loose"]
+  end
+
   test "a table's title and rows are searched and quoted" do
     diagram =
       Diagram.new(%{

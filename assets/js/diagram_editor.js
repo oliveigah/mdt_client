@@ -21,13 +21,18 @@ import {
   FONT_SIZES,
   LINE_HEIGHT,
   TABLE_CELL_PADDING,
+  anchorAt,
+  anchorPoint,
   arrowHead,
   arrowRoute,
+  bends,
   bounds,
   center,
   containsPoint,
   containsRect,
   distanceToBox,
+  distanceToOutline,
+  distanceToSegment,
   fontSize,
   handlePoints,
   headerBox,
@@ -38,9 +43,12 @@ import {
   isArrow,
   isShape,
   isTable,
+  leaveBox,
   lineHeight,
+  loopBends,
   matchingIds,
   normalizeRect,
+  outlineSide,
   pointAlong,
   polylineDistance,
   portPoint,
@@ -50,6 +58,8 @@ import {
   rowAt,
   rowBox,
   rowIndex,
+  rowStub,
+  snapAnchor,
   tableFont,
   tableHeaderHeight,
   tableHeight,
@@ -100,6 +110,21 @@ const HANDLE_CURSORS = {
 const PORT_GAP = 16
 const PORT_REACH = 9
 const PORT_NEAR = 32
+// Arrow ends and bends, in screen pixels: how close to an outline an end
+// lands to be pinned there rather than float, how close to the middle of a
+// side it settles on it, how close a bend comes to line up with the points
+// either side of it, how nearly in line with them it goes away on release,
+// and how long a stretch must be to offer to bend.
+const PIN_REACH = 10
+const PIN_SNAP = 8
+const BEND_SNAP = 6
+const STRAIGHT = 4
+const BEND_MIN = 24
+
+// The fields an arrow keeps for each end: the element, the row on it and
+// the anchor it is pinned to.
+const END_KEYS = {start: ["start", "startRow", "startAnchor"], end: ["end", "endRow", "endAnchor"]}
+const otherEnd = (end) => (end === "end" ? "start" : "end")
 
 // Kept outside the hook so they outlive switching diagrams, and the editor
 // being mounted again after visiting another tool.
@@ -418,27 +443,36 @@ export const DiagramEditor = {
   },
 
   // Moves elements together. An arrow moved without what it is attached to
-  // comes loose from it.
+  // comes loose from it; one left behind between two elements that both
+  // move keeps its shape, its bends moving along with them.
   translate(elements, dx, dy) {
     const moving = new Set(elements.map((element) => element.id))
+    const shift = ({x, y}) => ({x: x + dx, y: y + dy})
 
     for (const element of elements) {
       if (isArrow(element)) {
-        if (element.start && !moving.has(element.start)) element.start = element.startRow = null
-        if (element.end && !moving.has(element.end)) element.end = element.endRow = null
+        if (element.start && !moving.has(element.start)) element.start = element.startRow = element.startAnchor = null
+        if (element.end && !moving.has(element.end)) element.end = element.endRow = element.endAnchor = null
         element.x1 += dx
         element.y1 += dy
         element.x2 += dx
         element.y2 += dy
+        if (bends(element).length) element.points = bends(element).map(shift)
       } else {
         element.x += dx
         element.y += dy
       }
     }
+
+    for (const arrow of this.elements) {
+      if (!isArrow(arrow) || moving.has(arrow.id) || bends(arrow).length === 0) continue
+      if (moving.has(arrow.start) && moving.has(arrow.end)) arrow.points = bends(arrow).map(shift)
+    }
   },
 
   // Brings every attached arrow end back onto its element, and lets go of the
-  // ones whose element is gone. An end whose row is gone stays on the table.
+  // ones whose element is gone. An end whose row is gone stays on the table,
+  // pinned to the side it was on, if it was.
   resolveArrows() {
     const byId = new Map(this.elements.map((element) => [element.id, element]))
     const lookup = (id) => {
@@ -453,13 +487,44 @@ export const DiagramEditor = {
       if (element.end && !lookup(element.end)) element.end = null
       if (rowIndex(lookup(element.start), element.startRow) < 0) element.startRow = null
       if (rowIndex(lookup(element.end), element.endRow) < 0) element.endRow = null
+      if (!element.start && element.startAnchor) element.startAnchor = null
+      if (!element.end && element.endAnchor) element.endAnchor = null
       if (element.start || element.end) Object.assign(element, resolveArrow(element, lookup))
       this.routes.set(element.id, arrowRoute(element, lookup))
     }
   },
 
   route(arrow) {
-    return this.routes.get(arrow.id) || [{x: arrow.x1, y: arrow.y1}, {x: arrow.x2, y: arrow.y2}]
+    return this.routes.get(arrow.id) ||
+      [{x: arrow.x1, y: arrow.y1}, ...bends(arrow), {x: arrow.x2, y: arrow.y2}]
+  },
+
+  // The points a selected arrow is shaped by: where it leaves its start, or
+  // the row it starts on, its bends, and where it reaches its end.
+  controls(arrow) {
+    const route = this.route(arrow)
+    const first = arrow.start && arrow.startRow ? 1 : 0
+    const last = route.length - (arrow.end && arrow.endRow ? 2 : 1)
+    return route.slice(first, last + 1)
+  },
+
+  // Where each stretch between them offers to bend: its middle, or just past
+  // the label when that sits there. Null for a stretch too short to bend.
+  bendSpots(arrow) {
+    const controls = this.controls(arrow)
+    const label = this.labelBoxes.get(arrow.id)
+    const zoom = this.view.zoom
+
+    return controls.slice(1).map((to, index) => {
+      const from = controls[index]
+      if (Math.hypot(to.x - from.x, to.y - from.y) < BEND_MIN / zoom) return null
+      const middle = {x: (from.x + to.x) / 2, y: (from.y + to.y) / 2}
+      return label && containsPoint(label, middle) ? leaveBox(inflate(label, 8 / zoom), middle, to) : middle
+    })
+  },
+
+  looped(arrow) {
+    return !!arrow.start && arrow.start === arrow.end
   },
 
   // Where a label goes: halfway along an arrow, in the middle of anything else.
@@ -534,19 +599,47 @@ export const DiagramEditor = {
   },
 
   // What an arrow end at `point` would attach to: the topmost element there,
-  // and the row under it on a table. The end may not join the element the
-  // other end is on, `other`, except from one of its rows to another.
+  // or with its outline close by, and the row under it on a table. Close to
+  // the outline, or to the side of a row, the end is pinned to that spot;
+  // further in, it floats. It may only join the element the other end is
+  // on, `other`, at a spot of its own: pinned, or on another row.
   attachableAt(point, other = {}) {
+    const reach = PIN_REACH / this.view.zoom
+
     for (let index = this.elements.length - 1; index >= 0; index--) {
       const element = this.elements[index]
-      if (isArrow(element) || !hitTest(element, point, this.tolerance())) continue
+      if (isArrow(element)) continue
+      if (!hitTest(element, point, this.tolerance()) && distanceToOutline(element, point) > reach) continue
 
-      const found = isTable(element) ? rowAt(element, point) : -1
-      const row = found >= 0 ? element.rows[found].id : null
-      if (element.id === other.id && !(row && other.row && row !== other.row)) continue
-      return {element, row}
+      const {row, anchor} = this.pinAt(element, point, reach)
+      if (element.id === other.id && (row ? row === other.row : !anchor)) continue
+      return {element, row, anchor}
     }
     return null
+  },
+
+  // Where on `element` an end at `point` goes: a row, maybe pinned to one
+  // side of it, or a spot of the outline within `reach` of the point. Inside
+  // a small element, the reach shrinks to leave room to float.
+  pinAt(element, point, reach) {
+    if (hitTest(element, point)) reach = Math.min(reach, Math.min(element.width, element.height) / 4)
+
+    if (isTable(element)) {
+      const right = element.x + element.width
+      const index = rowAt(element, {x: clamp(point.x, element.x, right), y: point.y})
+      if (index >= 0) {
+        const row = element.rows[index].id
+        if (Math.min(Math.abs(point.x - element.x), Math.abs(point.x - right)) <= reach) {
+          return {row, anchor: anchorAt(element, index, point)}
+        }
+        // The bottom of the last row is the bottom of the table.
+        const last = index === element.rows.length - 1
+        if (!last || Math.abs(point.y - (element.y + element.height)) > reach) return {row, anchor: null}
+      }
+    }
+
+    if (distanceToOutline(element, point) > reach) return {row: null, anchor: null}
+    return {row: null, anchor: snapAnchor(element, anchorAt(element, -1, point), PIN_SNAP / this.view.zoom)}
   },
 
   // The part of a table under `point`: a cell of a row, or the title.
@@ -566,9 +659,15 @@ export const DiagramEditor = {
     const reach = 7 / this.view.zoom
 
     if (isArrow(element)) {
-      if (Math.hypot(point.x - element.x1, point.y - element.y1) <= reach) return {element, end: "start"}
-      if (Math.hypot(point.x - element.x2, point.y - element.y2) <= reach) return {element, end: "end"}
-      return null
+      const close = (spot) => !!spot && Math.hypot(point.x - spot.x, point.y - spot.y) <= reach
+      if (close({x: element.x1, y: element.y1})) return {element, end: "start"}
+      if (close({x: element.x2, y: element.y2})) return {element, end: "end"}
+
+      const bend = bends(element).findIndex(close)
+      if (bend >= 0) return {element, bend}
+      const spots = this.bendSpots(element)
+      const insert = spots.findIndex(close)
+      return insert >= 0 ? {element, insert, spot: spots[insert]} : null
     }
 
     for (const [handle, spot] of Object.entries(this.handles(element))) {
@@ -676,7 +775,18 @@ export const DiagramEditor = {
         offset: {x: point.x - spot.x, y: point.y - spot.y},
       }
     }
-    if (grip?.end) return {kind: "arrow", id: grip.element.id, end: grip.end}
+    if (grip?.end) return this.endGesture(grip.element, grip.end)
+    if (grip?.bend !== undefined) {
+      const spot = bends(grip.element)[grip.bend]
+      return {kind: "bend", id: grip.element.id, index: grip.bend, offset: {x: point.x - spot.x, y: point.y - spot.y}}
+    }
+    // A stretch bends only once it is dragged, so a click there does nothing.
+    if (grip?.insert !== undefined) {
+      return {
+        kind: "bend", id: grip.element.id, insert: grip.insert, origin: point,
+        offset: {x: point.x - grip.spot.x, y: point.y - grip.spot.y},
+      }
+    }
 
     const port = this.portAt(point)
     if (port) return this.arrowGesture(point, port)
@@ -704,14 +814,28 @@ export const DiagramEditor = {
   },
 
   // Draws a new arrow out from `point`, its start attached to `from`, an
-  // element and maybe one of its rows, when given.
+  // element and maybe one of its rows and an anchor, when given.
   arrowGesture(point, from) {
     const arrow = this.add({
       type: "arrow", x1: point.x, y1: point.y, x2: point.x, y2: point.y,
-      start: from?.id ?? null, startRow: from?.row ?? null, end: null, endRow: null,
+      start: from?.id ?? null, startRow: from?.row ?? null, startAnchor: from?.anchor ?? null,
+      end: null, endRow: null, endAnchor: null, points: [],
     })
     this.selected = new Set()
-    return {kind: "arrow", id: arrow.id, end: "end", origin: point, created: true}
+    return this.endGesture(arrow, "end", {origin: point, created: true})
+  },
+
+  // Drags one end of an arrow. The other end is kept as it was, to put back
+  // should it be pinned for a loop that comes undone, with where it is.
+  endGesture(arrow, end, extra = {}) {
+    const keys = END_KEYS[otherEnd(end)]
+    return {
+      kind: "arrow", id: arrow.id, end,
+      other: Object.fromEntries(keys.map((key) => [key, arrow[key] ?? null])),
+      otherSpot: end === "end" ? {x: arrow.x1, y: arrow.y1} : {x: arrow.x2, y: arrow.y2},
+      looped: this.looped(arrow),
+      ...extra,
+    }
   },
 
   pointerMove(event) {
@@ -776,19 +900,38 @@ export const DiagramEditor = {
       case "arrow": {
         const arrow = this.find(gesture.id)
         if (!arrow) break
-        const other = gesture.end === "end"
-          ? {id: arrow.start, row: arrow.startRow}
-          : {id: arrow.end, row: arrow.endRow}
+        const [id, row, anchor] = END_KEYS[gesture.end]
+        const [otherId, otherRow, otherAnchor] = END_KEYS[otherEnd(gesture.end)]
+        Object.assign(arrow, gesture.other)
+        const other = {id: arrow[otherId], row: arrow[otherRow], anchor: arrow[otherAnchor]}
         const target = this.attachableAt(point, other)
-        const id = target?.element.id ?? null
-        const row = target?.row ?? null
-        gesture.target = target && {id, row}
+        gesture.target = target && {id: target.element.id, row: target.row, anchor: target.anchor}
 
-        if (gesture.end === "end") {
-          Object.assign(arrow, {x2: point.x, y2: point.y, end: id, endRow: row})
-        } else {
-          Object.assign(arrow, {x1: point.x, y1: point.y, start: id, startRow: row})
+        Object.assign(arrow, gesture.end === "end" ? {x2: point.x, y2: point.y} : {x1: point.x, y1: point.y}, {
+          [id]: target?.element.id ?? null, [row]: target?.row ?? null, [anchor]: target?.anchor ?? null,
+        })
+        // Brought round to the element the other end floats on, that end
+        // stays where it is, pinned there.
+        if (target && target.element.id === other.id && !other.row && !other.anchor) {
+          const spot = anchorAt(target.element, -1, gesture.otherSpot)
+          arrow[otherAnchor] = snapAnchor(target.element, spot, PIN_SNAP / this.view.zoom)
         }
+        break
+      }
+
+      case "bend": {
+        const arrow = this.find(gesture.id)
+        if (!arrow) break
+        if (gesture.insert !== undefined) {
+          if (Math.hypot(point.x - gesture.origin.x, point.y - gesture.origin.y) < 3 / this.view.zoom) break
+          arrow.points = [...bends(arrow)]
+          arrow.points.splice(gesture.insert, 0, {x: point.x, y: point.y})
+          gesture.index = gesture.insert
+          gesture.insert = undefined
+        }
+        const spot = {x: point.x - gesture.offset.x, y: point.y - gesture.offset.y}
+        arrow.points[gesture.index] = this.snapBend(arrow, gesture.index, spot)
+        gesture.moved = true
         break
       }
 
@@ -857,6 +1000,17 @@ export const DiagramEditor = {
         this.selected = new Set([arrow.id])
         if (gesture.created) this.setTool("select")
         this.resolveArrows()
+        if (!gesture.looped && this.looped(arrow) && bends(arrow).length === 0) this.loopAround(arrow)
+        this.commit(gesture.snapshot)
+        break
+      }
+
+      case "bend": {
+        const arrow = this.find(gesture.id)
+        if (arrow && gesture.moved) {
+          this.resolveArrows()
+          this.straighten(arrow, gesture.index)
+        }
         this.commit(gesture.snapshot)
         break
       }
@@ -891,6 +1045,8 @@ export const DiagramEditor = {
     if (this.tool !== "select") return
 
     const point = this.world(this.local(event))
+    const grip = this.handleAt(point)
+    if (grip?.bend !== undefined) return this.removeBend(grip.element, grip.bend)
     // Two clicks on a port only draw nothing twice.
     if (this.portAt(point)) return
 
@@ -922,7 +1078,8 @@ export const DiagramEditor = {
     const table = selecting && this.singleSelected()
     const hoverRow = table && isTable(table) ? (table.rows[rowAt(table, point)]?.id ?? null) : null
 
-    const key = JSON.stringify([hovered, hoverRow, this.hoverControl?.name, this.ports, this.hoverPort])
+    const grip = this.hoverHandle && [this.hoverHandle.end, this.hoverHandle.bend, this.hoverHandle.insert]
+    const key = JSON.stringify([hovered, hoverRow, this.hoverControl?.name, this.ports, this.hoverPort, grip])
     if (key !== this.hoverKey) {
       this.hoverKey = key
       this.hovered = hovered
@@ -949,8 +1106,75 @@ export const DiagramEditor = {
     else if (this.hoverControl) cursor = "pointer"
     else if (this.hoverHandle?.handle) cursor = HANDLE_CURSORS[this.hoverHandle.handle]
     else if (this.hoverPort) cursor = "crosshair"
-    else if (this.hoverHandle?.end || this.hovered) cursor = "move"
+    else if (this.hoverHandle || this.hovered) cursor = "move"
     this.svg.style.cursor = cursor
+  },
+
+  // Bends and loops
+
+  // A bend lines up with the points either side of it when close to level
+  // with them, so a stretch can be drawn straight across or down.
+  snapBend(arrow, index, point) {
+    const points = bends(arrow)
+    const before = index > 0 ? points[index - 1] : this.endTarget(arrow, "start")
+    const after = index < points.length - 1 ? points[index + 1] : this.endTarget(arrow, "end")
+    const reach = BEND_SNAP / this.view.zoom
+
+    const snap = (axis) => {
+      const near = [before[axis], after[axis]]
+        .filter((value) => Math.abs(value - point[axis]) <= reach)
+        .sort((a, b) => Math.abs(a - point[axis]) - Math.abs(b - point[axis]))
+      return near[0] ?? point[axis]
+    }
+    return {x: snap("x"), y: snap("y")}
+  },
+
+  // What a bend next to an end lines up with: the middle of the element the
+  // end floats on, since the end follows the bend round its outline, or else
+  // the end itself, or where its run out of a row finishes.
+  endTarget(arrow, end) {
+    const [id, row, anchor] = END_KEYS[end]
+    const element = arrow[id] && this.find(arrow[id])
+    if (element && !arrow[row] && !arrow[anchor]) return center(element)
+
+    const controls = this.controls(arrow)
+    return end === "start" ? controls[0] : controls[controls.length - 1]
+  },
+
+  // A bend dragged back in line with the points either side of it goes, the
+  // stretch being straight again.
+  straighten(arrow, index) {
+    const [before, bend, after] = this.controls(arrow).slice(index, index + 3)
+    if (!after || distanceToSegment(bend, before, after) > STRAIGHT / this.view.zoom) return
+
+    arrow.points = bends(arrow).filter((_, other) => other !== index)
+    this.resolveArrows()
+  },
+
+  removeBend(arrow, index) {
+    const snapshot = this.snapshot()
+    arrow.points = bends(arrow).filter((_, other) => other !== index)
+    this.resolveArrows()
+    this.commit(snapshot)
+  },
+
+  // An arrow just brought round from an element to itself gets bends that
+  // take it round the outside, rather than straight across. Two rows on one
+  // side of a table already loop out of it.
+  loopAround(arrow) {
+    const element = this.find(arrow.start)
+    if (!element) return
+
+    const lookup = (id) => this.find(id)
+    const ends = ["start", "end"].map((end) => {
+      const point = end === "start" ? {x: arrow.x1, y: arrow.y1} : {x: arrow.x2, y: arrow.y2}
+      const stub = rowStub(arrow, end, lookup)
+      return stub ? {point: stub, side: stub.x > point.x ? "e" : "w"} : {point, side: outlineSide(element, point)}
+    })
+    if (arrow.startRow && arrow.endRow && ends[0].side === ends[1].side) return
+
+    arrow.points = loopBends(element, ...ends)
+    this.resolveArrows()
   },
 
   // Ports
@@ -1580,8 +1804,8 @@ export const DiagramEditor = {
       if (isArrow(copy)) {
         copy.start = ids.get(copy.start) ?? null
         copy.end = ids.get(copy.end) ?? null
-        if (!copy.start) copy.startRow = null
-        if (!copy.end) copy.endRow = null
+        if (!copy.start) copy.startRow = copy.startAnchor = null
+        if (!copy.end) copy.endRow = copy.endAnchor = null
       }
     }
     this.translate(copies, dx, dy)
@@ -1947,22 +2171,28 @@ export const DiagramEditor = {
     const hovered = this.hovered && !this.selected.has(this.hovered) && !this.gesture && this.find(this.hovered)
     if (hovered) frame(inflate(bounds(hovered), 4 / zoom), "fill-none stroke-accent/40")
 
+    // An end about to float lights up what it attaches to; one about to be
+    // pinned marks the spot, on a fainter outline.
     const target = this.gesture?.kind === "arrow" && this.gesture.target
     const attaching = target && this.find(target.id)
     if (attaching) {
       const row = rowIndex(attaching, target.row)
       const box = row >= 0 ? inflate(rowBox(attaching, row), 2 / zoom) : inflate(bounds(attaching), 5 / zoom)
-      frame(box, "fill-accent/10 stroke-accent stroke-2")
+      if (target.anchor) {
+        frame(box, "fill-none stroke-accent/45")
+        const spot = anchorPoint(attaching, row, target.anchor)
+        parts.push(svg("circle", {
+          cx: spot.x, cy: spot.y, r: 4.5 / zoom, class: "fill-accent stroke-accent/25 stroke-[6]",
+          "vector-effect": "non-scaling-stroke",
+        }))
+      } else {
+        frame(box, "fill-accent/10 stroke-accent stroke-2")
+      }
     }
 
     const selected = this.selectedElements()
     if (selected.length === 1 && isArrow(selected[0])) {
-      const {x1, y1, x2, y2} = selected[0]
-      for (const [cx, cy] of [[x1, y1], [x2, y2]]) {
-        parts.push(svg("circle", {
-          cx, cy, r: 5 / zoom, class: "fill-deep stroke-accent stroke-2", "vector-effect": "non-scaling-stroke",
-        }))
-      }
+      parts.push(...this.arrowHandles(selected[0]))
     } else if (selected.length > 0) {
       if (selected.length > 1) {
         for (const element of selected) frame(inflate(bounds(element), 3 / zoom), "fill-none stroke-accent/50")
@@ -1991,6 +2221,43 @@ export const DiagramEditor = {
 
     this.overlay.replaceChildren(...parts)
     this.renderPorts()
+  },
+
+  // The handles of the selected arrow: a ring on each end, filled where it is
+  // pinned, a square on each bend, and a fainter dot on each stretch that
+  // offers to bend there. The one under the pointer grows a little.
+  arrowHandles(arrow) {
+    const zoom = this.view.zoom
+    const unscaled = {"vector-effect": "non-scaling-stroke"}
+    const grip = this.hoverHandle?.element.id === arrow.id ? this.hoverHandle : {}
+    const parts = []
+
+    this.bendSpots(arrow).forEach((spot, index) => {
+      if (!spot) return
+      const lit = grip.insert === index
+      parts.push(svg("circle", {
+        cx: spot.x, cy: spot.y, r: (lit ? 5 : 3.5) / zoom, ...unscaled,
+        class: lit ? "fill-accent-soft stroke-accent stroke-[1.5]" : "fill-deep stroke-accent/60 stroke-[1.5]",
+      }))
+    })
+
+    bends(arrow).forEach((spot, index) => {
+      const side = (grip.bend === index ? 10 : 8) / zoom
+      parts.push(svg("rect", {
+        x: spot.x - side / 2, y: spot.y - side / 2, width: side, height: side, rx: 2 / zoom, ...unscaled,
+        class: "fill-accent stroke-deep stroke-[1.5]",
+      }))
+    })
+
+    for (const end of ["start", "end"]) {
+      const [cx, cy] = end === "start" ? [arrow.x1, arrow.y1] : [arrow.x2, arrow.y2]
+      const pinned = !!arrow[END_KEYS[end][2]]
+      parts.push(svg("circle", {
+        cx, cy, r: (grip.end === end ? 6 : 5) / zoom, ...unscaled,
+        class: pinned ? "fill-accent stroke-accent stroke-2" : "fill-deep stroke-accent stroke-2",
+      }))
+    }
+    return parts
   },
 
   // Buttons drawn by the selected table: one under it to add a row, and one

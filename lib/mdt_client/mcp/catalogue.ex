@@ -61,7 +61,8 @@ defmodule MDTClient.MCP.Catalogue do
         "Create diagram",
         "Create an editable native MDT canvas diagram, not Mermaid or an image. Supply a complete layout. " <>
           "Shapes need x/y and positive width/height; arrows need x1/y1/x2/y2 even when attached. " <>
-          "IDs must be unique within the diagram. start/end attach to shapes; startRow/endRow attach to rows on those tables. " <>
+          "IDs must be unique within the diagram. start/end attach to shapes; startRow/endRow attach to rows on those tables; " <>
+          "startAnchor/endAnchor pin an end to one spot of the outline and points bends an arrow round others. " <>
           "Leave room for labels and use short multiline text. The editor fits text and table cells when opened. " <>
           "Read mdt://guides/diagrams for sizing, row anchors and examples. Each call creates a new diagram.",
         diagram_schema()
@@ -307,6 +308,27 @@ defmodule MDTClient.MCP.Catalogue do
   defp record(properties), do: object(properties, Map.keys(properties))
   defp coordinate, do: %{"type" => "number", "minimum" => -10_000_000, "maximum" => 10_000_000}
   defp extent, do: %{"type" => "number", "minimum" => 0, "maximum" => 10_000_000}
+  defp share, do: %{"type" => "number", "minimum" => 0, "maximum" => 1}
+
+  defp anchor(endpoint) do
+    record(%{
+      "x" => describe(share(), "Fraction of the box width from its left edge, 0 to 1."),
+      "y" => describe(share(), "Fraction of the box height from its top edge, 0 to 1.")
+    })
+    |> nullable()
+    |> describe(
+      "Pins the #{endpoint} to one spot of the attached element's outline, as fractions of its box: " <>
+        "{x: 0.5, y: 0} is the middle of the top edge, {x: 1, y: 0.25} a quarter down the right edge; " <>
+        "a spot off the outline counts from the closest point on it. With a #{endpoint}Row, only the side counts: " <>
+        "x below 0.5 is the row's left edge, otherwise its right. Null floats: the end meets the outline " <>
+        "facing the next point along. Requires #{endpoint}. Pin ends to different spots so parallel arrows do not overlap."
+    )
+    |> default(nil)
+  end
+
+  defp bend do
+    record(%{"x" => describe(coordinate(), "Bend x."), "y" => describe(coordinate(), "Bend y.")})
+  end
 
   defp element(stored? \\ false) do
     properties = %{
@@ -380,6 +402,16 @@ defmodule MDTClient.MCP.Catalogue do
           "Row ID on the table named by end. Requires a non-null end referencing that table."
         )
         |> default(nil),
+      "startAnchor" => anchor("start"),
+      "endAnchor" => anchor("end"),
+      "points" =>
+        array(bend(), 200)
+        |> describe(
+          "Arrow only: canvas points the arrow bends at, in order from start to end. A floating attached end " <>
+            "heads for the nearest bend. Use them to route parallel or opposite arrows apart and to loop an element " <>
+            "back to itself (pin both ends, then bend round the outside)."
+        )
+        |> default([]),
       "head" =>
         choice(~w(end both none))
         |> describe("Arrowhead placement. Use none for plain lines or dashed sequence lifelines.")
@@ -425,12 +457,20 @@ defmodule MDTClient.MCP.Catalogue do
         conditions
       else
         conditions ++
-          Enum.map([{"startRow", "start"}, {"endRow", "end"}], fn {row, endpoint} ->
-            %{
-              "if" => %{"properties" => %{row => text()}, "required" => [row]},
-              "then" => %{"properties" => %{endpoint => identifier()}, "required" => [endpoint]}
-            }
-          end)
+          Enum.map(
+            [
+              {"startRow", "start", text()},
+              {"endRow", "end", text()},
+              {"startAnchor", "start", %{"type" => "object"}},
+              {"endAnchor", "end", %{"type" => "object"}}
+            ],
+            fn {key, endpoint, set} ->
+              %{
+                "if" => %{"properties" => %{key => set}, "required" => [key]},
+                "then" => %{"properties" => %{endpoint => identifier()}, "required" => [endpoint]}
+              }
+            end
+          )
       end
 
     object(properties, ["id", "type"])

@@ -916,20 +916,30 @@ defmodule MDTClient.Sandbox.Server do
   defp redact_output(approval), do: approval
 
   @impl true
-  def terminate(_reason, state) do
+  def terminate(reason, state) do
     persist(state)
     stop_forwarder(state)
 
-    # A command runs for the VM, which stops with MDT, so it stops too.
+    # A command reports back to this process, which is going away.
     for {_id, group} <- state.running, is_integer(group), do: HostRun.stop(group, "KILL")
 
-    # Locking MDT or quitting it leaves no VM running without the proxy.
-    if state.vm.exists? and state.vm.status in [:running, :starting] do
+    # Locking MDT or quitting it leaves no VM running without the proxy. A
+    # crash leaves the VM alone: the proxy is a process of its own and keeps
+    # going, and the restarted sandbox finds the VM running and takes it back
+    # (`check/1`), so a bug costs the agents their pending asks, not their VM.
+    # If the restarts give up, the vault locks and the proxy closes with it:
+    # the VM has no internet until an unlock takes it back.
+    if deliberate?(reason) and state.vm.exists? and state.vm.status in [:running, :starting] do
       Msb.run(["stop", state.vm.name], 20)
     end
 
     :ok
   end
+
+  defp deliberate?(:normal), do: true
+  defp deliberate?(:shutdown), do: true
+  defp deliberate?({:shutdown, _detail}), do: true
+  defp deliberate?(_crash), do: false
 
   ## Authorizing a request
 
@@ -1526,6 +1536,7 @@ defmodule MDTClient.Sandbox.Server do
                else: "Access you haven't set up"
              ),
            agent: agent,
+           thread: Approval.thread(ask),
            minutes: minutes,
            need: if(grant, do: nil, else: need),
            reason: reason,
@@ -1592,6 +1603,7 @@ defmodule MDTClient.Sandbox.Server do
          kind: :command,
          title: checked.title,
          agent: checked.agent,
+         thread: checked.thread,
          reason: checked.reason,
          script: checked.script,
          dir: checked.dir,

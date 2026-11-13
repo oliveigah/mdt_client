@@ -14,6 +14,9 @@ defmodule MDTClient.Sandbox.Approval do
       once it ran, for you to release the output (`stage: :output`). `run`
       holds how the run went (`t:run/0`).
 
+  `agent` and `thread` say who asked (`t:thread/0`), as the asking process
+  told it: claims, so they help you tell asks apart and prove nothing.
+
   `facts` are what MDT worked out itself. `claims` are text the agent wrote,
   such as commit messages; they are shown apart and never taken as facts.
   `hints` (commands only) are what MDT guessed from a command's text, shown
@@ -35,6 +38,7 @@ defmodule MDTClient.Sandbox.Approval do
     :pattern,
     :request,
     :agent,
+    :thread,
     :minutes,
     :need,
     :reason,
@@ -76,6 +80,16 @@ defmodule MDTClient.Sandbox.Approval do
           | :send_output
           | :keep_output
 
+  @typedoc """
+  The agent thread an ask came from: its `title` (as the agent shows it),
+  its `id`, and the `folder` the agent works in. Any of them may be nil.
+  """
+  @type thread :: %{
+          title: String.t() | nil,
+          id: String.t() | nil,
+          folder: String.t() | nil
+        }
+
   @type request :: %{
           host: String.t(),
           method: String.t(),
@@ -115,6 +129,7 @@ defmodule MDTClient.Sandbox.Approval do
           pattern: String.t() | nil,
           request: request() | nil,
           agent: String.t() | nil,
+          thread: thread() | nil,
           minutes: pos_integer() | nil,
           need: String.t() | nil,
           reason: String.t() | nil,
@@ -133,6 +148,73 @@ defmodule MDTClient.Sandbox.Approval do
           retries: non_neg_integer(),
           status: status()
         }
+
+  @doc """
+  The thread an ask names (`:thread`, `:thread_id`, `:folder`), trimmed and
+  cut to size, or nil when it names none.
+  """
+  @spec thread(map()) :: thread() | nil
+  def thread(ask) do
+    thread = %{
+      title: claim(ask, :thread, 200),
+      id: claim(ask, :thread_id, 80),
+      folder: claim(ask, :folder, 1_000)
+    }
+
+    if Enum.all?(Map.values(thread), &is_nil/1), do: nil, else: thread
+  end
+
+  @doc """
+  Where an ask came from, in a line: the thread's title (or the start of its
+  id) and its folder, with your home folder as `~`. Nil when it named none.
+  """
+  @spec asked_from(t(), String.t() | nil) :: String.t() | nil
+  def asked_from(approval, home \\ System.user_home())
+
+  def asked_from(%__MODULE__{thread: %{} = thread}, home) do
+    name =
+      cond do
+        thread.title -> "“#{thread.title}”"
+        thread.id -> "thread #{String.slice(thread.id, 0, 8)}"
+        true -> nil
+      end
+
+    folder = thread.folder && "in " <> short_folder(thread.folder, home)
+    [name, folder] |> Enum.reject(&is_nil/1) |> Enum.join(" ")
+  end
+
+  def asked_from(%__MODULE__{}, _home), do: nil
+
+  @doc "`folder` with `home` written as `~`."
+  @spec short_folder(String.t(), String.t() | nil) :: String.t()
+  def short_folder(folder, home \\ System.user_home())
+
+  def short_folder(folder, home) when is_binary(home) and home not in ["", "/"] do
+    cond do
+      folder == home -> "~"
+      String.starts_with?(folder, home <> "/") -> "~" <> String.replace_prefix(folder, home, "")
+      true -> folder
+    end
+  end
+
+  def short_folder(folder, _home), do: folder
+
+  defp claim(ask, key, limit) do
+    case Map.get(ask, key) do
+      text when is_binary(text) ->
+        text
+        |> String.replace(~r/[\x00-\x1f\x7f]+/, " ")
+        |> String.trim()
+        |> String.slice(0, limit)
+        |> case do
+          "" -> nil
+          text -> text
+        end
+
+      _ ->
+        nil
+    end
+  end
 
   @doc "Whether this is a use of a grant (a request or a connection) rather than an ask."
   @spec use?(t()) :: boolean()

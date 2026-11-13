@@ -32,6 +32,25 @@ defmodule MDTClient.Sandbox.DesktopNoticeTest do
            }
   end
 
+  test "an ask from a thread says which, with your home folder as ~" do
+    home = System.user_home!()
+
+    ask =
+      approval(%{
+        kind: :activation,
+        agent: "claude",
+        minutes: 30,
+        reason: "push the fix",
+        thread: %{title: "Fix the push flow", id: "f4cb1da2-43", folder: home <> "/projects/mdt"}
+      })
+
+    assert DesktopNotice.notice("ana", ask, @grant, @now).body ==
+             "From “Fix the push flow” in ~/projects/mdt\nFor 30 min\nReason: “push the fix”\nGives up in 30 min unless you decide."
+
+    untitled = %{ask | thread: %{title: nil, id: "f4cb1da2-43", folder: nil}}
+    assert DesktopNotice.notice("ana", untitled, @grant, @now).body =~ ~r/^From thread f4cb1da2\n/
+  end
+
   test "an ask no grant meets says what it needs" do
     ask =
       approval(%{

@@ -85,6 +85,57 @@ defmodule MDTClient.MCP.ToolsTest do
     assert length(call("list_diagrams", %{"query" => "uuid API"}, username)["items"]) == 1
   end
 
+  test "keeps arrows pinned to spots of an outline and bent round others", %{
+    username: username
+  } do
+    shape = %{
+      "id" => "state",
+      "type" => "rectangle",
+      "x" => 0,
+      "y" => 0,
+      "width" => 200,
+      "height" => 80
+    }
+
+    loop = %{
+      "id" => "retry",
+      "type" => "arrow",
+      "text" => "retry",
+      "x1" => 50,
+      "y1" => -6,
+      "x2" => 150,
+      "y2" => -6,
+      "start" => "state",
+      "startAnchor" => %{"x" => 0.25, "y" => 0},
+      "end" => "state",
+      "endAnchor" => %{"x" => 0.75, "y" => 0},
+      "points" => [%{"x" => 50, "y" => -40}, %{"x" => 150, "y" => -40}]
+    }
+
+    diagram =
+      call("create_diagram", %{"title" => "Loop", "elements" => [shape, loop]}, username)
+
+    assert %{
+             "startAnchor" => %{"x" => 0.25, "y" => +0.0},
+             "endAnchor" => %{"x" => 0.75, "y" => +0.0},
+             "points" => [%{"x" => 50, "y" => -40}, %{"x" => 150, "y" => -40}]
+           } = List.last(diagram["elements"])
+
+    assert call("get_diagram", %{"id" => diagram["id"]}, username) == diagram
+
+    for broken <- [
+          Map.delete(loop, "start"),
+          Map.put(loop, "endAnchor", %{"x" => 2, "y" => 0}),
+          Map.put(loop, "points", [%{"x" => 1}])
+        ] do
+      assert tool_error?(
+               "create_diagram",
+               %{"title" => "Broken", "elements" => [shape, broken]},
+               username
+             )
+    end
+  end
+
   test "rejects diagrams that would lose elements or attachments", %{username: username} do
     shape = %{
       "id" => "a",

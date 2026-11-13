@@ -86,6 +86,7 @@ defmodule MDTClientWeb.SandboxLive.Approvals do
                   <p class="truncate text-xs text-ink">{history_title(approval, @grants)}</p>
                   <p class="truncate text-[11px] text-faint">
                     {grant_name(@grants, approval)} · {decision_words(approval)}
+                    <span :if={approval.kind == :activation and approval.thread}>· {who(approval)}</span>
                   </p>
                 </div>
                 <span class="shrink-0 text-[11px] text-faint">
@@ -464,6 +465,7 @@ defmodule MDTClientWeb.SandboxLive.Approvals do
               asked {@approval.retries + 1} times
             </span>
           </div>
+          <.thread id={"approval-thread-#{@approval.id}"} thread={@approval.thread} />
           <h3 class="mt-0.5 break-all font-mono text-[13px] font-semibold leading-5 text-ink">
             {@approval.title}
           </h3>
@@ -579,6 +581,7 @@ defmodule MDTClientWeb.SandboxLive.Approvals do
             <span class="text-faint">·</span>
             <span>Ran on this machine; its output waits for you</span>
           </div>
+          <.thread id={"approval-thread-#{@approval.id}"} thread={@approval.thread} />
           <h3 class="mt-0.5 break-all font-mono text-[13px] font-semibold leading-5 text-ink">
             {@approval.title}
           </h3>
@@ -665,7 +668,7 @@ defmodule MDTClientWeb.SandboxLive.Approvals do
             {approval.title}
           </p>
           <p class="truncate text-[11px] text-faint">
-            {approval.agent} · in {approval.dir} · output {if approval.run.output_to == :send,
+            {who(approval)} · in {approval.dir} · output {if approval.run.output_to == :send,
               do: "to the agent",
               else: "to you first"}
             <span :if={approval.run.stopped} class="text-bad">· stopping…</span>
@@ -703,7 +706,7 @@ defmodule MDTClientWeb.SandboxLive.Approvals do
           <div class="min-w-0 flex-1">
             <p class="truncate font-mono text-xs text-ink">{@approval.title}</p>
             <p class="truncate text-[11px] text-faint">
-              {@approval.agent} · on this machine · {decision_words(@approval)}
+              {who(@approval)} · on this machine · {decision_words(@approval)}
             </p>
           </div>
           <span class="shrink-0 text-[11px] text-faint">
@@ -909,6 +912,7 @@ defmodule MDTClientWeb.SandboxLive.Approvals do
               asked {@approval.retries + 1} times
             </span>
           </div>
+          <.thread id={"approval-thread-#{@approval.id}"} thread={@approval.thread} />
           <h3 class="mt-0.5 text-sm font-semibold leading-5 text-ink">
             <%= if @grant do %>
               Turn on {@grant.name} for {minutes_words(@approval.minutes)}
@@ -1164,6 +1168,47 @@ defmodule MDTClientWeb.SandboxLive.Approvals do
       </ul>
     </div>
     """
+  end
+
+  attr :id, :string, required: true
+  attr :thread, :map, default: nil
+
+  # The thread an ask came from, as the agent's process tells it, so asks
+  # from several threads can be told apart. A claim, like the agent's name.
+  defp thread(assigns) do
+    ~H"""
+    <p
+      :if={@thread}
+      id={@id}
+      title={"The thread that asked, as its process says (not verified)" <> if(@thread.id, do: "\nThread id: " <> @thread.id, else: "") <> if(@thread.folder, do: "\nFolder: " <> @thread.folder, else: "")}
+      class="mt-0.5 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px] text-muted"
+    >
+      <span
+        :if={@thread.title || @thread.id}
+        id={"#{@id}-title"}
+        class="inline-flex min-w-0 max-w-full items-center gap-1"
+      >
+        <.icon name="hero-chat-bubble-left-right-micro" class="size-3 shrink-0 text-faint" />
+        <span class="truncate">{@thread.title || "thread " <> String.slice(@thread.id, 0, 8)}</span>
+      </span>
+      <span
+        :if={@thread.folder}
+        id={"#{@id}-folder"}
+        class="inline-flex min-w-0 max-w-full items-center gap-1"
+      >
+        <.icon name="hero-folder-micro" class="size-3 shrink-0 text-faint" />
+        <span class="truncate font-mono">{Approval.short_folder(@thread.folder)}</span>
+      </span>
+    </p>
+    """
+  end
+
+  # The agent and the thread it asked from, for one-line rows.
+  defp who(%Approval{} = approval) do
+    case Approval.asked_from(approval) do
+      nil -> approval.agent
+      from -> "#{approval.agent} #{from}"
+    end
   end
 
   attr :approval, Approval, required: true

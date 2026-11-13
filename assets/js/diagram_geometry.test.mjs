@@ -1,14 +1,25 @@
 import assert from "node:assert/strict"
 import {test} from "node:test"
 import {
+  ARROW_GAP,
+  LOOP_REACH,
   ROW_STUB,
+  anchorAt,
+  anchorPoint,
   arrowHead,
   arrowRoute,
   borderPoint,
+  bounds,
   distanceToBox,
+  distanceToOutline,
+  loopBends,
+  nearestOutlinePoint,
+  outlineNormal,
+  outlineSide,
   heightToFit,
   hitTest,
   innerBox,
+  leaveBox,
   matchingIds,
   pointAlong,
   polylineDistance,
@@ -21,6 +32,7 @@ import {
   rowBox,
   rowIndex,
   searchTerms,
+  snapAnchor,
   tableHeaderHeight,
   tableHeight,
   tableMatches,
@@ -86,7 +98,7 @@ test("an arrow with one loose end aims its attached end at that point", () => {
   assert.deepEqual(resolveArrow(arrow, () => shape), {x1: 50, y1: 400, x2: 50, y2: 106})
 })
 
-test("an arrow attached at both ends to one element is left as it is", () => {
+test("an arrow attached at both ends to one element, floating, is left as it is", () => {
   const shape = box("rectangle", 0, 0, 100, 100)
   const arrow = {type: "arrow", x1: 1, y1: 2, x2: 3, y2: 4, start: shape.id, end: shape.id}
 
@@ -266,4 +278,176 @@ test("searching a table finds its title and rows, and says which rows", () => {
   assert.deepEqual(matchingIds([users], ["uuid"]), ["t"])
   assert.deepEqual(tableMatches(users, ["email", "uuid"]), {title: false, rows: [0, 1]})
   assert.deepEqual(tableMatches(users, ["users"]), {title: true, rows: []})
+})
+
+const rounded = (values) =>
+  Object.fromEntries(Object.entries(values).map(([key, value]) => [key, Math.round(value * 1e6) / 1e6]))
+
+const near = (actual, expected, within = 1e-6) =>
+  assert.ok(Math.hypot(actual.x - expected.x, actual.y - expected.y) <= within,
+    `${JSON.stringify(actual)} is not ${JSON.stringify(expected)}`)
+
+test("the closest point of an outline is found from inside or out", () => {
+  const rectangle = box("rectangle", 0, 0, 200, 100)
+  assert.deepEqual(nearestOutlinePoint(rectangle, {x: 150, y: -30}), {x: 150, y: 0})
+  assert.deepEqual(nearestOutlinePoint(rectangle, {x: 190, y: 40}), {x: 200, y: 40})
+  assert.deepEqual(nearestOutlinePoint(rectangle, {x: 230, y: 130}), {x: 200, y: 100})
+  assert.equal(distanceToOutline(rectangle, {x: 100, y: 10}), 10)
+
+  const diamond = box("diamond", 0, 0, 100, 100)
+  near(nearestOutlinePoint(diamond, {x: 100, y: 0}), {x: 75, y: 25})
+
+  // Flat, so the closest point is not the one on the way from the middle.
+  const ellipse = box("ellipse", 0, 0, 300, 60)
+  const spot = nearestOutlinePoint(ellipse, {x: 250, y: -1})
+  assert.ok(Math.abs(((spot.x - 150) / 150) ** 2 + ((spot.y - 30) / 30) ** 2 - 1) < 1e-6)
+  assert.ok(Math.abs(spot.x - 250) < 15, `ellipse spot ${spot.x}`)
+  assert.ok(distanceToOutline(ellipse, {x: 250, y: -1}) < distanceToOutline(ellipse, {x: 250, y: -10}))
+})
+
+test("the way out of an outline is square to its side", () => {
+  const rectangle = box("rectangle", 0, 0, 200, 100)
+  assert.deepEqual(outlineNormal(rectangle, {x: 190, y: 0}), {x: 0, y: -1})
+  assert.deepEqual(outlineNormal(rectangle, {x: 200, y: 90}), {x: 1, y: 0})
+  assert.equal(outlineSide(rectangle, {x: 10, y: 100}), "s")
+  assert.equal(outlineSide(rectangle, {x: 0, y: 50}), "w")
+
+  near(outlineNormal(box("diamond", 0, 0, 100, 100), {x: 75, y: 25}), {x: Math.SQRT1_2, y: -Math.SQRT1_2})
+  near(outlineNormal(box("ellipse", 0, 0, 100, 50), {x: 50, y: 50}), {x: 0, y: 1})
+})
+
+test("an anchor names a spot of the outline that follows the element as it resizes", () => {
+  const rectangle = box("rectangle", 0, 0, 200, 100)
+  const anchor = anchorAt(rectangle, -1, {x: 150, y: -12})
+  assert.deepEqual(anchor, {x: 0.75, y: 0})
+  assert.deepEqual(anchorPoint(rectangle, -1, anchor), {x: 150, y: 0})
+  assert.deepEqual(anchorPoint(rectangle, -1, anchor, 6), {x: 150, y: -6})
+
+  const grown = {...rectangle, x: 100, width: 400, height: 300}
+  assert.deepEqual(anchorPoint(grown, -1, anchor, 6), {x: 400, y: -6})
+
+  // One written off the outline counts from the closest point on it.
+  assert.deepEqual(anchorPoint(rectangle, -1, {x: 0.9, y: 0.5}), {x: 200, y: 50})
+
+  const ellipse = box("ellipse", 0, 0, 100, 100)
+  const round = anchorPoint(ellipse, -1, anchorAt(ellipse, -1, {x: 100, y: 0}), 6)
+  near(round, {x: 50 + 56 * Math.SQRT1_2, y: 50 - 56 * Math.SQRT1_2}, 1e-2)
+})
+
+test("an anchor on a row only picks its side", () => {
+  const users = table()
+  assert.deepEqual(anchorAt(users, 1, {x: 30, y: 70}), {x: 0, y: 0.5})
+  assert.deepEqual(anchorAt(users, 1, {x: 170, y: 70}), {x: 1, y: 0.5})
+  assert.deepEqual(anchorPoint(users, 1, {x: 0, y: 0.5}, 6), {x: -6, y: 78})
+  assert.deepEqual(anchorPoint(users, 1, {x: 1, y: 0.2}, 6), {x: 206, y: 78})
+})
+
+test("anchors near the middle of a side settle on it", () => {
+  const rectangle = box("rectangle", 0, 0, 200, 100)
+  assert.deepEqual(snapAnchor(rectangle, {x: 0.53, y: 0}, 8), {x: 0.5, y: 0})
+  assert.deepEqual(snapAnchor(rectangle, {x: 1, y: 0.45}, 8), {x: 1, y: 0.5})
+  assert.deepEqual(snapAnchor(rectangle, {x: 0.6, y: 0}, 8), {x: 0.6, y: 0})
+})
+
+test("pinned ends keep their spot, so two arrows into one side need not overlap", () => {
+  const source = box("rectangle", 0, 0, 100, 100)
+  const target = box("rectangle", 0, 300, 100, 100)
+  const elements = new Map([[source.id, source], [target.id, target]])
+  const lookup = (id) => elements.get(id)
+  const arrow = {type: "arrow", x1: 0, y1: 0, x2: 0, y2: 0, start: source.id, end: target.id}
+
+  assert.deepEqual(resolveArrow(arrow, lookup), {x1: 50, y1: 106, x2: 50, y2: 294})
+
+  // The floating start heads for the pinned end, wherever that is.
+  const pinned = resolveArrow({...arrow, endAnchor: {x: 0.25, y: 0}}, lookup)
+  const from = borderPoint(source, {x: 25, y: 294}, ARROW_GAP)
+  assert.deepEqual(pinned, {x1: from.x, y1: from.y, x2: 25, y2: 294})
+
+  // Pinned at both ends, it runs between the two spots.
+  const both = resolveArrow({...arrow, startAnchor: {x: 1, y: 0.5}, endAnchor: {x: 1, y: 0.5}}, lookup)
+  assert.deepEqual(both, {x1: 106, y1: 50, x2: 106, y2: 350})
+
+  // An anchor left behind by an end that came loose means nothing.
+  const loose = {...arrow, end: null, endAnchor: {x: 0, y: 0}, x2: 500, y2: 500}
+  assert.deepEqual(resolveArrow(loose, lookup).x2, 500)
+})
+
+test("a floating end heads for the nearest bend rather than the other end", () => {
+  const left = box("rectangle", 0, 0, 100, 100)
+  const right = box("rectangle", 300, 0, 100, 100)
+  const elements = new Map([[left.id, left], [right.id, right]])
+  const lookup = (id) => elements.get(id)
+  const arrow = {
+    type: "arrow", x1: 0, y1: 0, x2: 0, y2: 0, start: left.id, end: right.id,
+    points: [{x: 50, y: -100}, {x: 350, y: -100}],
+  }
+
+  const ends = rounded(resolveArrow(arrow, lookup))
+  assert.deepEqual(ends, {x1: 50, y1: -6, x2: 350, y2: -6})
+  assert.deepEqual(arrowRoute({...arrow, ...ends}, lookup), [
+    {x: 50, y: -6}, {x: 50, y: -100}, {x: 350, y: -100}, {x: 350, y: -6},
+  ])
+  assert.deepEqual(bounds({...arrow, ...ends}), {x: 50, y: -100, width: 300, height: 94})
+  assert.equal(hitTest({...arrow, ...ends}, {x: 200, y: -101}), true)
+  assert.equal(hitTest({...arrow, ...ends}, {x: 200, y: -6}), false)
+})
+
+test("a row's run out of the table comes before the bends", () => {
+  const users = table()
+  const shape = box("rectangle", 500, 300, 100, 100)
+  const elements = new Map([[users.id, users], [shape.id, shape]])
+  const lookup = (id) => elements.get(id)
+  const arrow = {type: "arrow", x1: 0, y1: 0, x2: 0, y2: 0, start: "t", startRow: "r1", end: shape.id, points: [{x: -60, y: 350}]}
+
+  const ends = resolveArrow(arrow, lookup)
+  // The bend is to the left, so the row is left from that side.
+  assert.deepEqual({x: ends.x1, y: ends.y1}, {x: -6, y: 50})
+  assert.deepEqual(arrowRoute({...arrow, ...ends}, lookup).slice(0, 3), [
+    {x: -6, y: 50}, {x: -6 - ROW_STUB, y: 50}, {x: -60, y: 350},
+  ])
+})
+
+test("an element joins itself between two pinned spots", () => {
+  const shape = box("rectangle", 0, 0, 100, 100)
+  const arrow = {
+    type: "arrow", x1: 1, y1: 2, x2: 3, y2: 4, start: shape.id, end: shape.id,
+    startAnchor: {x: 0.25, y: 0}, endAnchor: {x: 0.75, y: 0},
+  }
+  assert.deepEqual(resolveArrow(arrow, () => shape), {x1: 25, y1: -6, x2: 75, y2: -6})
+
+  // Pinned at one end only, there is nothing to tell the other where to go.
+  assert.deepEqual(resolveArrow({...arrow, endAnchor: null}, () => shape), {x1: 1, y1: 2, x2: 3, y2: 4})
+})
+
+test("a loop runs clear of its element and round the corners the shorter way", () => {
+  const shape = box("rectangle", 0, 0, 100, 100)
+  const top = (x) => ({point: {x, y: -6}, side: "n"})
+  const right = (y) => ({point: {x: 106, y}, side: "e"})
+  const out = -LOOP_REACH
+
+  // Both out of the top: up, across, back down.
+  assert.deepEqual(loopBends(shape, top(25), top(75)), [{x: 25, y: out}, {x: 75, y: out}])
+
+  // From the top round to the right side: one corner.
+  assert.deepEqual(loopBends(shape, top(75), right(25)), [
+    {x: 75, y: out}, {x: 100 + LOOP_REACH, y: out}, {x: 100 + LOOP_REACH, y: 25},
+  ])
+
+  // From the right side back to the top, the other way round that corner.
+  assert.deepEqual(loopBends(shape, right(25), top(75)), [
+    {x: 100 + LOOP_REACH, y: 25}, {x: 100 + LOOP_REACH, y: out}, {x: 75, y: out},
+  ])
+
+  // Across to the opposite side, round two corners, by the shorter way.
+  const bends = loopBends(shape, {point: {x: -6, y: 20}, side: "w"}, right(20))
+  assert.deepEqual(bends, [
+    {x: out, y: 20}, {x: out, y: out}, {x: 100 + LOOP_REACH, y: out}, {x: 100 + LOOP_REACH, y: 20},
+  ])
+})
+
+test("a segment leaves a box where it first crosses its edge", () => {
+  const area = {x: 0, y: 0, width: 100, height: 40}
+  assert.deepEqual(leaveBox(area, {x: 50, y: 20}, {x: 250, y: 20}), {x: 100, y: 20})
+  assert.deepEqual(leaveBox(area, {x: 50, y: 20}, {x: 50, y: -80}), {x: 50, y: 0})
+  assert.deepEqual(leaveBox(area, {x: 50, y: 20}, {x: 90, y: 30}), null)
 })

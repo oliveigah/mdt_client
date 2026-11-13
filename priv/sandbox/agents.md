@@ -111,9 +111,15 @@ forwarded, with each URL: give the user that URL, not `localhost`.
 ## Tools
 
 Languages and CLIs come from mise. In a project, run `mise install` first:
-it reads `.tool-versions` and `mise.toml`. For a one-off, use
-`mise exec elixir@1.18 -- mix test`. Versions you install survive the VM
-being recreated; packages installed with apt don't.
+it reads `.tool-versions` and `mise.toml`. Versions you install survive the
+VM being recreated; packages installed with apt don't.
+
+A shared folder's build output (`_build`, `deps`, `target`, `node_modules`)
+is the user's too, and their machine builds it with its own versions. In a
+shared project that pins none, ask the user which versions they build with
+before you build, rather than using this VM's defaults; never build one with
+a version other than its pin (`mise exec elixir@...`). Files written with
+another version break the user's build, and anything they run from it.
 
 ## Memory
 

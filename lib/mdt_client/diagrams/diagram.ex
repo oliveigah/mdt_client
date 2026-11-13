@@ -15,6 +15,13 @@ defmodule MDTClient.Diagrams.Diagram do
     * `"start"`, `"end"` - the element each end of an arrow is attached to, or nil
     * `"startRow"`, `"endRow"` - the row of that element, when it is a table
       and the end is attached to one of its rows rather than the whole table
+    * `"startAnchor"`, `"endAnchor"` - where on that element the end is
+      pinned, as `%{"x" => x, "y" => y}` fractions of its box, from 0 to 1:
+      `%{"x" => 0.5, "y" => 0}` is the middle of the top. On a row only the
+      side counts, left below a half and right from it. Nil when the end
+      floats, meeting the outline wherever the arrow comes from
+    * `"points"` - the points an arrow bends at between its ends, in order,
+      each a map of `"x"` and `"y"`
     * `"head"` - which ends of an arrow are drawn with a head: `"end"`,
       `"both"` or `"none"`, for a plain line
     * `"text"` - what is written in a shape, on an arrow, or as free text;
@@ -26,6 +33,7 @@ defmodule MDTClient.Diagrams.Diagram do
 
   An attached arrow end still carries its coordinates, as last drawn, and a
   table its size, so the diagram reads the same without laying it out again.
+  An anchor without an element to be on is dropped with the attachment.
 
   `search_text` is every piece of text in the diagram, title included,
   normalized once when it changes so searching does not walk the elements.
@@ -46,6 +54,7 @@ defmodule MDTClient.Diagrams.Diagram do
   @max_text 10_000
   @max_rows 500
   @max_cell 200
+  @max_points 200
   @max_id 64
   @coordinate_limit 10_000_000
 
@@ -158,8 +167,10 @@ defmodule MDTClient.Diagrams.Diagram do
           arrow
           | "start" => start,
             "startRow" => start_row,
+            "startAnchor" => if(start, do: arrow["startAnchor"]),
             "end" => finish,
-            "endRow" => end_row
+            "endRow" => end_row,
+            "endAnchor" => if(finish, do: arrow["endAnchor"])
         }
 
       element ->
@@ -232,8 +243,11 @@ defmodule MDTClient.Diagrams.Diagram do
       "y2" => coordinate(attrs["y2"]),
       "start" => attrs["start"],
       "startRow" => attrs["startRow"],
+      "startAnchor" => anchor(attrs["startAnchor"]),
       "end" => attrs["end"],
       "endRow" => attrs["endRow"],
+      "endAnchor" => anchor(attrs["endAnchor"]),
+      "points" => points(attrs["points"]),
       "head" => one_of(attrs["head"], @heads)
     })
   end
@@ -275,6 +289,29 @@ defmodule MDTClient.Diagrams.Diagram do
       :error -> {nil, nil}
     end
   end
+
+  defp anchor(%{"x" => x, "y" => y}) when is_number(x) and is_number(y),
+    do: %{"x" => share(x), "y" => share(y)}
+
+  defp anchor(_anchor), do: nil
+
+  # A fraction of a box, to ten thousandths: finer than a pixel on any box
+  # drawn by hand.
+  defp share(value), do: Float.round(min(max(value / 1, 0.0), 1.0), 4)
+
+  defp points(points) when is_list(points) do
+    points
+    |> Enum.take(@max_points)
+    |> Enum.flat_map(fn
+      %{"x" => x, "y" => y} when is_number(x) and is_number(y) ->
+        [%{"x" => coordinate(x), "y" => coordinate(y)}]
+
+      _point ->
+        []
+    end)
+  end
+
+  defp points(_points), do: []
 
   defp rows(rows) when is_list(rows) do
     rows

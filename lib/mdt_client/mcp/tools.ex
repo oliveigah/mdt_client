@@ -283,6 +283,7 @@ defmodule MDTClient.MCP.Tools do
     Enum.find_value([{"start", "startRow"}, {"end", "endRow"}], fn {endpoint, row_key} ->
       id = arrow[endpoint]
       row = arrow[row_key]
+      anchor_key = endpoint <> "Anchor"
       target = targets[id]
 
       cond do
@@ -292,6 +293,9 @@ defmodule MDTClient.MCP.Tools do
         row != nil and
             (target == nil or not Enum.any?(Map.get(target, "rows", []), &(&1["id"] == row))) ->
           "#{path}.#{row_key} names #{inspect(row)}, which must be a row ID on the table referenced by #{endpoint}=#{inspect(id)}."
+
+        arrow[anchor_key] != nil and id == nil ->
+          "#{path}.#{anchor_key} pins an end that is not attached; set #{endpoint} to the element it is on."
 
         true ->
           nil

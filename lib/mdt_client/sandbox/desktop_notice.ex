@@ -4,7 +4,9 @@ defmodule MDTClient.Sandbox.DesktopNotice do
   (`MDTClient.Desktop.Notifications`): what waits, who asked, and how long
   it waits. Clicking it opens the approval in MDT.
 
-  What the agent wrote (its reason) is quoted, as on the approval's card,
+  The thread it asked from (`MDTClient.Sandbox.Approval.asked_from/2`) comes
+  first, so you know which of your agents waits. What the agent wrote (its
+  reason) is quoted, as on the approval's card,
   and nothing in a notification is a way to decide: the card is, with the
   facts MDT worked out beside it.
   """
@@ -26,14 +28,15 @@ defmodule MDTClient.Sandbox.DesktopNotice do
   end
 
   defp text(%Approval{kind: :activation, need: need} = approval, nil) do
-    {"#{agent(approval)} asks for access you haven't set up", [need, reason(approval)]}
+    {"#{agent(approval)} asks for access you haven't set up",
+     [from(approval), need, reason(approval)]}
   end
 
   defp text(%Approval{kind: :activation} = approval, grant) do
     minutes = if approval.minutes, do: "for #{approval.minutes} min", else: nil
 
     {"#{agent(approval)} asks to turn on #{name(grant)}",
-     [minutes && String.capitalize(minutes), reason(approval)]}
+     [from(approval), minutes && String.capitalize(minutes), reason(approval)]}
   end
 
   defp text(%Approval{kind: :request} = approval, grant),
@@ -43,11 +46,13 @@ defmodule MDTClient.Sandbox.DesktopNotice do
     do: {"An agent wants to connect through #{name(grant)}", [approval.pattern]}
 
   defp text(%Approval{kind: :command, stage: :output, run: run} = approval, _grant),
-    do: {"A command's output waits for you", [HostCommand.title(approval.script), ended(run)]}
+    do:
+      {"A command's output waits for you",
+       [from(approval), HostCommand.title(approval.script), ended(run)]}
 
   defp text(%Approval{kind: :command} = approval, _grant) do
     {"#{agent(approval)} asks to run a command on this machine",
-     [HostCommand.title(approval.script), reason(approval)]}
+     [from(approval), HostCommand.title(approval.script), reason(approval)]}
   end
 
   defp agent(%Approval{agent: agent}) when is_binary(agent) and agent != "" do
@@ -56,6 +61,14 @@ defmodule MDTClient.Sandbox.DesktopNotice do
   end
 
   defp agent(_approval), do: "An agent"
+
+  # The thread it asked from, so you know which one waits before opening MDT.
+  defp from(approval) do
+    case Approval.asked_from(approval) do
+      nil -> nil
+      from -> "From " <> from
+    end
+  end
 
   defp name(%Grant{name: name}), do: name
   defp name(nil), do: "a grant"

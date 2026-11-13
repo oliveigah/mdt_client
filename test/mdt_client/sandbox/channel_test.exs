@@ -2,7 +2,7 @@ defmodule MDTClient.Sandbox.ChannelTest do
   use ExUnit.Case, async: true
 
   alias MDTClient.Sandbox
-  alias MDTClient.Sandbox.Channel
+  alias MDTClient.Sandbox.{Approval, Channel}
 
   @cli Path.expand("../../../priv/sandbox/mdt-cli", __DIR__)
 
@@ -58,17 +58,77 @@ defmodule MDTClient.Sandbox.ChannelTest do
     end)
   end
 
-  defp mdt(%{username: username, bin: bin}, args), do: mdt(username, bin, args)
+  defp mdt(%{username: username, bin: bin}, args), do: mdt(username, bin, args, [])
 
-  defp mdt(username, bin, args) do
+  defp mdt(%{username: username, bin: bin}, args, env) when is_list(env),
+    do: mdt(username, bin, args, env)
+
+  defp mdt(username, bin, args) when is_binary(username), do: mdt(username, bin, args, [])
+
+  # The agent's own variables are cleared: tests may run inside an agent.
+  defp mdt(username, bin, args, env) do
     System.cmd("bash", [@cli | args],
-      env: [
-        {"PATH", bin <> ":" <> System.get_env("PATH")},
-        {"MDT_CHANNEL", "UNIX-CONNECT:" <> Channel.socket_path(username)},
-        {"MDT_AGENT", "codex"}
-      ],
+      env:
+        [
+          {"PATH", bin <> ":" <> System.get_env("PATH")},
+          {"MDT_CHANNEL", "UNIX-CONNECT:" <> Channel.socket_path(username)},
+          {"MDT_AGENT", "codex"},
+          {"MDT_THREAD", nil},
+          {"CLAUDE_CODE_SESSION_ID", nil},
+          {"CLAUDE_PID", nil},
+          {"CODEX_THREAD_ID", nil}
+        ] ++ env,
       stderr_to_stdout: true
     )
+  end
+
+  test "an ask names the thread it came from: Claude Code's title and the agent's folder",
+       %{username: username} = context do
+    github(username)
+    config = Path.join(context.bin, "claude")
+    session = "0b5e5e1d-1111-4222-8333-444455556666"
+    File.mkdir_p!(Path.join(config, "projects/-work"))
+
+    File.write!(Path.join(config, "projects/-work/#{session}.jsonl"), """
+    {"type":"user","message":"hi"}
+    {"type":"ai-title","aiTitle":"First guess","sessionId":"#{session}"}
+    {"type":"custom-title","customTitle":"Fix the \\"push\\" flow","sessionId":"#{session}"}
+    {"type":"ai-title","aiTitle":"Later guess","sessionId":"#{session}"}
+    """)
+
+    asking =
+      Task.async(fn ->
+        mdt(context, ["request", "github", "--reason", "push", "--wait", "0"], [
+          {"CLAUDE_CONFIG_DIR", config},
+          {"CLAUDE_CODE_SESSION_ID", session},
+          {"CLAUDE_PID", System.pid()}
+        ])
+      end)
+
+    assert {_output, 2} = Task.await(asking)
+    ask = wait_for_ask(username)
+
+    # A rename wins over the titles Claude Code makes up; the folder is the
+    # agent process's own, not the shell's.
+    assert ask.thread == %{title: ~s(Fix the "push" flow), id: session, folder: File.cwd!()}
+  end
+
+  test "an ask with no thread to name says so with nil, and MDT_THREAD names one",
+       %{username: username} = context do
+    github(username)
+
+    assert {_output, 2} =
+             mdt(context, ["request", "github", "--reason", "push", "--wait", "0"], [
+               {"MDT_THREAD", "Release prep"}
+             ])
+
+    ask = wait_for_ask(username)
+    assert %{title: "Release prep", id: nil, folder: folder} = ask.thread
+    assert is_binary(folder)
+
+    assert Approval.thread(%{}) == nil
+    assert Approval.thread(%{thread: "  ", folder: 3}) == nil
+    assert Approval.thread(%{thread: "a\nb\e[31m"}).title == "a b [31m"
   end
 
   test "the socket is the identity's own, short enough for Unix, and only yours", %{

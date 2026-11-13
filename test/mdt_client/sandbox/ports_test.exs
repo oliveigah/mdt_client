@@ -97,6 +97,14 @@ defmodule MDTClient.Sandbox.PortsTest do
     assert "ProxyCommand='/opt/my msb/msb' ssh serve 'mdt-abc' --stdio --no-inactivity-timeout" in args
   end
 
+  # Over the master, each listing kept one of the VM's 128 agent connections
+  # until msb ended the session.
+  test "the tunnel lists the VM's ports with msb exec, not over its SSH session" do
+    assert ["exec", "mdt-abc" | rest] = Forwarder.SSH.listing_args("mdt-abc")
+    assert Enum.take(rest, -3) == ["--", "ss", "-ltnpH"]
+    assert "--no-stdin" in rest
+  end
+
   test "agents read the address in the host's description" do
     facts = %{
       os: "Fedora",

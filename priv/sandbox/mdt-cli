@@ -77,26 +77,84 @@ number() {
   printf '%s' "$2"
 }
 
-# Which agent is asking, from the processes above this one; a claim, shown
-# to the user as such. MDT_AGENT overrides it.
-agent() {
-  if [ -n "${MDT_AGENT:-}" ]; then
-    printf '%s' "$MDT_AGENT"
-    return
-  fi
+# Who is asking, so the user can tell which thread an ask comes from: the
+# agent (from the processes above this one), its thread's id and title, and
+# the folder it works in. All claims, shown to the user as such. MDT_AGENT
+# and MDT_THREAD override the agent and the title.
+agent="" agent_pid="" thread_id="" thread="" folder=""
+identify() {
   local pid=$PPID comm _
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
     [ "$pid" -gt 1 ] 2>/dev/null || break
     comm=$(cat "/proc/$pid/comm" 2>/dev/null) || break
     case $comm in
       claude* | codex* | gemini* | aider* | opencode* | goose* | cursor* | amp* | zed*)
-        printf '%s' "$comm"
-        return
+        agent=$comm agent_pid=$pid
+        break
         ;;
     esac
     pid=$(sed -n 's/^PPid:[[:space:]]*//p' "/proc/$pid/status" 2>/dev/null)
   done
-  printf 'an agent'
+  [ -n "${CLAUDE_PID:-}" ] && [ -d "/proc/$CLAUDE_PID" ] && agent_pid=$CLAUDE_PID
+  [ -n "${MDT_AGENT:-}" ] && agent=$MDT_AGENT
+  [ -z "$agent" ] && agent="an agent"
+
+  [ -n "$agent_pid" ] && folder=$(readlink "/proc/$agent_pid/cwd" 2>/dev/null)
+  [ -z "$folder" ] && folder=$PWD
+
+  if [ -n "${CLAUDE_CODE_SESSION_ID:-}" ]; then
+    thread_id=$CLAUDE_CODE_SESSION_ID
+    thread=$(claude_title "$thread_id")
+  elif [ -n "${CODEX_THREAD_ID:-}" ]; then
+    thread_id=$CODEX_THREAD_ID
+    thread=$(codex_title "$thread_id")
+  fi
+  [ -n "${MDT_THREAD:-}" ] && thread=$MDT_THREAD
+}
+
+# A JSON string's value, from `"key":"value"`: the common escapes undone.
+json_value() {
+  local s=${1#*\":\"}
+  s=${s%\"}
+  s=${s//\\\"/\"}
+  s=${s//\\n/ }
+  printf '%s' "${s//\\\\/\\}"
+}
+
+# Claude Code's title for a session, as it shows it: the last rename, else
+# the last title it made up.
+claude_title() {
+  case $1 in *[!0-9a-fA-F-]*) return ;; esac
+  local file key found
+  for file in "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/projects/*/"$1".jsonl; do
+    [ -f "$file" ] || continue
+    for key in customTitle aiTitle; do
+      found=$(LC_ALL=C command grep -ao "\"$key\":\"\\([^\"\\\\]\\|\\\\.\\)*\"" "$file" 2>/dev/null | tail -n 1)
+      if [ -n "$found" ]; then
+        json_value "$found"
+        return
+      fi
+    done
+  done
+}
+
+# Codex's title for a thread: the name it was given, else the one it made up.
+codex_title() {
+  case $1 in *[!0-9a-fA-F-]*) return ;; esac
+  command -v sqlite3 >/dev/null 2>&1 || return
+  local db
+  for db in "${CODEX_HOME:-$HOME/.codex}"/state_*.sqlite; do
+    [ -f "$db" ] || continue
+    sqlite3 -readonly "$db" \
+      "select coalesce(nullif(name, ''), title) from threads where id = '$1'" 2>/dev/null | head -n 1
+    return
+  done
+}
+
+# The identity fields of an ask, as JSON members.
+identity() {
+  printf '"agent":%s,"thread":%s,"thread_id":%s,"folder":%s' \
+    "$(json "$agent")" "$(json "$thread")" "$(json "$thread_id")" "$(json "$folder")"
 }
 
 # Sends one ask and prints MDT's answer. $2 is the status when MDT can't be
@@ -223,11 +281,12 @@ case $command in
     send '{"command":"ports"}'
     ;;
   request | ask)
+    identify
     if [ -z "$grant" ] && [ -z "$need" ]; then
       echo "mdt: name a grant, or describe a --need. See: mdt help" >&2
       exit 1
     fi
-    send "{\"command\":\"request\",\"grant\":$(json "$grant"),\"need\":$(json "$need"),\"reason\":$(json "$reason"),\"minutes\":$minutes,\"wait\":$wait,\"agent\":$(json "$(agent)")}"
+    send "{\"command\":\"request\",\"grant\":$(json "$grant"),\"need\":$(json "$need"),\"reason\":$(json "$reason"),\"minutes\":$minutes,\"wait\":$wait,$(identity)}"
     ;;
   run)
     if [ ${#words[@]} -eq 1 ]; then
@@ -246,9 +305,10 @@ case $command in
       echo "mdt: the script is over 16 KiB. Put the long part in a file in a shared folder, and say so in the reason." >&2
       exit 122
     fi
+    identify
     [ -z "$dir" ] && dir=$PWD
     dir=$( (cd "$dir" 2>/dev/null && pwd -P) || printf '%s' "$dir")
-    send_run "{\"command\":\"run\",\"script\":$(json "$script"),\"dir\":$(json "$dir"),\"timeout\":$timeout,\"reason\":$(json "$reason"),\"wait\":$wait,\"agent\":$(json "$(agent)")}"
+    send_run "{\"command\":\"run\",\"script\":$(json "$script"),\"dir\":$(json "$dir"),\"timeout\":$timeout,\"reason\":$(json "$reason"),\"wait\":$wait,$(identity)}"
     ;;
   wait)
     if [ -z "$id" ]; then

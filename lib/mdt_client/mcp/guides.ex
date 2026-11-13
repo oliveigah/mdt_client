@@ -136,6 +136,23 @@ defmodule MDTClient.MCP.Guides do
     named by start/end. Referencing a nonexistent element/row is rejected
     rather than silently detaching the arrow.
 
+    An attached end floats by default: it aims at the element's center from
+    the next point along the arrow and stops at the outline, so two arrows
+    between the same pair of elements overlap. startAnchor/endAnchor pin an
+    end to one spot of the outline instead, as fractions of the element's
+    box: {"x": 0.5, "y": 0} is the middle of the top edge, {"x": 0, "y": 0.75}
+    three quarters down the left edge. On a table row only the side counts:
+    x < 0.5 is the row's left edge, otherwise its right. An anchor requires
+    its start/end.
+
+    points lists the canvas points an arrow bends at, in order from start to
+    end; a floating end heads for the nearest bend. Bend one of two opposite
+    arrows (A to B and B to A) out of the other's way, or pin them to
+    different spots. An element can be joined to itself when both ends are
+    pinned or on different rows: pin both ends and add bends that run round
+    the outside, e.g. start {"x": 0.25, "y": 0} and end {"x": 0.75, "y": 0}
+    with points 40 units above each.
+
     ## Table sizing and row anchors
 
     | size | font | header height | row height |

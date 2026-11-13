@@ -6,8 +6,16 @@ defmodule MDTClient.Sandbox.Forwarder.SSH do
   msb's SSH server carries forwarded connections (`direct-tcpip`) over its
   own channel to the VM's agent, which connects inside the VM, so servers on
   the VM's loopback can be reached. Forwards are added and removed on the
-  master (`ssh -O forward|cancel`), and the listing (`ss -ltnpH`) runs over
-  it too, so only the master ever authenticates.
+  master (`ssh -O forward|cancel`).
+
+  The listing (`ss -ltnpH`) runs with `msb exec`, not over the master: msb
+  0.7.14's SSH server keeps one agent connection per command until the
+  connection ends (it closes the channel first, and russh never reports the
+  client's close back), and the VM's agent takes 128 at most. Listing every
+  2 seconds over the master used them up in about 4 minutes; the next
+  command failed, msb ended the session, and every forward with it
+  ("client_loop: send disconnect: Broken pipe"). `msb exec` exits after
+  each listing, which frees its connection.
 
     * The key is MDT's own, made on first use (`ssh-keygen`, no passphrase)
       and added with `msb ssh authorize` on each open; msb ignores a key it
@@ -57,7 +65,7 @@ defmodule MDTClient.Sandbox.Forwarder.SSH do
           args: ["-c", @wrapper, "mdt-forward", ssh | master_args(vm, msb, key, control)]
         ])
 
-      {:ok, %{port: port, ssh: ssh, control: control, host: host(vm)}}
+      {:ok, %{port: port, ssh: ssh, control: control, host: host(vm), vm: vm}}
     end
   end
 
@@ -79,13 +87,16 @@ defmodule MDTClient.Sandbox.Forwarder.SSH do
 
   @impl true
   def listeners(conn) do
-    # Without the master, ssh would connect on its own; ProxyCommand=false
-    # makes that fail at once instead.
-    case control(conn, ["-o", "ProxyCommand=false", conn.host, "ss -ltnpH"]) do
-      {output, 0} -> {:ok, output}
-      {output, status} -> {:error, last_line(output, status)}
+    case Msb.run(listing_args(conn.vm), @control_timeout) do
+      {:ok, output} -> {:ok, output}
+      {:error, message} -> {:error, last_line(message, 1)}
     end
   end
+
+  # As root, like the master's user, so `-p` names every server's process.
+  @doc false
+  def listing_args(vm),
+    do: ["exec", vm, "--user", "root", "--quiet", "--no-tty", "--no-stdin", "--", "ss", "-ltnpH"]
 
   @impl true
   def forward(conn, address, port, target) do

@@ -50,7 +50,11 @@ defmodule MDTClient.Sandbox.HostCommandChannelTest do
     env = [
       {"PATH", context.bin <> ":" <> System.get_env("PATH")},
       {"MDT_CHANNEL", "UNIX-CONNECT:" <> Channel.socket_path(context.username)},
-      {"MDT_AGENT", "claude"}
+      {"MDT_AGENT", "claude"},
+      {"MDT_THREAD", "Ship the release"},
+      {"CLAUDE_CODE_SESSION_ID", nil},
+      {"CLAUDE_PID", nil},
+      {"CODEX_THREAD_ID", nil}
     ]
 
     if input do
@@ -123,6 +127,8 @@ defmodule MDTClient.Sandbox.HostCommandChannelTest do
     assert approval.script == "cat input.txt; pwd; exit 7"
     assert approval.dir == shared
     assert approval.agent == "claude"
+    assert %{title: "Ship the release", id: nil, folder: folder} = approval.thread
+    assert is_binary(folder)
     assert approval.claims == [{"Reason", "read the input"}]
     assert approval.id =~ ~r/^run-/
 
