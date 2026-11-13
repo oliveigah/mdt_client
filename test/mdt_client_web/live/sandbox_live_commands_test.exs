@@ -128,7 +128,7 @@ defmodule MDTClientWeb.SandboxLiveCommandsTest do
     conn: conn,
     username: username
   } do
-    {:ok, view, _html} = live(conn, ~p"/tools/sandbox/settings")
+    {:ok, view, _html} = live(conn, ~p"/tools/sandbox/settings?tab=host")
     assert has_element?(view, "#settings-host")
     assert has_element?(view, "#host-os")
     assert has_element?(view, "#host-tools", "Not checked yet")

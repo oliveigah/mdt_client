@@ -23,6 +23,11 @@ defmodule MDTClient.Sandbox.Server do
   (`MDTClient.Sandbox.HostRun`), and its output goes back to the agent, or
   first to you when you chose to see it; `stop_command` kills it.
 
+  Every approval waiting for you has a desktop notification while
+  `desktop_notifications` is on (`MDTClient.Sandbox.DesktopNotice`); it
+  closes once the approval is decided or gives up, and a command coming back
+  with its output gets a new one.
+
   While the VM runs, a `MDTClient.Sandbox.Forwarder` forwards its ports to
   the VM's address on this machine (`MDTClient.Sandbox.Ports`) and reports
   what is forwarded, which the overview and `mdt ports` show.
@@ -51,6 +56,7 @@ defmodule MDTClient.Sandbox.Server do
     CertificateAuthority,
     Channel,
     Describe,
+    DesktopNotice,
     Destinations,
     Event,
     Folders,
@@ -72,6 +78,7 @@ defmodule MDTClient.Sandbox.Server do
     VM
   }
 
+  alias MDTClient.Desktop.Notifications
   alias MDTClient.Vault
   alias MDTClient.Vault.Store
 
@@ -166,6 +173,8 @@ defmodule MDTClient.Sandbox.Server do
       memory: saved[:memory] || %{seed_count: nil, seeded_at: nil, reviewed: 0},
       folders: folders,
       approvals: [],
+      # approval id => the stage its desktop notification was shown for
+      notified: %{},
       events: [],
       waiters: %{},
       minted: %{},
@@ -282,7 +291,8 @@ defmodule MDTClient.Sandbox.Server do
   def handle_call({:events, filters}, _from, state) do
     events =
       state.events
-      |> Enum.filter(&Event.matches?(&1, filters))
+      |> older_than(Map.get(filters, :before))
+      |> Stream.filter(&Event.matches?(&1, filters))
       |> Enum.take(Map.get(filters, :limit, 200))
 
     {:reply, events, state}
@@ -2456,7 +2466,8 @@ defmodule MDTClient.Sandbox.Server do
       {:proxy_port, attrs["proxy_port"], &cast_int(&1, 1024, 65_535)},
       {:containerfile, attrs["containerfile"], &cast_containerfile/1},
       {:image_name, attrs["image_name"], &cast_image_name/1},
-      {:host_notes, attrs["host_notes"], &cast_notes/1}
+      {:host_notes, attrs["host_notes"], &cast_notes/1},
+      {:desktop_notifications, attrs["desktop_notifications"], &cast_bool/1}
     ]
 
     {changes, errors} =
@@ -2496,6 +2507,10 @@ defmodule MDTClient.Sandbox.Server do
       else:
         {:error, "Lowercase letters and digits, joined by single dots, underscores or dashes."}
   end
+
+  defp cast_bool(value) when value in [true, "true"], do: {:ok, true}
+  defp cast_bool(value) when value in [false, "false"], do: {:ok, false}
+  defp cast_bool(_value), do: {:error, "Either on or off."}
 
   defp cast_int(value, min, max) do
     case Integer.parse(String.trim(to_string(value))) do
@@ -2566,8 +2581,9 @@ defmodule MDTClient.Sandbox.Server do
     before = waiting_count(state)
     state = Map.put(state, area, fun.(state))
     broadcast(state, {:sandbox_changed, area})
-    # Forwarding follows the VM.
+    # Forwarding follows the VM, notifications the approvals.
     state = if area == :vm, do: sync_forwarder(state), else: state
+    state = if area in [:approvals, :settings], do: sync_notices(state), else: state
     after_count = waiting_count(state)
 
     if before != after_count do
@@ -2579,6 +2595,35 @@ defmodule MDTClient.Sandbox.Server do
     end
 
     state
+  end
+
+  # Events are newest first, so the ones older than `id` come after it. An
+  # id no longer kept leaves nothing older.
+  defp older_than(events, nil), do: events
+
+  defp older_than(events, id),
+    do: events |> Stream.drop_while(&(&1.id != id)) |> Stream.drop(1)
+
+  # One notification per waiting approval and stage: shown when it starts
+  # waiting, closed when it stops. One you dismissed isn't shown again.
+  defp sync_notices(state) do
+    wanted =
+      if state.settings.desktop_notifications,
+        do: for(%Approval{status: :waiting} = a <- state.approvals, into: %{}, do: {a.id, a}),
+        else: %{}
+
+    for {id, approval} <- wanted, Map.get(state.notified, id) != approval.stage do
+      Notifications.show(
+        {:sandbox, state.username, id},
+        DesktopNotice.notice(state.username, approval, grant_of(state, approval))
+      )
+    end
+
+    for id <- Map.keys(state.notified),
+        not is_map_key(wanted, id),
+        do: Notifications.close({:sandbox, state.username, id})
+
+    %{state | notified: Map.new(wanted, fn {id, approval} -> {id, approval.stage} end)}
   end
 
   defp log(state, attrs) do

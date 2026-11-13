@@ -33,13 +33,15 @@ defmodule MDTClientWeb.SandboxLive.Approvals do
   attr :marks, :list, required: true, doc: "`RequestView.marks/1` of every grant"
   attr :hold_seconds, :integer, required: true
   attr :now, DateTime, required: true
+  attr :focus, :string, default: nil, doc: "the approval a desktop notification opened"
 
   def page(assigns) do
     ~H"""
-    <.page_header
-      title="Approvals"
-      subtitle="Agents asking for a grant or to run a command on this machine, and every use of a grant: requests carrying its placeholder, connections through a network grant. Each waits here until you decide, or gives up on its own."
-    />
+    <.page_header id="approvals-header" title="Approvals">
+      <:help>
+        Agents asking for a grant or to run a command on this machine, and every use of a grant: requests carrying its placeholder, connections through a network grant. Each waits here until you decide, or gives up on its own.
+      </:help>
+    </.page_header>
 
     <div class="space-y-6">
       <.running :if={@running != []} running={@running} now={@now} />
@@ -53,7 +55,8 @@ defmodule MDTClientWeb.SandboxLive.Approvals do
         </h2>
         <div :if={@waiting == []} class="rounded-xl border border-dashed border-line">
           <.empty icon="hero-hand-raised" id="no-waiting-approvals">
-            Nothing is waiting. Agents asking for a grant (<code class="font-mono">mdt request</code>) or to run a command on this machine (<code class="font-mono">mdt run</code>), and each use of a grant that is on, show up here.
+            Nothing is waiting. Asks from <code class="font-mono">mdt request</code>
+            and <code class="font-mono">mdt run</code>, and uses of a grant that is on, show up here.
           </.empty>
         </div>
         <.approval
@@ -63,15 +66,12 @@ defmodule MDTClientWeb.SandboxLive.Approvals do
           marks={@marks}
           hold_seconds={@hold_seconds}
           now={@now}
+          focused={approval.id == @focus}
         />
       </section>
 
-      <.card
-        id="approval-history"
-        title="Decided"
-        subtitle="The latest 100 decisions, newest first."
-        body_class=""
-      >
+      <.card id="approval-history" title="Decided" body_class="">
+        <:help>The latest 100 decisions, newest first.</:help>
         <div :if={@history == []}>
           <.empty icon="hero-clock">Decisions you make will be listed here.</.empty>
         </div>
@@ -108,6 +108,10 @@ defmodule MDTClientWeb.SandboxLive.Approvals do
   attr :now, DateTime, required: true
   attr :compact, :boolean, default: false
 
+  attr :focused, :boolean,
+    default: false,
+    doc: "ringed and scrolled into view: the one a desktop notification opened"
+
   def approval(%{approval: %Approval{kind: :activation}} = assigns), do: activation_card(assigns)
 
   def approval(%{approval: %Approval{kind: :command, stage: :output}} = assigns),
@@ -130,7 +134,11 @@ defmodule MDTClientWeb.SandboxLive.Approvals do
     ~H"""
     <article
       id={"approval-#{@approval.id}"}
-      class="group/card rounded-xl border border-warn/35 bg-panel shadow-sm shadow-black/5 transition-shadow hover:shadow-md dark:shadow-black/30"
+      class={[
+        "group/card rounded-xl border border-warn/35 bg-panel shadow-sm shadow-black/5 transition-shadow hover:shadow-md dark:shadow-black/30",
+        @focused && "ring-2 ring-accent/70 ring-offset-2 ring-offset-app"
+      ]}
+      phx-mounted={@focused && JS.dispatch("mdt:reveal")}
     >
       <.drain id={"approval-drain-#{@approval.id}-#{@left}"} left={@left} fraction={@fraction} />
 
@@ -424,7 +432,11 @@ defmodule MDTClientWeb.SandboxLive.Approvals do
     ~H"""
     <article
       id={"approval-#{@approval.id}"}
-      class="rounded-xl border border-bad/45 bg-panel shadow-sm shadow-black/5 transition-shadow hover:shadow-md dark:shadow-black/30"
+      class={[
+        "rounded-xl border border-bad/45 bg-panel shadow-sm shadow-black/5 transition-shadow hover:shadow-md dark:shadow-black/30",
+        @focused && "ring-2 ring-accent/70 ring-offset-2 ring-offset-app"
+      ]}
+      phx-mounted={@focused && JS.dispatch("mdt:reveal")}
     >
       <.drain
         id={"approval-drain-#{@approval.id}-#{@left}"}
@@ -517,8 +529,11 @@ defmodule MDTClientWeb.SandboxLive.Approvals do
             <div class="flex-1"></div>
             <.decline_button approval={@approval} />
           </.form>
-          <p class="mt-2 text-[10px] leading-4 text-faint">
-            It runs outside the VM, with your files, keys and network. No allowance ever covers a command: each one asks.
+          <p class="mt-2 flex items-center gap-1.5 text-[10px] leading-4 text-faint">
+            It runs outside the VM, with your files, keys and network.
+            <.help id={"command-help-#{@approval.id}"} label="About host commands">
+              No allowance ever covers a command: each one asks, and the full card is the only place to run it.
+            </.help>
           </p>
         <% end %>
       </footer>
@@ -541,7 +556,11 @@ defmodule MDTClientWeb.SandboxLive.Approvals do
     ~H"""
     <article
       id={"approval-#{@approval.id}"}
-      class="rounded-xl border border-bad/45 bg-panel shadow-sm shadow-black/5 transition-shadow hover:shadow-md dark:shadow-black/30"
+      class={[
+        "rounded-xl border border-bad/45 bg-panel shadow-sm shadow-black/5 transition-shadow hover:shadow-md dark:shadow-black/30",
+        @focused && "ring-2 ring-accent/70 ring-offset-2 ring-offset-app"
+      ]}
+      phx-mounted={@focused && JS.dispatch("mdt:reveal")}
     >
       <.drain
         id={"approval-drain-#{@approval.id}-#{@left}"}
@@ -858,7 +877,11 @@ defmodule MDTClientWeb.SandboxLive.Approvals do
     ~H"""
     <article
       id={"approval-#{@approval.id}"}
-      class="rounded-xl border border-violet/35 bg-panel shadow-sm shadow-black/5 transition-shadow hover:shadow-md dark:shadow-black/30"
+      class={[
+        "rounded-xl border border-violet/35 bg-panel shadow-sm shadow-black/5 transition-shadow hover:shadow-md dark:shadow-black/30",
+        @focused && "ring-2 ring-accent/70 ring-offset-2 ring-offset-app"
+      ]}
+      phx-mounted={@focused && JS.dispatch("mdt:reveal")}
     >
       <.drain
         id={"approval-drain-#{@approval.id}-#{@left}"}
@@ -923,7 +946,7 @@ defmodule MDTClientWeb.SandboxLive.Approvals do
           <p class="mb-1.5 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wide text-muted">
             <.icon name="hero-puzzle-piece-micro" class="size-3" /> What it needs
           </p>
-          <p class="rounded-lg border border-line-soft bg-deep/50 px-3 py-2 text-xs leading-5 text-ink">
+          <p class="max-h-48 overflow-y-auto overscroll-contain break-words rounded-lg border border-line-soft bg-deep/50 px-3 py-2 text-xs leading-5 text-ink">
             {@approval.need}
           </p>
           <p class="mt-1.5 text-[11px] leading-4 text-faint">
@@ -1128,10 +1151,15 @@ defmodule MDTClientWeb.SandboxLive.Approvals do
           not verified
         </span>
       </p>
-      <ul class="space-y-1.5">
+      <ul
+        id={"#{@id}-list"}
+        tabindex="0"
+        aria-label="What the agent says"
+        class="-mr-1.5 max-h-56 space-y-1.5 overflow-y-auto overscroll-contain pr-1.5 focus-visible:outline-2 focus-visible:outline-accent"
+      >
         <li :for={{label, text} <- @claims} class="text-xs leading-5">
           <span class="mr-1.5 text-[10px] uppercase tracking-wide text-faint">{label}</span>
-          <span class="whitespace-pre-wrap italic text-muted">“{text}”</span>
+          <span class="whitespace-pre-wrap break-words italic text-muted">“{text}”</span>
         </li>
       </ul>
     </div>

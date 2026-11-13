@@ -1,9 +1,15 @@
 defmodule MDTClientWeb.SandboxLive.Settings do
   @moduledoc """
-  The settings page: the VM's image (its name, your Containerfile, MDT's
-  layer, the build and the builds kept), its size, the folders it sees, what
-  the network always refuses, the folders it keeps (Home, Cache, its memory)
-  and the round trip of its memory with yours.
+  The settings page, in four tabs:
+
+    * **General** - the folders the VM sees, its size, how long a request
+      waits for you, and desktop notifications;
+    * **Image** - its name, your Containerfile, MDT's layer, the build and
+      the builds kept;
+    * **Memory & storage** - the VM's memory and its round trip with yours,
+      and the folders it keeps (Home, Cache, its memory);
+    * **Host & network** - this machine as agents see it, and what the
+      network always refuses.
   """
   use MDTClientWeb, :html
 
@@ -12,6 +18,21 @@ defmodule MDTClientWeb.SandboxLive.Settings do
   alias MDTClient.Sandbox
   alias MDTClient.Sandbox.Image
 
+  @tabs [
+    {"general", "General", "hero-adjustments-horizontal-micro"},
+    {"image", "Image", "hero-cube-micro"},
+    {"storage", "Memory & storage", "hero-circle-stack-micro"},
+    {"host", "Host & network", "hero-computer-desktop-micro"}
+  ]
+
+  @tab_ids Enum.map(@tabs, &elem(&1, 0))
+
+  @doc "The tab a `tab` query parameter names, General if none or unknown."
+  @spec tab(String.t() | nil) :: String.t()
+  def tab(id) when id in @tab_ids, do: id
+  def tab(_id), do: "general"
+
+  attr :tab, :string, default: "general"
   attr :vm, :any, required: true
   attr :image, :map, required: true
   attr :builds, :list, required: true
@@ -34,32 +55,31 @@ defmodule MDTClientWeb.SandboxLive.Settings do
   attr :host_form, :any, required: true
   attr :host_error, :string, default: nil
 
-  def page(assigns) do
-    current = Enum.find(assigns.builds, &(&1.ref == assigns.image.tag))
+  attr :desktop, :any,
+    default: nil,
+    doc: "`MDTClient.Desktop.Notifications.status/0`, nil until known"
 
-    assigns =
-      assign(assigns,
-        refused: Sandbox.refused_addresses(),
-        mdt_layer: Image.mdt_layer(),
-        current: current,
-        different_default?: assigns.settings.containerfile != Image.default_containerfile(),
-        edited?: current != nil and current.containerfile != assigns.settings.containerfile
-      )
+  def page(assigns) do
+    assigns = assign(assigns, :tabs, @tabs)
 
     ~H"""
-    <.page_header
-      title="Settings"
-      subtitle="How the VM is built. Microsandbox can't change mounts or resources on a VM that exists, so changes here apply when it is recreated."
-    />
+    <.page_header id="settings-header" title="Settings">
+      <:help>
+        How the VM is built. Microsandbox can't change mounts or resources on a VM that exists, so most changes here apply when it is recreated.
+      </:help>
+    </.page_header>
 
     <div
       :if={@vm.stale?}
       id="settings-stale"
-      class="mb-5 flex flex-wrap items-center gap-3 rounded-xl border border-warn/35 bg-warn-soft/30 px-4 py-3"
+      class="mb-4 flex flex-wrap items-center gap-3 rounded-xl border border-warn/35 bg-warn-soft/30 px-4 py-2.5"
     >
       <.icon name="hero-arrow-path" class="size-4 text-warn" />
-      <p class="flex-1 text-xs text-ink">
-        The VM still runs with the previous settings or image. Recreating it starts a fresh root filesystem from the current image; you choose what happens to its Home and Cache.
+      <p class="flex flex-1 items-center gap-1.5 text-xs text-ink">
+        The VM still runs with the previous settings or image.
+        <.help id="settings-stale-help" label="About recreating">
+          Recreating starts a fresh root filesystem from the current image; you choose what happens to its Home and Cache.
+        </.help>
       </p>
       <.button
         id="settings-recreate"
@@ -70,13 +90,324 @@ defmodule MDTClientWeb.SandboxLive.Settings do
       </.button>
     </div>
 
-    <.card
-      id="settings-image"
-      title="The VM's image"
-      subtitle="Your Containerfile, then MDT's layer. Built with podman on this machine and handed to microsandbox."
-      class="mb-5"
-      body_class=""
+    <nav
+      id="settings-tabs"
+      aria-label="Settings sections"
+      class="mb-5 flex flex-wrap items-center gap-1 border-b border-line-soft"
     >
+      <.link
+        :for={{id, label, icon} <- @tabs}
+        id={"settings-tab-#{id}"}
+        patch={tab_path(id)}
+        aria-current={@tab == id && "page"}
+        class={[
+          "-mb-px flex items-center gap-1.5 border-b-2 px-3 py-2 text-[13px] transition-colors",
+          if(@tab == id,
+            do: "border-accent font-medium text-ink",
+            else: "border-transparent text-muted hover:border-line hover:text-ink"
+          )
+        ]}
+      >
+        <.icon
+          name={icon}
+          class={["size-3.5", if(@tab == id, do: "text-accent", else: "text-faint")]}
+        />
+        {label}
+        <span
+          :if={id == "image" and not @image.loaded?}
+          class="size-1.5 rounded-full bg-accent"
+          title="Not built yet"
+        ></span>
+      </.link>
+    </nav>
+
+    <%= case @tab do %>
+      <% "general" -> %>
+        <.general {assigns} />
+      <% "image" -> %>
+        <.image_tab {assigns} />
+      <% "storage" -> %>
+        <.storage {assigns} />
+      <% "host" -> %>
+        <.host_tab {assigns} />
+    <% end %>
+    """
+  end
+
+  defp tab_path("general"), do: ~p"/tools/sandbox/settings"
+  defp tab_path(id), do: ~p"/tools/sandbox/settings?tab=#{id}"
+
+  ## General
+
+  defp general(assigns) do
+    assigns = assign(assigns, :pick_from, pick_from(assigns.settings.shares))
+
+    ~H"""
+    <div class="space-y-5">
+      <.card id="settings-shares" title="Shared folders" body_class="">
+        <:help>
+          Each folder appears at the same path in the VM. Never shared: your home folder itself, ~/.ssh, ~/.gnupg, ~/.optmem, cloud CLI logins and MDT's own data. Folders can't sit inside one another, since the VM could unmount the inner one. Anything you later run from a shared folder on this machine runs outside the VM.
+        </:help>
+        <:actions>
+          <span class="text-[11px] text-faint">{length(@settings.shares)} shared</span>
+        </:actions>
+        <ul id="shares" class="divide-y divide-line-soft">
+          <li :if={@settings.shares == []}>
+            <.empty icon="hero-folder">
+              The VM sees no folder of yours yet. Share project folders, one by one.
+            </.empty>
+          </li>
+          <li
+            :for={{share, index} <- Enum.with_index(@settings.shares)}
+            id={"share-#{index}"}
+            class="group/share flex items-center gap-3 px-4 py-2.5 transition-colors hover:bg-hover/30"
+          >
+            <.icon
+              name={if share.mode == :rw, do: "hero-folder-open", else: "hero-lock-closed"}
+              class={[
+                "size-4 shrink-0",
+                if(share.mode == :rw, do: "text-accent", else: "text-faint")
+              ]}
+            />
+            <div class="min-w-0 flex-1">
+              <p class="truncate text-xs font-medium text-ink">{Path.basename(share.path)}</p>
+              <p class="truncate font-mono text-[10px] text-faint" title={share.path}>
+                {share.path}
+              </p>
+            </div>
+            <.segmented
+              id={"share-mode-#{index}"}
+              options={[{:rw, "Read-write"}, {:ro, "Read-only"}]}
+              value={share.mode}
+              event="set_share_mode"
+              name="mode"
+              values={%{"path" => share.path}}
+            />
+            <button
+              type="button"
+              id={"share-remove-#{index}"}
+              phx-click="remove_share"
+              phx-value-path={share.path}
+              title="Stop sharing"
+              class="flex size-7 cursor-pointer items-center justify-center rounded text-faint transition-colors hover:bg-bad-soft/40 hover:text-bad"
+            >
+              <.icon name="hero-x-mark" class="size-3.5" />
+            </button>
+          </li>
+        </ul>
+        <.form
+          for={@share_form}
+          id="share-form"
+          phx-submit="add_share"
+          phx-change="share_changed"
+          class="border-t border-line-soft bg-deep/30 px-4 py-3"
+        >
+          <div class="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              id="share-pick"
+              phx-hook=".PickFolders"
+              data-default-path={@pick_from}
+              class="inline-flex cursor-pointer items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-[13px] font-semibold leading-none text-deep transition-all hover:brightness-110 active:scale-[0.98] active:brightness-95 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+            >
+              <.icon name="hero-folder-plus-micro" class="size-3.5" /> Choose folders…
+            </button>
+            <span class="text-[11px] text-faint">or</span>
+            <div class="min-w-48 flex-1">
+              <input
+                type="text"
+                name={@share_form[:path].name}
+                id="share-path"
+                value={@share_form[:path].value}
+                placeholder="type a path: ~/projects/some-repo"
+                autocomplete="off"
+                spellcheck="false"
+                class={[input_classes(), "font-mono text-xs", @share_error && "border-bad/70"]}
+              />
+            </div>
+            <select
+              name={@share_form[:mode].name}
+              id="share-mode"
+              title="How new folders are shared"
+              class="rounded-md border border-line bg-deep px-2 py-1.5 text-xs text-ink outline-none focus:border-accent/60"
+            >
+              <option value="rw" selected={@share_form[:mode].value != "ro"}>Read-write</option>
+              <option value="ro" selected={@share_form[:mode].value == "ro"}>Read-only</option>
+            </select>
+            <.button type="submit" id="share-add">
+              <.icon name="hero-plus-micro" class="size-3.5" /> Share
+            </.button>
+          </div>
+          <p
+            :if={@share_error}
+            id="share-error"
+            class="mt-2 flex items-start gap-1.5 text-[11px] leading-4 text-bad"
+          >
+            <.icon name="hero-exclamation-circle-micro" class="mt-px size-3.5 shrink-0" />
+            {@share_error}
+          </p>
+        </.form>
+      </.card>
+
+      <.card id="settings-vm" title="Size and timing">
+        <:help>
+          <span class="block">
+            The root disk holds what the image and the VM write outside its folders (apt packages, /tmp, /var); it takes space on this machine only as it fills, and starts empty when the VM is recreated. Folder writes is how much the VM may add to each read-write folder (Home, Cache, its memory, your shares) per boot, so a runaway agent can't fill your disk. Both need the VM recreated.
+          </span>
+          <span class="mt-1.5 block">
+            Hold is how long a request waits for your decision before it gives up; the image sets HEX_HTTP_TIMEOUT above it, since Hex otherwise gives up after 15 seconds. A new proxy port needs the VM recreated, since microsandbox pins it at creation.
+          </span>
+        </:help>
+        <.form for={@vm_form} id="vm-form" phx-submit="save_settings" class="space-y-4">
+          <div class="grid grid-cols-2 gap-4 sm:grid-cols-3">
+            <.number_field
+              field={@vm_form[:cpus]}
+              label="CPUs"
+              min="1"
+              max="64"
+              error={@vm_errors[:cpus]}
+            />
+            <.number_field
+              field={@vm_form[:memory_gib]}
+              label="Memory, GiB"
+              min="1"
+              max="512"
+              error={@vm_errors[:memory_gib]}
+            />
+            <.number_field
+              field={@vm_form[:disk_gib]}
+              label="Root disk, GiB"
+              min="4"
+              max="4096"
+              error={@vm_errors[:disk_gib]}
+            />
+            <.number_field
+              field={@vm_form[:write_budget_gib]}
+              label="Folder writes, GiB"
+              min="1"
+              max="4096"
+              error={@vm_errors[:write_budget_gib]}
+            />
+            <.number_field
+              field={@vm_form[:hold_seconds]}
+              label="Hold, s"
+              min="30"
+              max="600"
+              error={@vm_errors[:hold_seconds]}
+            />
+            <.number_field
+              field={@vm_form[:proxy_port]}
+              label="Proxy port"
+              min="1024"
+              max="65535"
+              error={@vm_errors[:proxy_port]}
+            />
+          </div>
+          <div class="flex items-center gap-2 border-t border-line-soft pt-3">
+            <span class="flex min-w-0 flex-1 items-center gap-1 truncate text-[11px] text-muted">
+              <%= if @tools.msb do %>
+                <.icon name="hero-check-circle-micro" class="size-3.5 shrink-0 text-ok" />
+                <span class="truncate font-mono" title={@tools.msb}>MDT's msb ready</span>
+              <% else %>
+                <.icon name="hero-exclamation-triangle-micro" class="size-3.5 shrink-0 text-warn" />
+                MDT's microsandbox runtime is missing
+              <% end %>
+            </span>
+            <.button type="submit" id="vm-save" variant="primary">Save</.button>
+          </div>
+        </.form>
+      </.card>
+
+      <.notifications_card settings={@settings} desktop={@desktop} />
+    </div>
+    <script :type={Phoenix.LiveView.ColocatedHook} name=".PickFolders">
+      export default {
+        mounted() {
+          this.el.addEventListener("click", async (event) => {
+            event.preventDefault()
+            await this.pick()
+          })
+        },
+
+        async pick() {
+          // The desktop shell exposes the native picker through the Tauri IPC.
+          // In a plain browser there is nothing to call, so the path is typed.
+          const dialog = window.__TAURI__?.dialog
+          const invoke = window.__TAURI_INTERNALS__?.invoke || window.__TAURI__?.core?.invoke
+          const mode = () => document.getElementById("share-mode")?.value || "rw"
+
+          if (!dialog && !invoke) {
+            document.getElementById("share-path")?.focus()
+            return this.pushEvent("folder_picker_unavailable", {
+              reason: "The folder picker only opens in the desktop app.",
+            })
+          }
+
+          const options = {
+            directory: true,
+            multiple: true,
+            recursive: false,
+            title: "Share folders with the VM",
+            defaultPath: this.el.dataset.defaultPath || undefined,
+          }
+
+          try {
+            const selection = dialog
+              ? await dialog.open(options)
+              : await invoke("plugin:dialog|open", {options})
+            const picked = selection == null ? [] : Array.isArray(selection) ? selection : [selection]
+            const paths = picked
+              .map((item) => (item && typeof item === "object" ? item.path : item))
+              .filter(Boolean)
+
+            if (paths.length) this.pushEvent("add_shares", {paths, mode: mode()})
+          } catch (error) {
+            this.pushEvent("folder_picker_unavailable", {
+              reason: `The folder picker could not be opened: ${error?.message || error}.`,
+            })
+          }
+        },
+      }
+    </script>
+    """
+  end
+
+  attr :field, Phoenix.HTML.FormField, required: true
+  attr :label, :string, required: true
+  attr :error, :string, default: nil
+  attr :rest, :global, include: ~w(min max)
+
+  defp number_field(assigns) do
+    ~H"""
+    <div>
+      <.input field={@field} type="number" label={@label} {@rest} />
+      <p :if={@error} class="mt-1 text-[11px] text-bad">{@error}</p>
+    </div>
+    """
+  end
+
+  # The picker opens where the latest shared folder sits, or in your home.
+  defp pick_from([]), do: System.user_home() || ""
+  defp pick_from(shares), do: shares |> List.last() |> Map.fetch!(:path) |> Path.dirname()
+
+  ## Image
+
+  defp image_tab(assigns) do
+    current = Enum.find(assigns.builds, &(&1.ref == assigns.image.tag))
+
+    assigns =
+      assign(assigns,
+        mdt_layer: Image.mdt_layer(),
+        current: current,
+        different_default?: assigns.settings.containerfile != Image.default_containerfile(),
+        edited?: current != nil and current.containerfile != assigns.settings.containerfile
+      )
+
+    ~H"""
+    <.card id="settings-image" title="The VM's image" class="mb-5" body_class="">
+      <:help>
+        Your Containerfile, then MDT's layer, built with podman on this machine and handed to microsandbox. MDT's default comes with Bash, completion, language runtimes and development CLIs already installed. The build runs here, in a rootless podman container, which isolates less than the VM: install scripts in your Containerfile run there.
+      </:help>
       <:actions>
         <span
           id="image-state"
@@ -111,42 +442,51 @@ defmodule MDTClientWeb.SandboxLive.Settings do
 
       <div
         id="image-setup-guide"
-        class="border-b border-line-soft px-4 py-3 text-[11px] leading-5 text-muted"
+        class="flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-line-soft px-4 py-2.5"
       >
-        <p>
-          MDT's default comes with Bash, completion, language runtimes and development CLIs already installed. Save the recipe, build the image, then recreate the VM to use it. Restarting keeps the same image.
+        <p class="flex-1 text-[11px] leading-5 text-muted">
+          Save the recipe, build it, then recreate the VM to use it.
         </p>
-        <p :if={@different_default?} id="containerfile-default-differs" class="mt-1 text-ink">
-          Your saved recipe differs from MDT's current default. To adopt the current setup, choose "Start from MDT's default" below, save, and build. Review any customizations before replacing them. You can keep Home and Cache when recreating.
+        <.form
+          for={@name_form}
+          id="image-name-form"
+          phx-submit="save_image_name"
+          class="flex items-center gap-2"
+        >
+          <label for="image-name" class="text-[11px] font-medium text-muted">Name</label>
+          <input
+            type="text"
+            id="image-name"
+            name={@name_form[:name].name}
+            value={@name_form[:name].value}
+            spellcheck="false"
+            autocomplete="off"
+            class={[
+              "w-52 rounded-md border bg-deep px-2 py-1 font-mono text-xs text-ink outline-none focus:border-accent/60",
+              if(@name_error, do: "border-bad/70", else: "border-line")
+            ]}
+          />
+          <.help id="image-name-help" label="About the image name">
+            Each build is tagged with its date and number, like
+            <span class="font-mono">{@settings.image_name}:{Date.to_iso8601(Date.utc_today())}.1</span>
+          </.help>
+          <.button type="submit" id="image-name-save">Save</.button>
+        </.form>
+        <p :if={@name_error} id="image-name-error" class="w-full text-right text-[11px] text-bad">
+          {@name_error}
         </p>
       </div>
 
-      <.form
-        for={@name_form}
-        id="image-name-form"
-        phx-submit="save_image_name"
-        class="flex flex-wrap items-center gap-2 border-b border-line-soft px-4 py-2.5"
+      <p
+        :if={@different_default?}
+        id="containerfile-default-differs"
+        class="flex items-center gap-2 border-b border-line-soft bg-accent-soft/20 px-4 py-2 text-[11px] text-ink"
       >
-        <label for="image-name" class="text-[11px] font-medium text-muted">Name</label>
-        <input
-          type="text"
-          id="image-name"
-          name={@name_form[:name].name}
-          value={@name_form[:name].value}
-          spellcheck="false"
-          autocomplete="off"
-          class={[
-            "w-64 rounded-md border bg-deep px-2 py-1 font-mono text-xs text-ink outline-none focus:border-accent/60",
-            if(@name_error, do: "border-bad/70", else: "border-line")
-          ]}
-        />
-        <.button type="submit" id="image-name-save">Save</.button>
-        <p :if={@name_error} id="image-name-error" class="text-[11px] text-bad">{@name_error}</p>
-        <p class="ml-auto text-[10px] text-faint">
-          Each build is tagged with its date and number, like
-          <span class="font-mono">{@settings.image_name}:{Date.to_iso8601(Date.utc_today())}.1</span>
-        </p>
-      </.form>
+        <.icon name="hero-information-circle-micro" class="size-3.5 shrink-0 text-accent" />
+        <span class="flex-1">
+          Your recipe differs from MDT's current default. To adopt it, choose "Start from MDT's default", review, save and build.
+        </span>
+      </p>
 
       <p
         :if={@edited?}
@@ -155,6 +495,14 @@ defmodule MDTClientWeb.SandboxLive.Settings do
       >
         <.icon name="hero-pencil-square-micro" class="size-3.5 text-warn" />
         The Containerfile changed since the current build. Build to use it.
+      </p>
+
+      <p
+        :if={not @tools.podman}
+        class="flex items-center gap-2 border-b border-bad/30 bg-bad-soft/20 px-4 py-2 text-[11px] text-bad"
+      >
+        <.icon name="hero-x-circle-micro" class="size-3.5 shrink-0" />
+        podman is not installed, so the image can't be built.
       </p>
 
       <div class="grid gap-0 lg:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)]">
@@ -190,7 +538,7 @@ defmodule MDTClientWeb.SandboxLive.Settings do
             </p>
             <p
               :if={is_nil(@containerfile_error)}
-              class="flex-1 font-mono text-[10px] text-faint"
+              class="flex-1 truncate font-mono text-[10px] text-faint"
               title={@image.tag}
             >
               {@image.tag || "not built yet"}
@@ -225,8 +573,11 @@ defmodule MDTClientWeb.SandboxLive.Settings do
             ><%= @image.log |> Enum.take(160) |> Enum.reverse() |> Enum.join("\n") %></pre>
           <% else %>
             <div class="flex items-center gap-2 border-b border-line-soft px-4 py-2">
-              <p class="flex-1 text-[10px] font-semibold uppercase tracking-wide text-muted">
+              <p class="flex flex-1 items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wide text-muted">
                 MDT adds this layer
+                <.help id="mdt-layer-help" label="About MDT's layer">
+                  It points at /mnt/mdt and /cache. The image holds nothing of this identity's; CA, grant and helper updates arrive without rebuilding it.
+                </.help>
               </p>
             </div>
             <pre
@@ -235,31 +586,14 @@ defmodule MDTClientWeb.SandboxLive.Settings do
               phx-no-curly-interpolation
             ><%= String.trim(@mdt_layer) %></pre>
           <% end %>
-          <ul class="space-y-1.5 border-t border-line-soft px-4 py-3 text-[10px] leading-4 text-muted">
-            <li class="flex gap-2">
-              <.icon name="hero-finger-print-micro" class="mt-px size-3 shrink-0 text-accent" />
-              MDT's layer points at /mnt/mdt and /cache. The image holds nothing of this identity's; CA, grant and helper updates arrive without rebuilding it.
-            </li>
-            <li class="flex gap-2">
-              <.icon name="hero-exclamation-triangle-micro" class="mt-px size-3 shrink-0 text-warn" />
-              The build runs here, in a rootless podman container, which isolates less than the VM. Install scripts in your Containerfile run there.
-            </li>
-            <li :if={not @tools.podman} class="flex gap-2 text-bad">
-              <.icon name="hero-x-circle-micro" class="mt-px size-3 shrink-0" />
-              podman is not installed, so the image can't be built.
-            </li>
-          </ul>
         </div>
       </div>
     </.card>
 
-    <.card
-      id="settings-builds"
-      title="Builds kept"
-      subtitle="The current one and the two before it. Going back means using a build, not the recipe: rebuilding the same Containerfile later gives other versions."
-      class="mb-5"
-      body_class=""
-    >
+    <.card id="settings-builds" title="Builds kept" body_class="">
+      <:help>
+        The current one and the two before it. Going back means using a build, not the recipe: rebuilding the same Containerfile later gives other versions.
+      </:help>
       <ul class="divide-y divide-line-soft">
         <li :if={@builds == []} id="builds-empty">
           <.empty icon="hero-archive-box">No build yet. Build the image above.</.empty>
@@ -320,391 +654,106 @@ defmodule MDTClientWeb.SandboxLive.Settings do
         </li>
       </ul>
     </.card>
+    """
+  end
 
-    <div class="grid gap-5 lg:grid-cols-[minmax(0,1.3fr)_minmax(0,1fr)]">
-      <div class="space-y-5">
-        <.card
-          id="settings-shares"
-          title="Shared folders"
-          subtitle="Each folder appears at the same path in the VM. Pick project folders one by one."
-          body_class=""
-        >
-          <ul class="divide-y divide-line-soft">
-            <li :if={@settings.shares == []}>
-              <.empty icon="hero-folder">The VM sees no folder of yours yet.</.empty>
-            </li>
-            <li
-              :for={{share, index} <- Enum.with_index(@settings.shares)}
-              id={"share-#{index}"}
-              class="flex items-center gap-3 px-4 py-2.5"
+  ## Memory & storage
+
+  defp storage(assigns) do
+    ~H"""
+    <div class="grid items-start gap-5 lg:grid-cols-2">
+      <.card id="settings-vm-memory" title="The VM's memory">
+        <:help>
+          The VM has its own OptMem. It can start from a copy of yours, and what it learns comes back only through your review. Copying replaces what the VM remembers (moved aside, not deleted) with every memory you have, work ones included, and only while the VM is stopped.
+        </:help>
+        <%= if @memory.host? do %>
+          <p id="vm-memory-state" class="text-xs leading-5 text-ink">
+            <%= if @memory.seeded_at do %>
+              Started from a copy of yours ({@memory.seed_count} memories) on {Calendar.strftime(
+                @memory.seeded_at,
+                "%b %-d, %H:%M"
+              )} UTC.
+            <% else %>
+              Its own, never copied from yours.
+            <% end %>
+          </p>
+          <div class="mt-3 flex flex-wrap gap-2">
+            <.button id="vm-memory-review" variant="primary" phx-click="review_memories">
+              <.icon name="hero-inbox-arrow-down-micro" class="size-3.5" /> Review what it noted
+            </.button>
+            <.button
+              id="vm-memory-seed"
+              phx-click="seed_memory"
+              disabled={@vm.status in [:running, :starting] or not is_nil(@vm.busy)}
+              title={
+                if(@vm.status in [:running, :starting],
+                  do: "Stop the VM first",
+                  else: "Replace the VM's memory with a copy of yours"
+                )
+              }
             >
-              <.icon
-                name={if share.mode == :rw, do: "hero-folder-open", else: "hero-lock-closed"}
-                class={[
-                  "size-4 shrink-0",
-                  if(share.mode == :rw, do: "text-accent", else: "text-faint")
-                ]}
-              />
-              <p class="min-w-0 flex-1 truncate font-mono text-[11px] text-ink" title={share.path}>
-                {share.path}
-              </p>
-              <.segmented
-                id={"share-mode-#{index}"}
-                options={[{:rw, "Read-write"}, {:ro, "Read-only"}]}
-                value={share.mode}
-                event="set_share_mode"
-                name="mode"
-                values={%{"path" => share.path}}
-              />
-              <button
-                type="button"
-                id={"share-remove-#{index}"}
-                phx-click="remove_share"
-                phx-value-path={share.path}
-                title="Stop sharing"
-                class="flex size-7 cursor-pointer items-center justify-center rounded text-faint transition-colors hover:bg-bad-soft/40 hover:text-bad"
-              >
-                <.icon name="hero-x-mark" class="size-3.5" />
-              </button>
+              <.icon name="hero-document-duplicate-micro" class="size-3.5" /> Copy mine in
+            </.button>
+          </div>
+        <% else %>
+          <p class="text-xs leading-5 text-muted">
+            OptMem isn't installed on this machine (~/.optmem/memo), so the VM's memory can't be set up or compared with yours.
+          </p>
+        <% end %>
+      </.card>
+
+      <.card id="settings-folders" title="What the VM keeps">
+        <:help>
+          Folders of MDT's, mounted into the VM besides yours. They survive recreating it. Written by the VM, so MDT treats them as data and never runs anything from them. Whatever in Home runs code (agent hooks, MCP servers, shell files) survives a recreate unless you start it empty.
+        </:help>
+        <dl class="space-y-2.5 text-xs">
+          <.kept
+            label="Home"
+            path={@folders.home}
+            guest="/root"
+            text="Logins, shell history, Zed's server, agent settings."
+          />
+          <.kept
+            label="Cache"
+            path={@folders.cache}
+            guest="/cache"
+            text="Tool versions installed in the VM and package caches."
+          />
+          <.kept
+            label="The VM's memory"
+            path={@folders.optmem}
+            guest="/root/.optmem"
+            text="Its own OptMem. Emptying Home leaves it alone."
+          />
+          <.kept
+            label="From MDT, read-only"
+            path={@inbox}
+            guest="/mnt/mdt"
+            text="CA bundle, placeholders, the agents' instructions, grants as they are now."
+          />
+        </dl>
+        <div class="mt-3 border-t border-line-soft pt-3">
+          <p class="text-[11px] font-medium text-muted">Copies of Home</p>
+          <p :if={@snapshots == []} id="snapshots-empty" class="mt-1 text-[11px] text-faint">
+            None yet. One is taken before each recreate, three at most.
+          </p>
+          <ul :if={@snapshots != []} id="snapshots" class="mt-1.5 space-y-1">
+            <li
+              :for={snapshot <- @snapshots}
+              id={"snapshot-#{snapshot.id}"}
+              class="flex items-center gap-2 text-[11px]"
+            >
+              <.icon name="hero-camera-micro" class="size-3.5 text-faint" />
+              <span class="text-ink">
+                {Calendar.strftime(snapshot.taken_at, "%b %-d, %H:%M")} UTC
+              </span>
+              <span :if={snapshot.tag} class="font-mono text-[10px] text-faint">
+                ran {snapshot.tag}
+              </span>
             </li>
           </ul>
-          <.form
-            for={@share_form}
-            id="share-form"
-            phx-submit="add_share"
-            phx-change="share_changed"
-            class="flex flex-wrap items-start gap-2 border-t border-line-soft bg-deep/30 px-4 py-3"
-          >
-            <div class="min-w-64 flex-1">
-              <input
-                type="text"
-                name={@share_form[:path].name}
-                id="share-path"
-                value={@share_form[:path].value}
-                placeholder="~/projects/some-repo"
-                autocomplete="off"
-                spellcheck="false"
-                class={[input_classes(), "font-mono text-xs", @share_error && "border-bad/70"]}
-              />
-              <p
-                :if={@share_error}
-                id="share-error"
-                class="mt-1.5 flex items-start gap-1.5 text-[11px] leading-4 text-bad"
-              >
-                <.icon name="hero-exclamation-circle-micro" class="mt-px size-3.5 shrink-0" />
-                {@share_error}
-              </p>
-            </div>
-            <select
-              name={@share_form[:mode].name}
-              id="share-mode"
-              class="rounded-md border border-line bg-deep px-2 py-1.5 text-xs text-ink outline-none focus:border-accent/60"
-            >
-              <option value="rw" selected={@share_form[:mode].value != "ro"}>Read-write</option>
-              <option value="ro" selected={@share_form[:mode].value == "ro"}>Read-only</option>
-            </select>
-            <.button type="submit" id="share-add">
-              <.icon name="hero-plus-micro" class="size-3.5" /> Share
-            </.button>
-          </.form>
-          <p class="border-t border-line-soft px-4 py-2.5 text-[10px] leading-4 text-faint">
-            Never shared: your home folder itself, ~/.ssh, ~/.gnupg, ~/.optmem, cloud CLI logins and MDT's own data. Folders can't sit inside one another, since the VM could unmount the inner one. Anything you later run from a shared folder on this machine runs outside the VM.
-          </p>
-        </.card>
-
-        <.card id="settings-vm" title="Size and timing">
-          <.form for={@vm_form} id="vm-form" phx-submit="save_settings" class="space-y-4">
-            <div class="grid gap-4 sm:grid-cols-3">
-              <div>
-                <.input field={@vm_form[:cpus]} type="number" label="CPUs" min="1" max="64" />
-                <p :if={@vm_errors[:cpus]} class="mt-1 text-[11px] text-bad">{@vm_errors[:cpus]}</p>
-              </div>
-              <div>
-                <.input
-                  field={@vm_form[:memory_gib]}
-                  type="number"
-                  label="Memory, GiB"
-                  min="1"
-                  max="512"
-                />
-                <p :if={@vm_errors[:memory_gib]} class="mt-1 text-[11px] text-bad">
-                  {@vm_errors[:memory_gib]}
-                </p>
-              </div>
-              <div>
-                <.input
-                  field={@vm_form[:disk_gib]}
-                  type="number"
-                  label="Root disk, GiB"
-                  min="4"
-                  max="4096"
-                />
-                <p :if={@vm_errors[:disk_gib]} class="mt-1 text-[11px] text-bad">
-                  {@vm_errors[:disk_gib]}
-                </p>
-              </div>
-              <div>
-                <.input
-                  field={@vm_form[:write_budget_gib]}
-                  type="number"
-                  label="Folder writes, GiB"
-                  min="1"
-                  max="4096"
-                />
-                <p :if={@vm_errors[:write_budget_gib]} class="mt-1 text-[11px] text-bad">
-                  {@vm_errors[:write_budget_gib]}
-                </p>
-              </div>
-              <div>
-                <.input
-                  field={@vm_form[:hold_seconds]}
-                  type="number"
-                  label="Hold, s"
-                  min="30"
-                  max="600"
-                />
-                <p :if={@vm_errors[:hold_seconds]} class="mt-1 text-[11px] text-bad">
-                  {@vm_errors[:hold_seconds]}
-                </p>
-              </div>
-              <div>
-                <.input
-                  field={@vm_form[:proxy_port]}
-                  type="number"
-                  label="Proxy port"
-                  min="1024"
-                  max="65535"
-                />
-                <p :if={@vm_errors[:proxy_port]} class="mt-1 text-[11px] text-bad">
-                  {@vm_errors[:proxy_port]}
-                </p>
-              </div>
-            </div>
-            <p class="text-[10px] leading-4 text-faint">
-              The root disk holds what the image and the VM write outside its folders (apt packages, /tmp, /var); it takes space on this machine only as it fills, and starts empty when the VM is recreated. Folder writes is how much the VM may add to each read-write folder (Home, Cache, its memory, your shares) per boot, so a runaway agent can't fill your disk. Both need the VM recreated.
-            </p>
-            <p class="text-[10px] leading-4 text-faint">
-              Hold is how long a request waits for your decision before it gives up; the image sets HEX_HTTP_TIMEOUT above it, since Hex otherwise gives up after 15 seconds. A new proxy port needs the VM recreated, since microsandbox pins it at creation.
-            </p>
-            <div class="flex items-center gap-2">
-              <span class="flex-1 text-[11px] text-muted">
-                <%= if @tools.msb do %>
-                  <.icon name="hero-check-circle-micro" class="size-3.5 text-ok" /> MDT's msb at
-                  <span class="font-mono">{@tools.msb}</span>
-                <% else %>
-                  <.icon name="hero-exclamation-triangle-micro" class="size-3.5 text-warn" />
-                  MDT's microsandbox runtime is missing
-                <% end %>
-              </span>
-              <.button type="submit" id="vm-save" variant="primary">Save</.button>
-            </div>
-          </.form>
-        </.card>
-      </div>
-
-      <div class="space-y-5">
-        <.card
-          id="settings-network"
-          title="Network"
-          subtitle="All of the VM's TCP goes through MDT. If MDT isn't running, the VM has no internet."
-        >
-          <dl class="space-y-3 text-xs">
-            <div>
-              <dt class="text-muted">Private ranges</dt>
-              <dd class="mt-1 text-[11px] leading-4 text-ink">
-                Refused unless a network grant that lists them is on.
-              </dd>
-            </div>
-            <div>
-              <dt class="text-muted">Always refused</dt>
-              <dd id="refused-addresses" class="mt-1.5 flex flex-wrap gap-1">
-                <span
-                  :for={address <- @refused}
-                  class="rounded border border-bad/25 bg-bad-soft/20 px-1.5 py-0.5 font-mono text-[10px] text-ink"
-                >
-                  {address}
-                </span>
-              </dd>
-              <p class="mt-1.5 text-[10px] leading-4 text-faint">
-                Loopback and every address of this machine, read from its network interfaces, so the VM can't reach MDT or anything else listening here. A network grant naming one exact address and port opens it, for a tunnel.
-              </p>
-            </div>
-            <div class="rounded-lg border border-line-soft bg-deep/50 p-2.5">
-              <p class="text-[11px] leading-4 text-muted">
-                <span class="font-medium text-ink">Not covered:</span>
-                DNS. Microsandbox answers it outside MDT, so query names can carry data out.
-              </p>
-            </div>
-          </dl>
-        </.card>
-
-        <.card
-          id="settings-host"
-          title="This machine, as agents see it"
-          subtitle="What mdt host prints and /mnt/mdt/host.md holds, so agents can write commands that run here. They never probe it themselves."
-        >
-          <dl class="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1 text-xs">
-            <dt class="text-muted">System</dt>
-            <dd id="host-os" class="text-ink">{@host.facts.os} · {@host.facts.kernel}</dd>
-            <dt class="text-muted">Architecture</dt>
-            <dd class="font-mono text-[11px] text-ink">{@host.facts.arch}</dd>
-            <dt class="text-muted">Shell</dt>
-            <dd class="font-mono text-[11px] text-ink">{@host.facts.shell}</dd>
-            <dt class="text-muted">Tools</dt>
-            <dd id="host-tools" class="flex flex-wrap items-center gap-x-2 text-ink">
-              <%= cond do %>
-                <% @host.probing? -> %>
-                  <span class="text-muted">Looking…</span>
-                <% is_nil(@host.tools) -> %>
-                  <span class="text-muted">Not checked yet</span>
-                <% true -> %>
-                  <span>{length(@host.tools)} found</span>
-              <% end %>
-              <button
-                type="button"
-                id="host-probe"
-                phx-click="probe_host"
-                disabled={@host.probing?}
-                class="cursor-pointer text-[11px] text-accent hover:underline disabled:cursor-default disabled:opacity-50"
-              >
-                Check again
-              </button>
-            </dd>
-          </dl>
-          <.form
-            for={@host_form}
-            id="host-notes-form"
-            phx-submit="save_host_notes"
-            class="mt-3 space-y-2 border-t border-line-soft pt-3"
-          >
-            <.input
-              field={@host_form[:notes]}
-              id="host-notes"
-              type="textarea"
-              label="Your notes for agents"
-              rows="3"
-              placeholder="e.g. The work VPN comes up with openvpn3 session-start --config work. Kubernetes contexts: staging, prod."
-              class={[input_classes(), "leading-5", @host_error && "border-bad/70"]}
-            />
-            <p :if={@host_error} id="host-notes-error" class="text-[11px] text-bad">
-              {@host_error}
-            </p>
-            <div class="flex items-center gap-2">
-              <details id="host-preview" class="group/preview flex-1">
-                <summary class="cursor-pointer list-none text-[11px] text-accent hover:underline [&::-webkit-details-marker]:hidden">
-                  What agents read
-                </summary>
-                <pre
-                  id="host-text"
-                  class="mt-2 max-h-80 overflow-auto whitespace-pre-wrap rounded-lg border border-line-soft bg-deep/50 p-2.5 font-mono text-[10px] leading-4 text-ink"
-                >{@host.text}</pre>
-              </details>
-              <.button type="submit" id="host-notes-save" class="self-start">Save</.button>
-            </div>
-          </.form>
-        </.card>
-
-        <.card
-          id="settings-folders"
-          title="What the VM keeps"
-          subtitle="Folders of MDT's, mounted into the VM besides yours. They survive recreating it."
-        >
-          <dl class="space-y-2.5 text-xs">
-            <.kept
-              label="Home, read-write"
-              path={@folders.home}
-              guest="/root"
-              text="Logins, shell history, Zed's server, agent settings."
-            />
-            <.kept
-              label="Cache, read-write"
-              path={@folders.cache}
-              guest="/cache"
-              text="Tool versions installed in the VM and package caches."
-            />
-            <.kept
-              label="The VM's memory, read-write"
-              path={@folders.optmem}
-              guest="/root/.optmem"
-              text="Its own OptMem. Emptying Home leaves it alone."
-            />
-            <.kept
-              label="From MDT, read-only"
-              path={@inbox}
-              guest="/mnt/mdt"
-              text="CA bundle, placeholders, the agents' instructions, grants as they are now."
-            />
-          </dl>
-          <div class="mt-3 border-t border-line-soft pt-3">
-            <p class="text-[11px] font-medium text-muted">Copies of Home</p>
-            <p :if={@snapshots == []} id="snapshots-empty" class="mt-1 text-[11px] text-faint">
-              None yet. One is taken before each recreate, three at most.
-            </p>
-            <ul :if={@snapshots != []} id="snapshots" class="mt-1.5 space-y-1">
-              <li
-                :for={snapshot <- @snapshots}
-                id={"snapshot-#{snapshot.id}"}
-                class="flex items-center gap-2 text-[11px]"
-              >
-                <.icon name="hero-camera-micro" class="size-3.5 text-faint" />
-                <span class="text-ink">
-                  {Calendar.strftime(snapshot.taken_at, "%b %-d, %H:%M")} UTC
-                </span>
-                <span :if={snapshot.tag} class="font-mono text-[10px] text-faint">
-                  ran {snapshot.tag}
-                </span>
-              </li>
-            </ul>
-          </div>
-          <p class="mt-3 text-[10px] leading-4 text-faint">
-            Written by the VM, so MDT treats them as data and never runs anything from them. Whatever in Home runs code (agent hooks, MCP servers, shell files) survives a recreate unless you start it empty.
-          </p>
-        </.card>
-
-        <.card
-          id="settings-vm-memory"
-          title="The VM's memory"
-          subtitle="Its own OptMem. It can start from a copy of yours, and what it learns comes back only through your review."
-        >
-          <%= if @memory.host? do %>
-            <p id="vm-memory-state" class="text-xs leading-5 text-ink">
-              <%= if @memory.seeded_at do %>
-                Started from a copy of yours ({@memory.seed_count} memories) on {Calendar.strftime(
-                  @memory.seeded_at,
-                  "%b %-d, %H:%M"
-                )} UTC.
-              <% else %>
-                Its own, never copied from yours.
-              <% end %>
-            </p>
-            <div class="mt-3 flex flex-wrap gap-2">
-              <.button id="vm-memory-review" variant="primary" phx-click="review_memories">
-                <.icon name="hero-inbox-arrow-down-micro" class="size-3.5" /> Review what it noted
-              </.button>
-              <.button
-                id="vm-memory-seed"
-                phx-click="seed_memory"
-                disabled={@vm.status in [:running, :starting] or not is_nil(@vm.busy)}
-                title={
-                  if(@vm.status in [:running, :starting],
-                    do: "Stop the VM first",
-                    else: "Replace the VM's memory with a copy of yours"
-                  )
-                }
-              >
-                <.icon name="hero-document-duplicate-micro" class="size-3.5" /> Copy mine in
-              </.button>
-            </div>
-            <p class="mt-3 text-[10px] leading-4 text-faint">
-              Copying replaces what the VM remembers (moved aside, not deleted) with every memory you have, work ones included; only while the VM is stopped. Nothing it notes reaches yours unless you tick it in the review.
-            </p>
-          <% else %>
-            <p class="text-xs leading-5 text-muted">
-              OptMem isn't installed on this machine (~/.optmem/memo), so the VM's memory can't be set up or compared with yours.
-            </p>
-          <% end %>
-        </.card>
-      </div>
+        </div>
+      </.card>
     </div>
     """
   end
@@ -716,13 +765,186 @@ defmodule MDTClientWeb.SandboxLive.Settings do
 
   defp kept(assigns) do
     ~H"""
-    <div>
-      <dt class="text-muted">{@label}</dt>
-      <dd class="mt-0.5 break-all font-mono text-[11px] text-ink">{@path} → {@guest}</dd>
-      <dd class="text-[10px] leading-4 text-faint">{@text}</dd>
+    <div class="group/kept">
+      <dt class="flex items-baseline gap-2">
+        <span class="font-medium text-ink">{@label}</span>
+        <span class="font-mono text-[10px] text-muted">{@guest}</span>
+      </dt>
+      <dd class="text-[11px] leading-4 text-muted">{@text}</dd>
+      <dd class="truncate font-mono text-[10px] text-faint" title={@path}>{@path}</dd>
+    </div>
+    """
+  end
+
+  ## Host & network
+
+  defp host_tab(assigns) do
+    assigns = assign(assigns, :refused, Sandbox.refused_addresses())
+
+    ~H"""
+    <div class="grid items-start gap-5 lg:grid-cols-[minmax(0,1.3fr)_minmax(0,1fr)]">
+      <.card id="settings-host" title="This machine, as agents see it">
+        <:help>
+          What mdt host prints and /mnt/mdt/host.md holds, so agents can write commands that run here. They never probe it themselves.
+        </:help>
+        <dl class="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1 text-xs">
+          <dt class="text-muted">System</dt>
+          <dd id="host-os" class="text-ink">{@host.facts.os} · {@host.facts.kernel}</dd>
+          <dt class="text-muted">Architecture</dt>
+          <dd class="font-mono text-[11px] text-ink">{@host.facts.arch}</dd>
+          <dt class="text-muted">Shell</dt>
+          <dd class="font-mono text-[11px] text-ink">{@host.facts.shell}</dd>
+          <dt class="text-muted">Tools</dt>
+          <dd id="host-tools" class="flex flex-wrap items-center gap-x-2 text-ink">
+            <%= cond do %>
+              <% @host.probing? -> %>
+                <span class="text-muted">Looking…</span>
+              <% is_nil(@host.tools) -> %>
+                <span class="text-muted">Not checked yet</span>
+              <% true -> %>
+                <span>{length(@host.tools)} found</span>
+            <% end %>
+            <button
+              type="button"
+              id="host-probe"
+              phx-click="probe_host"
+              disabled={@host.probing?}
+              class="cursor-pointer text-[11px] text-accent hover:underline disabled:cursor-default disabled:opacity-50"
+            >
+              Check again
+            </button>
+          </dd>
+        </dl>
+        <.form
+          for={@host_form}
+          id="host-notes-form"
+          phx-submit="save_host_notes"
+          class="mt-3 space-y-2 border-t border-line-soft pt-3"
+        >
+          <.input
+            field={@host_form[:notes]}
+            id="host-notes"
+            type="textarea"
+            label="Your notes for agents"
+            rows="3"
+            placeholder="e.g. The work VPN comes up with openvpn3 session-start --config work. Kubernetes contexts: staging, prod."
+            class={[input_classes(), "leading-5", @host_error && "border-bad/70"]}
+          />
+          <p :if={@host_error} id="host-notes-error" class="text-[11px] text-bad">
+            {@host_error}
+          </p>
+          <div class="flex items-center gap-2">
+            <details id="host-preview" class="group/preview flex-1">
+              <summary class="cursor-pointer list-none text-[11px] text-accent hover:underline [&::-webkit-details-marker]:hidden">
+                What agents read
+              </summary>
+              <pre
+                id="host-text"
+                class="mt-2 max-h-80 overflow-auto whitespace-pre-wrap rounded-lg border border-line-soft bg-deep/50 p-2.5 font-mono text-[10px] leading-4 text-ink"
+              >{@host.text}</pre>
+            </details>
+            <.button type="submit" id="host-notes-save" class="self-start">Save</.button>
+          </div>
+        </.form>
+      </.card>
+
+      <.card id="settings-network" title="Network">
+        <:help>
+          All of the VM's TCP goes through MDT. If MDT isn't running, the VM has no internet.
+        </:help>
+        <dl class="space-y-3 text-xs">
+          <div>
+            <dt class="text-muted">Private ranges</dt>
+            <dd class="mt-1 text-[11px] leading-4 text-ink">
+              Refused unless a network grant that lists them is on.
+            </dd>
+          </div>
+          <div>
+            <dt class="flex items-center gap-1.5 text-muted">
+              Always refused
+              <.help id="refused-help" label="About always refused addresses">
+                Loopback and every address of this machine, read from its network interfaces, so the VM can't reach MDT or anything else listening here. A network grant naming one exact address and port opens it, for a tunnel.
+              </.help>
+            </dt>
+            <dd id="refused-addresses" class="mt-1.5 flex flex-wrap gap-1">
+              <span
+                :for={address <- @refused}
+                class="rounded border border-bad/25 bg-bad-soft/20 px-1.5 py-0.5 font-mono text-[10px] text-ink"
+              >
+                {address}
+              </span>
+            </dd>
+          </div>
+          <div class="rounded-lg border border-line-soft bg-deep/50 p-2.5">
+            <p class="text-[11px] leading-4 text-muted">
+              <span class="font-medium text-ink">Not covered:</span>
+              DNS. Microsandbox answers it outside MDT, so query names can carry data out.
+            </p>
+          </div>
+        </dl>
+      </.card>
     </div>
     """
   end
 
   defp gigabytes(bytes), do: "#{Float.round(bytes / 1_000_000_000, 2)} GB"
+
+  attr :settings, :any, required: true
+  attr :desktop, :any, required: true
+
+  defp notifications_card(assigns) do
+    ~H"""
+    <.card
+      id="settings-notifications"
+      title="Desktop notifications"
+      subtitle="A notification for each approval that waits for you, so you hear of it while working in another window. Clicking one brings MDT forward on that approval; deciding happens there."
+    >
+      <div class="space-y-3">
+        <div class="flex items-center gap-3">
+          <.switch
+            id="desktop-notifications-switch"
+            on={@settings.desktop_notifications}
+            label="Desktop notifications"
+            phx-click="save_notifications"
+            phx-value-on={to_string(not @settings.desktop_notifications)}
+          />
+          <span class="flex-1 text-xs text-ink">Notify me when an approval waits</span>
+          <.button
+            type="button"
+            id="desktop-notifications-test"
+            phx-click="test_notification"
+            disabled={not desktop_connected?(@desktop)}
+          >
+            Send a test
+          </.button>
+        </div>
+        <p id="desktop-notifications-status" class="flex items-start gap-1.5 text-[11px] leading-4">
+          <span class={[
+            "mt-1 size-1.5 shrink-0 rounded-full",
+            case @desktop do
+              {:connected, _info} -> "bg-ok"
+              :connecting -> "bg-warn motion-safe:animate-pulse"
+              _other -> "bg-faint"
+            end
+          ]}></span>
+          <span class="text-muted">{desktop_words(@desktop)}</span>
+        </p>
+        <p class="text-[10px] leading-4 text-faint">
+          GNOME lists them under MDT in Settings, Notifications, where you can turn off banners or sounds. A notification closes once its approval is decided or gives up.
+        </p>
+      </div>
+    </.card>
+    """
+  end
+
+  defp desktop_connected?({:connected, _info}), do: true
+  defp desktop_connected?(_status), do: false
+
+  defp desktop_words({:connected, %{name: name, version: version}}),
+    do: "Shown by #{name} #{version}, through the session bus"
+
+  defp desktop_words(:connecting), do: "Connecting to the desktop…"
+  defp desktop_words({:unavailable, reason}), do: reason
+  defp desktop_words(:off), do: "Not shown here: this MDT runs without a desktop"
+  defp desktop_words(nil), do: "Checking the desktop…"
 end

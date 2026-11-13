@@ -24,6 +24,10 @@ config :mdt_client, MDTClient.Sandbox.Server,
 config :mdt_client, MDTClient.Sandbox.Msb,
   runtime_dir: Path.join(System.tmp_dir!(), "mdt_client_test_msb_#{System.pid()}")
 
+# Tests never show desktop notifications; the service only keeps track of
+# what it would show. The D-Bus tests start their own bus.
+config :mdt_client, MDTClient.Desktop.Notifications, address: nil
+
 # Host commands, minted values and the tool probe run `bash -lc`, which reads
 # the login profile of whoever runs the tests and prints whatever it prints.
 # A home that doesn't exist keeps it out; /etc/profile still runs.

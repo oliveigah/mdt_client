@@ -2034,6 +2034,8 @@ name = "mdt_client"
 version = "0.1.0"
 dependencies = [
  "elixirkit",
+ "gdkwayland-sys",
+ "gtk",
  "serde",
  "serde_json",
  "tauri",

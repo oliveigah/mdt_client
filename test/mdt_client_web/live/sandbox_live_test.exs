@@ -4,7 +4,7 @@ defmodule MDTClientWeb.SandboxLiveTest do
   import Phoenix.LiveViewTest
 
   alias MDTClient.Sandbox
-  alias MDTClient.Sandbox.Server
+  alias MDTClient.Sandbox.{Event, Server}
 
   setup %{conn: conn} do
     sign_in(conn)
@@ -70,7 +70,8 @@ defmodule MDTClientWeb.SandboxLiveTest do
           {~p"/tools/sandbox/approvals", "#no-waiting-approvals"},
           {~p"/tools/sandbox/grants", "#grants-on"},
           {~p"/tools/sandbox/activity", "#activity-log"},
-          {~p"/tools/sandbox/settings", "#settings-image"}
+          {~p"/tools/sandbox/settings", "#settings-shares"},
+          {~p"/tools/sandbox/setup", "#setup-steps"}
         ] do
       {:ok, view, _html} = live(conn, path)
       assert has_element?(view, selector)
@@ -80,15 +81,25 @@ defmodule MDTClientWeb.SandboxLiveTest do
     end
   end
 
-  test "a new sandbox points at building the image first", %{conn: conn} do
+  test "a new sandbox points at setup, which starts with building the image", %{conn: conn} do
     {:ok, view, _html} = live(conn, ~p"/tools/sandbox")
-    assert has_element?(view, "#vm-build[href='/tools/sandbox/settings']")
+    assert has_element?(view, "#vm-build[href='/tools/sandbox/setup']")
     assert has_element?(view, "#vm-first-run")
+    assert has_element?(view, "#sandbox-nav-setup-todo")
     refute has_element?(view, "#vm-start")
+
+    {:ok, view, _html} = live(conn, ~p"/tools/sandbox/setup")
+    assert has_element?(view, "#setup-build")
+    refute has_element?(view, "#setup-step-image[data-done]")
+    refute has_element?(view, "#setup-step-folders[data-done]")
+    assert has_element?(view, "#setup-start[disabled]")
   end
 
-  test "the overview spells out how to open this VM in Zed", %{conn: conn, username: username} do
-    {:ok, view, _html} = live(conn, ~p"/tools/sandbox")
+  test "setup spells out how to open this VM in Zed", %{conn: conn, username: username} do
+    {:ok, overview, _html} = live(conn, ~p"/tools/sandbox")
+    refute has_element?(overview, "#connect-zed")
+
+    {:ok, view, _html} = live(conn, ~p"/tools/sandbox/setup")
     name = Server.vm_name(username)
 
     assert has_element?(view, "#connect-ssh-config", "ssh serve #{name} --stdio")
@@ -326,6 +337,7 @@ defmodule MDTClientWeb.SandboxLiveTest do
     |> render_change()
 
     refute has_element?(view, "#activity-log li[id^=event-]")
+    assert has_element?(view, "#activity-empty", "Nothing matches")
   end
 
   test "settings refuse unsafe folders and Containerfiles without a FROM", %{conn: conn} do
@@ -333,6 +345,11 @@ defmodule MDTClientWeb.SandboxLiveTest do
 
     view |> form("#share-form", share: %{path: "~", mode: "rw"}) |> render_submit()
     assert has_element?(view, "#share-error", "Your home folder holds your credentials")
+
+    view |> form("#vm-form", vm: %{cpus: "0"}) |> render_submit()
+    assert render(view) =~ "Enter a whole number from 1 to 64."
+
+    {:ok, view, _html} = live(conn, ~p"/tools/sandbox/settings?tab=image")
 
     view |> form("#containerfile-form", image: %{containerfile: "RUN true"}) |> render_submit()
     assert has_element?(view, "#containerfile-error")
@@ -342,22 +359,67 @@ defmodule MDTClientWeb.SandboxLiveTest do
     |> render_submit()
 
     assert has_element?(view, "#notices", "Containerfile saved")
+  end
 
-    view |> form("#vm-form", vm: %{cpus: "0"}) |> render_submit()
-    assert render(view) =~ "Enter a whole number from 1 to 64."
+  test "folders picked in the folder dialog are shared together", %{
+    conn: conn,
+    username: username
+  } do
+    base = Path.join(System.tmp_dir!(), "share-pick-#{System.unique_integer([:positive])}")
+    on_exit(fn -> File.rm_rf!(base) end)
+    [one, two] = for name <- ~w(one two), do: Path.join(base, name)
+    Enum.each([one, two], &File.mkdir_p!/1)
+
+    {:ok, view, _html} = live(conn, ~p"/tools/sandbox/settings")
+    assert has_element?(view, "#share-pick[phx-hook]")
+
+    render_hook(view, "add_shares", %{
+      "paths" => [one, two, Path.join(base, "gone")],
+      "mode" => "ro"
+    })
+
+    assert [%{path: ^one, mode: :ro}, %{path: ^two, mode: :ro}] =
+             Sandbox.snapshot(username).settings.shares
+
+    assert has_element?(view, "#share-0", "one")
+    assert has_element?(view, "#share-1", "two")
+    assert has_element?(view, "#notices", "2 folders shared")
+    assert has_element?(view, "#share-error", "gone: That folder does not exist.")
+
+    render_hook(view, "folder_picker_unavailable", %{"reason" => "Only in the desktop app."})
+    assert has_element?(view, "#share-error", "Type the folder's path instead.")
+  end
+
+  test "settings sit in tabs, and each tab shows its own panels", %{conn: conn} do
+    {:ok, view, _html} = live(conn, ~p"/tools/sandbox/settings")
+    assert has_element?(view, "#settings-tab-general[aria-current=page]")
+    assert has_element?(view, "#settings-vm")
+    refute has_element?(view, "#settings-image")
+
+    view |> element("#settings-tab-host") |> render_click()
+    assert_patch(view, ~p"/tools/sandbox/settings?tab=host")
+    assert has_element?(view, "#settings-host")
+    assert has_element?(view, "#settings-network")
+    refute has_element?(view, "#settings-shares")
+
+    {:ok, view, _html} = live(conn, ~p"/tools/sandbox/settings?tab=nonsense")
+    assert has_element?(view, "#settings-tab-general[aria-current=page]")
   end
 
   test "settings show the image's name, its builds, what the VM keeps and its memory", %{
     conn: conn
   } do
-    {:ok, view, _html} = live(conn, ~p"/tools/sandbox/settings")
+    {:ok, view, _html} = live(conn, ~p"/tools/sandbox/settings?tab=storage")
 
-    assert has_element?(view, "#image-name[value='mdt_agent_sdb_image']")
-    assert has_element?(view, "#builds-empty")
     assert has_element?(view, "#settings-folders", "/root")
     assert has_element?(view, "#settings-folders", "/cache")
     assert has_element?(view, "#snapshots-empty")
     assert has_element?(view, "#settings-vm-memory")
+
+    {:ok, view, _html} = live(conn, ~p"/tools/sandbox/settings?tab=image")
+
+    assert has_element?(view, "#image-name[value='mdt_agent_sdb_image']")
+    assert has_element?(view, "#builds-empty")
     assert has_element?(view, "#image-setup-guide")
     refute has_element?(view, "#containerfile-default-differs")
 
@@ -376,7 +438,7 @@ defmodule MDTClientWeb.SandboxLiveTest do
     {:ok, _} =
       Sandbox.update_settings(username, %{"containerfile" => "FROM debian:bookworm-slim\n"})
 
-    {:ok, view, _html} = live(conn, ~p"/tools/sandbox/settings")
+    {:ok, view, _html} = live(conn, ~p"/tools/sandbox/settings?tab=image")
 
     assert has_element?(view, "#containerfile-default-differs")
     view |> element("#containerfile-reset") |> render_click()
@@ -434,14 +496,97 @@ defmodule MDTClientWeb.SandboxLiveTest do
     assert has_element?(view, "#create-confirm", "Recreate")
   end
 
-  test "the VM's memories open for review", %{conn: conn} do
-    {:ok, view, _html} = live(conn, ~p"/tools/sandbox/settings")
+  test "the VM's memories open for review, from settings and the overview", %{conn: conn} do
+    for {path, button} <- [
+          {~p"/tools/sandbox/settings?tab=storage", "#vm-memory-review"},
+          {~p"/tools/sandbox", "#overview-memory-review"}
+        ] do
+      {:ok, view, _html} = live(conn, path)
+      assert has_element?(view, "#overview-memory, #settings-vm-memory")
 
-    if has_element?(view, "#vm-memory-review") do
-      view |> element("#vm-memory-review") |> render_click()
-      assert has_element?(view, "#memory-review-empty")
-      view |> element("#memory-close") |> render_click()
-      refute has_element?(view, "#memory-review")
+      if has_element?(view, button) do
+        view |> element(button) |> render_click()
+        assert has_element?(view, "#memory-review-empty")
+        view |> element("#memory-close") |> render_click()
+        refute has_element?(view, "#memory-review")
+      end
     end
+  end
+
+  # Events as the server logs them, newest first: `conn 120` down to `conn 1`.
+  defp put_events(username, count) do
+    pid = GenServer.whereis(MDTClient.Vault.Store.via(Server, username))
+    now = DateTime.utc_now()
+
+    events =
+      for n <- count..1//-1 do
+        %Event{
+          id: "event-t#{n}",
+          at: DateTime.add(now, n - count, :second),
+          outcome: :tunnel,
+          summary: "conn #{n}",
+          host: "h#{n}.example"
+        }
+      end
+
+    :sys.replace_state(pid, &%{&1 | events: events ++ &1.events})
+  end
+
+  defp row(n), do: "#activity-log #event-event-t#{n}"
+
+  test "the server pages activity from a cursor", %{username: username} do
+    put_events(username, 120)
+
+    assert ~w(event-t99 event-t98 event-t97) ==
+             username |> Sandbox.events(%{before: "event-t100", limit: 3}) |> Enum.map(& &1.id)
+
+    assert [%{id: "event-t2"}] = Sandbox.events(username, %{before: "event-t3", q: "conn 2"})
+    assert [] == Sandbox.events(username, %{before: "event-gone"})
+  end
+
+  test "activity shows 50 events a page and pages back and forth", %{
+    conn: conn,
+    username: username
+  } do
+    put_events(username, 120)
+    {:ok, view, _html} = live(conn, ~p"/tools/sandbox/activity")
+
+    assert has_element?(view, row(120))
+    assert has_element?(view, row(71))
+    refute has_element?(view, row(70))
+    assert has_element?(view, "#activity-range", "Newest 50")
+    assert has_element?(view, "#activity-newer[disabled]")
+
+    view |> element("#activity-older") |> render_click()
+    assert has_element?(view, row(70))
+    assert has_element?(view, row(21))
+    refute has_element?(view, row(71))
+    refute has_element?(view, row(20))
+    assert has_element?(view, "#activity-range", "Page 2 · 51–100")
+
+    # An older page stays put while activity comes in, and says so.
+    send(
+      view.pid,
+      {:sandbox_event,
+       %Event{id: "event-t121", at: DateTime.utc_now(), outcome: :tunnel, summary: "conn 121"}}
+    )
+
+    refute has_element?(view, row(121))
+    assert has_element?(view, "#activity-fresh", "1 newer event")
+
+    view |> element("#activity-newer") |> render_click()
+    assert has_element?(view, row(120))
+    refute has_element?(view, "#activity-fresh")
+
+    # The newest page takes it in at the top, and keeps 50.
+    send(
+      view.pid,
+      {:sandbox_event,
+       %Event{id: "event-t122", at: DateTime.utc_now(), outcome: :tunnel, summary: "conn 122"}}
+    )
+
+    assert has_element?(view, row(122))
+    assert has_element?(view, row(72))
+    refute has_element?(view, row(71))
   end
 end

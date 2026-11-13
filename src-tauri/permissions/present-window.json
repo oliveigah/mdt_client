@@ -1,0 +1,11 @@
+{
+  "permission": [
+    {
+      "identifier": "allow-present-window",
+      "description": "Lets the interface bring MDT's window forward when you click one of its desktop notifications, with the activation token the click carried.",
+      "commands": {
+        "allow": ["present_window"]
+      }
+    }
+  ]
+}

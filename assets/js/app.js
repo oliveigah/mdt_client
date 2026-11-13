@@ -134,7 +134,20 @@ if (appWindow) {
   }
   window.addEventListener("phx:update-installed", restartForUpdate)
   window.addEventListener("mdt:restart-after-update", restartForUpdate)
+
+  // A desktop notification was clicked. On Wayland a window may only take
+  // focus with the activation token the click carried; the shell hands it
+  // to GTK.
+  window.addEventListener("phx:mdt:present-window", ({detail}) => {
+    window.__TAURI__.core.invoke("present_window", {token: detail.token || null})
+      .catch(error => console.warn("Could not bring the window forward", error))
+  })
 }
+
+// The element a desktop notification opened, brought into view.
+window.addEventListener("mdt:reveal", event => {
+  event.target.scrollIntoView({block: "center", behavior: "smooth"})
+})
 
 // A list searched afresh starts from the top of what was found. Left where it
 // was scrolled, it would also have its end in sight and load page after page.

@@ -25,9 +25,13 @@ defmodule MDTClientWeb.SandboxLive.Grants do
 
     ~H"""
     <.page_header
+      id="grants-header"
       title="Grants"
-      subtitle="Turn access on for as long as a task needs; agents in the VM can ask for it with mdt request. Tokens never enter the VM: it gets a placeholder, and MDT swaps the real value in on the way out, once you approve the use."
+      subtitle="Turn access on for as long as a task needs."
     >
+      <:help>
+        Agents in the VM can ask for a grant with mdt request. Tokens never enter the VM: it gets a placeholder, and MDT swaps the real value in on the way out, once you approve the use.
+      </:help>
       <:actions>
         <.button id="add-grant" variant="primary" phx-click="open_add_grant">
           <.icon name="hero-plus-micro" class="size-3.5" /> Add grant
@@ -239,6 +243,7 @@ defmodule MDTClientWeb.SandboxLive.Grants do
     <div class="grid gap-5 lg:grid-cols-[minmax(0,1.35fr)_minmax(0,1fr)]">
       <div class="space-y-5">
         <.card id="grant-delivery" title="What the VM gets">
+          <:help>{delivery_help(@grant.kind)}</:help>
           <.delivery grant={@grant} />
         </.card>
 
@@ -246,8 +251,8 @@ defmodule MDTClientWeb.SandboxLive.Grants do
           :if={@grant.kind in [:token, :file] and @grant.source == :stored}
           id="grant-value-card"
           title="The real value"
-          subtitle="Kept in your vault, encrypted with your password. MDT never shows it again."
         >
+          <:help>Kept in your vault, encrypted with your password. MDT never shows it again.</:help>
           <div
             :if={not @has_value}
             id="grant-no-value"
@@ -289,15 +294,13 @@ defmodule MDTClientWeb.SandboxLive.Grants do
           :if={@grant.kind != :file}
           id="grant-uses"
           title="Uses"
-          subtitle={
-            if(@grant.kind == :network,
-              do:
-                "Every connection to these destinations waits for your approval, unless an allowance covers it.",
-              else:
-                "Every request carrying the placeholder waits for your approval, unless an allowance covers it."
-            )
-          }
         >
+          <:help>
+            {if(@grant.kind == :network,
+              do: "Every connection to these destinations waits for your approval",
+              else: "Every request carrying the placeholder waits for your approval"
+            )}, unless an allowance covers it. On an approval you can also allow uses like that one for a while. Allowances end with their time, or when the grant turns off.
+          </:help>
           <div class="flex flex-wrap items-center gap-3">
             <p class="flex-1 text-xs text-muted">
               <%= if Grant.on?(@grant) do %>
@@ -321,9 +324,6 @@ defmodule MDTClientWeb.SandboxLive.Grants do
               </button>
             </div>
           </div>
-          <p class="mt-3 text-[11px] leading-4 text-faint">
-            On an approval you can also allow uses like that one for a while. Allowances end with their time, or when the grant turns off.
-          </p>
         </.card>
       </div>
 
@@ -332,9 +332,11 @@ defmodule MDTClientWeb.SandboxLive.Grants do
           :if={@grant.kind != :file}
           id="grant-allowances"
           title="Allowed for now"
-          subtitle="Uses these cover go through without asking. They end with their time, or when the grant turns off."
           body_class=""
         >
+          <:help>
+            Uses these cover go through without asking. They end with their time, or when the grant turns off.
+          </:help>
           <div :if={@grant.allowances == []}>
             <.empty icon="hero-clock">None right now.</.empty>
           </div>
@@ -418,14 +420,23 @@ defmodule MDTClientWeb.SandboxLive.Grants do
     """
   end
 
+  defp delivery_help(:token),
+    do:
+      "The VM sees a placeholder. When a request carrying it goes to one of these hosts, MDT asks you, swaps in the real value and sends it on. Sent anywhere else, it is blocked and logged."
+
+  defp delivery_help(:network),
+    do:
+      "Nothing to hold. While this is on, MDT lets the VM's connections to these destinations through, from this machine, so they reach whatever your network or VPN reaches. Services behind a VPN often trust where a connection comes from, so the VM acts as you there: list destinations, not whole networks, where you can."
+
+  defp delivery_help(:file),
+    do:
+      "Some tools must read a value themselves: a key that signs, a kubeconfig with client certificates. There is nothing on the wire to swap, so the VM gets the real value. Turning this off deletes the file, but anything the VM copied keeps working until the value expires at its provider."
+
   attr :grant, Grant, required: true
 
   defp delivery(%{grant: %Grant{kind: :token}} = assigns) do
     ~H"""
     <div class="space-y-4">
-      <p class="text-xs leading-5 text-muted">
-        The VM sees a placeholder. When a request carrying it goes to one of the hosts below, MDT asks you, swaps in the real value and sends it on. Sent anywhere else, it is blocked and logged.
-      </p>
       <dl class="grid grid-cols-[8rem_minmax(0,1fr)] gap-x-4 gap-y-3 text-xs">
         <dt class="pt-0.5 text-muted">In the VM</dt>
         <dd class="space-y-1">
@@ -481,9 +492,6 @@ defmodule MDTClientWeb.SandboxLive.Grants do
   defp delivery(%{grant: %Grant{kind: :network}} = assigns) do
     ~H"""
     <div class="space-y-4">
-      <p class="text-xs leading-5 text-muted">
-        Nothing to hold. While this is on, MDT lets the VM's connections to these destinations through, from this machine, so they reach whatever your network or VPN reaches.
-      </p>
       <ul class="space-y-1.5">
         <li
           :for={destination <- @grant.destinations}
@@ -493,9 +501,6 @@ defmodule MDTClientWeb.SandboxLive.Grants do
           <span class="font-mono text-[11px] text-ink">{destination}</span>
         </li>
       </ul>
-      <p class="text-[11px] leading-4 text-faint">
-        Services behind a VPN often trust where a connection comes from, so the VM acts as you there. List destinations, not whole networks, where you can.
-      </p>
     </div>
     """
   end
@@ -506,7 +511,7 @@ defmodule MDTClientWeb.SandboxLive.Grants do
       <div class="flex gap-2.5 rounded-lg border border-warn/35 bg-warn-soft/30 p-3">
         <.icon name="hero-exclamation-triangle" class="mt-px size-4 shrink-0 text-warn" />
         <p class="text-xs leading-5 text-ink">
-          Some tools must read a value themselves: a key that signs, a kubeconfig with client certificates. There is nothing on the wire to swap, so the VM gets the real value. Turning this off deletes the file, but anything the VM copied keeps working until the value expires at its provider. Prefer short-lived values.
+          The VM gets the real value, and copies outlive turning this off. Prefer short-lived values.
         </p>
       </div>
       <dl class="grid grid-cols-[8rem_minmax(0,1fr)] gap-x-4 gap-y-2 text-xs">

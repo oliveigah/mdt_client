@@ -15,20 +15,26 @@ defmodule MDTClientWeb.SandboxLive do
 
   import MDTClientWeb.SandboxLive.Components
 
+  alias MDTClient.Desktop.Notifications
   alias MDTClient.Sandbox
   alias MDTClient.Sandbox.{Event, Presets, RequestView, Shares}
   alias MDTClient.Tools
-  alias MDTClientWeb.SandboxLive.{Activity, Approvals, Dialogs, Grants, Overview, Settings}
+  alias MDTClientWeb.SandboxLive.{Activity, Approvals, Dialogs, Grants, Overview, Settings, Setup}
 
   @pages [
     {:overview, "Overview", "hero-squares-2x2", "/tools/sandbox"},
     {:approvals, "Approvals", "hero-hand-raised", "/tools/sandbox/approvals"},
     {:grants, "Grants", "hero-key", "/tools/sandbox/grants"},
     {:activity, "Activity", "hero-queue-list", "/tools/sandbox/activity"},
-    {:settings, "Settings", "hero-cog-6-tooth", "/tools/sandbox/settings"}
+    {:settings, "Settings", "hero-cog-6-tooth", "/tools/sandbox/settings"},
+    {:setup, "Setup", "hero-rocket-launch", "/tools/sandbox/setup"}
   ]
 
   @refresh_every 150
+
+  # Activity rows per page. The server keeps the latest 1,000 events; a page
+  # holds this many in the DOM, and only the first page takes new ones in.
+  @page_size 50
 
   @impl true
   def mount(_params, _session, socket) do
@@ -48,9 +54,14 @@ defmodule MDTClientWeb.SandboxLive do
      |> assign(:memory_review, nil)
      |> assign(:name_error, nil)
      |> assign(:filters, %{q: "", group: "all", grant: ""})
+     |> assign(:activity, %{cursors: [], older?: false, shown: 0, oldest: nil, fresh: 0})
+     |> assign(:settings_tab, "general")
+     |> assign(:page_size, @page_size)
      |> assign(:share_form, to_form(%{"path" => "", "mode" => "rw"}, as: :share))
      |> assign(:share_error, nil)
      |> assign(:vm_errors, %{})
+     |> assign(:focus, nil)
+     |> assign(:desktop, nil)
      |> stream_configure(:events, dom_id: &"event-#{&1.id}")
      |> stream(:events, [])
      |> refresh()
@@ -66,9 +77,23 @@ defmodule MDTClientWeb.SandboxLive do
 
     socket =
       case socket.assigns.live_action do
-        :grant -> assign(socket, :grant_id, params["id"])
-        :activity -> reset_events(socket)
-        _ -> socket
+        :grant ->
+          assign(socket, :grant_id, params["id"])
+
+        :activity ->
+          reset_events(socket)
+
+        :approvals ->
+          assign(socket, :focus, params["focus"])
+
+        :settings ->
+          assign(socket,
+            settings_tab: Settings.tab(params["tab"]),
+            desktop: Notifications.status()
+          )
+
+        _ ->
+          socket
       end
 
     {:noreply, socket |> refresh() |> page_title()}
@@ -93,6 +118,7 @@ defmodule MDTClientWeb.SandboxLive do
           grants_on={Enum.count(@grants, &(&1.state == :on))}
           proxy={@proxy}
           image={@image}
+          setup_done={Setup.done?(@vm, @image, @settings)}
           now={@now}
         />
 
@@ -107,6 +133,7 @@ defmodule MDTClientWeb.SandboxLive do
                   proxy={@proxy}
                   tools={@tools}
                   settings={@settings}
+                  memory={@memory}
                   grants={@grants}
                   grant_map={@grant_map}
                   waiting={@waiting}
@@ -125,6 +152,7 @@ defmodule MDTClientWeb.SandboxLive do
                   marks={@marks}
                   hold_seconds={@settings.hold_seconds}
                   now={@now}
+                  focus={@focus}
                 />
               <% :grants -> %>
                 <Grants.page grants={@grants} durations={@durations} now={@now} />
@@ -153,12 +181,15 @@ defmodule MDTClientWeb.SandboxLive do
                 <Activity.page
                   streams={@streams}
                   filters={@filters}
+                  activity={@activity}
+                  page_size={@page_size}
                   grants={@grants}
                   grant_names={Map.new(@grants, &{&1.id, &1.name})}
                   now={@now}
                 />
               <% :settings -> %>
                 <Settings.page
+                  tab={@settings_tab}
                   vm={@vm}
                   image={@image}
                   builds={@builds}
@@ -180,7 +211,10 @@ defmodule MDTClientWeb.SandboxLive do
                   host={@host}
                   host_form={@host_form}
                   host_error={@host_error}
+                  desktop={@desktop}
                 />
+              <% :setup -> %>
+                <Setup.page vm={@vm} image={@image} settings={@settings} tools={@tools} />
             <% end %>
           </div>
         </div>
@@ -210,6 +244,7 @@ defmodule MDTClientWeb.SandboxLive do
   attr :grants_on, :integer, required: true
   attr :proxy, :map, required: true
   attr :image, :map, required: true
+  attr :setup_done, :boolean, required: true
   attr :now, DateTime, required: true
 
   defp sidebar(assigns) do
@@ -302,6 +337,12 @@ defmodule MDTClientWeb.SandboxLive do
           >
             {@grants_on} on
           </span>
+          <span
+            :if={id == :setup and not @setup_done}
+            id="sandbox-nav-setup-todo"
+            title="Some setup steps are left"
+            class="size-1.5 rounded-full bg-accent"
+          ></span>
         </.link>
       </nav>
 
@@ -792,6 +833,40 @@ defmodule MDTClientWeb.SandboxLive do
     {:noreply, socket |> assign(:filters, filters) |> reset_events()}
   end
 
+  # Page 1 takes new events in, so its last row moves; the cursor is read
+  # again rather than remembered.
+  def handle_event("older_activity", _params, socket) do
+    %{activity: activity, filters: filters, username: username} = socket.assigns
+
+    cursor =
+      case activity.cursors do
+        [] ->
+          username
+          |> Sandbox.events(Map.put(filters, :limit, @page_size))
+          |> List.last()
+          |> then(&(&1 && &1.id))
+
+        _older ->
+          activity.oldest
+      end
+
+    {:noreply,
+     if(cursor, do: socket |> load_events([cursor | activity.cursors]) |> paged(), else: socket)}
+  end
+
+  def handle_event("newer_activity", _params, socket) do
+    cursors =
+      case socket.assigns.activity.cursors do
+        [_ | rest] -> rest
+        [] -> []
+      end
+
+    {:noreply, socket |> load_events(cursors) |> paged()}
+  end
+
+  def handle_event("latest_activity", _params, socket),
+    do: {:noreply, socket |> reset_events() |> paged()}
+
   def handle_event("share_changed", %{"share" => params}, socket) do
     {:noreply, assign(socket, share_form: to_form(params, as: :share), share_error: nil)}
   end
@@ -814,6 +889,40 @@ defmodule MDTClientWeb.SandboxLive do
            share_error: Shares.explain(reason)
          )}
     end
+  end
+
+  # Folders picked in the desktop app's folder dialog, any number at once.
+  def handle_event("add_shares", %{"paths" => paths} = params, socket) when is_list(paths) do
+    mode = if params["mode"] == "ro", do: :ro, else: :rw
+
+    results =
+      for path <- paths, is_binary(path) do
+        {path, Sandbox.add_share(socket.assigns.username, path, mode)}
+      end
+
+    added = Enum.count(results, &match?({_, {:ok, _}}, &1))
+
+    failed =
+      for {path, {:error, reason}} <- results,
+          do: "#{Path.basename(path)}: #{Shares.explain(reason)}"
+
+    socket =
+      socket
+      |> assign(:share_error, if(failed == [], do: nil, else: Enum.join(failed, " ")))
+      |> refresh()
+
+    socket =
+      case added do
+        0 -> socket
+        1 -> put_notice(socket, :success, "Folder shared", body: recreate_words(socket))
+        n -> put_notice(socket, :success, "#{n} folders shared", body: recreate_words(socket))
+      end
+
+    {:noreply, socket}
+  end
+
+  def handle_event("folder_picker_unavailable", %{"reason" => reason}, socket) do
+    {:noreply, assign(socket, :share_error, reason <> " Type the folder's path instead.")}
   end
 
   def handle_event("remove_share", %{"path" => path}, socket) do
@@ -841,6 +950,36 @@ defmodule MDTClientWeb.SandboxLive do
       {:error, errors} ->
         {:noreply, assign(socket, vm_form: to_form(params, as: :vm), vm_errors: errors)}
     end
+  end
+
+  def handle_event("save_notifications", %{"on" => on}, socket) do
+    {:ok, settings} =
+      Sandbox.update_settings(socket.assigns.username, %{"desktop_notifications" => on})
+
+    message =
+      if settings.desktop_notifications,
+        do: "Approvals waiting for you will show on the desktop",
+        else: "Desktop notifications are off"
+
+    {:noreply, socket |> refresh() |> put_notice(:info, message)}
+  end
+
+  # A notice like the real ones, opening this page. It belongs to this page,
+  # so it goes when the page does.
+  def handle_event("test_notification", _params, socket) do
+    username = socket.assigns.username
+
+    Notifications.show({:test, username}, %{
+      summary: "MDT notifications work",
+      body: "Agents' requests will show like this. Click one to open it in MDT.",
+      scope: username,
+      open: "/tools/sandbox/settings"
+    })
+
+    {:noreply,
+     socket
+     |> assign(:desktop, Notifications.status())
+     |> put_notice(:info, "Sent a test notification")}
   end
 
   def handle_event("build_image", _params, socket) do
@@ -925,7 +1064,7 @@ defmodule MDTClientWeb.SandboxLive do
   def handle_info({:sandbox_event, event}, socket) do
     socket =
       if socket.assigns.page == :activity and Event.matches?(event, socket.assigns.filters),
-        do: stream_insert(socket, :events, event, at: 0, limit: 300),
+        do: take_event(socket, event),
         else: socket
 
     {:noreply, schedule_refresh(socket)}
@@ -934,6 +1073,21 @@ defmodule MDTClientWeb.SandboxLive do
   def handle_info(:refresh, socket) do
     {:noreply, socket |> assign(:refresh_timer, nil) |> refresh()}
   end
+
+  # The first page shows the newest events as they come; an older page stays
+  # put and counts what it is missing.
+  defp take_event(%{assigns: %{activity: %{cursors: []} = activity}} = socket, event) do
+    socket
+    |> stream_insert(:events, event, at: 0, limit: @page_size)
+    |> assign(:activity, %{
+      activity
+      | shown: min(activity.shown + 1, @page_size),
+        older?: activity.older? or activity.shown >= @page_size
+    })
+  end
+
+  defp take_event(socket, _event),
+    do: update(socket, :activity, &%{&1 | fresh: &1.fresh + 1})
 
   defp schedule_refresh(%{assigns: %{refresh_timer: nil}} = socket) do
     assign(socket, :refresh_timer, Process.send_after(self(), :refresh, @refresh_every))
@@ -990,9 +1144,34 @@ defmodule MDTClientWeb.SandboxLive do
     end
   end
 
-  defp reset_events(socket) do
-    filters = Map.put(socket.assigns.filters, :limit, 300)
-    stream(socket, :events, Sandbox.events(socket.assigns.username, filters), reset: true)
+  defp reset_events(socket), do: load_events(socket, [])
+
+  defp paged(socket), do: push_event(socket, "activity_paged", %{})
+
+  # `cursors` are the ids each older page starts after, the current page's
+  # first; none is the newest page.
+  defp load_events(socket, cursors) do
+    filters =
+      socket.assigns.filters
+      |> Map.put(:limit, @page_size + 1)
+      |> then(fn filters ->
+        case cursors do
+          [before | _] -> Map.put(filters, :before, before)
+          [] -> filters
+        end
+      end)
+
+    {page, rest} = socket.assigns.username |> Sandbox.events(filters) |> Enum.split(@page_size)
+
+    socket
+    |> assign(:activity, %{
+      cursors: cursors,
+      older?: rest != [],
+      shown: length(page),
+      oldest: page |> List.last() |> then(&(&1 && &1.id)),
+      fresh: 0
+    })
+    |> stream(:events, page, reset: true)
   end
 
   defp assign_vm_form(socket) do
@@ -1059,7 +1238,7 @@ defmodule MDTClientWeb.SandboxLive do
       {:error, :no_image} ->
         {:noreply,
          put_notice(socket, :warning, "Build the image first",
-           body: "Settings → The VM's image → Build. The VM boots from it."
+           body: "Setup → Build the image. The VM boots from it."
          )}
 
       {:error, :no_snapshot} ->
@@ -1079,6 +1258,12 @@ defmodule MDTClientWeb.SandboxLive do
   ## Small things
 
   defp duration(durations, id), do: Map.get(durations, id, 60)
+
+  defp recreate_words(socket) do
+    if socket.assigns.vm.exists?,
+      do: "The VM sees it once it is recreated.",
+      else: "The VM sees it when it is created."
+  end
 
   # `JS.push` sends the integer as JSON, a form would send a string.
   defp parse_duration("until_off"), do: "until_off"

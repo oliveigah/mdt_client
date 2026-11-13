@@ -98,6 +98,7 @@ folders with it, and sits between it and the network.
 | Inbox                | `MDTClient.Sandbox.Inbox`                        | `/mnt/mdt/env.sh`, `bin/mdt`, `git/<host>` for the credential helper, `tokens/<grant>` for every token grant, `files/` for file grants that are on, `host.md`.                                           |
 | Host commands        | `…HostCommand`, `…HostRun`, `…HostInfo`          | Checking and describing an ask (place, facts, hints); running it under `timeout` with capped output and a killable process group; the machine's description. See [Host commands](#host-commands).      |
 | Ports                | `…Ports`, `…Forwarder`, `…Forwarder.SSH`         | The VM's address, reading `ss`, what to forward and why not; one process per running VM keeping the SSH connection and its forwards. See [Ports](#ports).                                              |
+| Notifications        | `…DesktopNotice`, `Desktop.Notifications`        | One per approval waiting for you, closed once it is decided; a click brings MDT forward on it. A small D-Bus client of MDT's own (`MDTClient.DBus`). See [Desktop notifications](#desktop-notifications). |
 
 Tried live on 2026-11-12: build, create, lock (VM stopped), unlock, start;
 inside the VM `gh api user` went out with the swapped value, git's helper
@@ -390,6 +391,48 @@ header with placeholders shown as their grant's name, and up to 64 KiB of
 body, decoded. It copies as curl (with `$GH_TOKEN` in place of the
 placeholder, so it runs with your own token), as HTTP, or just the body.
 It is kept in memory, never written to disk.
+
+### Desktop notifications
+
+Agents ask while you work in another window, so every approval waiting
+for you is also a desktop notification: an agent asking for a grant or to
+run a command, a held request, a connection, and a command whose output
+waits for you. It says who asked, for what, the agent's reason in quotes,
+and when it gives up. It closes as soon as the approval is decided or
+gives up, from any window, and when the vault locks. A command coming
+back with its output gets a new one. One you dismiss isn't shown again.
+
+Nothing is decided from a notification. Clicking it (or its Review button)
+brings MDT's window forward on the Approvals page, with that approval
+ringed and scrolled into view, where the facts sit beside the agent's
+claims. A notification can show neither the full script nor the request.
+
+The switch is on the Settings page (per identity, on by default), with a
+test button and what the desktop answered. GNOME lists the notifications
+under MDT in its own settings, where banners and sounds can be turned off.
+
+How it works on GNOME (checked against GNOME Shell 50.6's
+`notificationDaemon.js`, on Fedora 44, Wayland):
+
+- MDT speaks to `org.freedesktop.Notifications` on the session bus over
+  one connection it keeps open (`MDTClient.DBus.Connection`, a small D-Bus
+  client: SASL `EXTERNAL`, the wire format for the types it needs). GNOME
+  sends `ActionInvoked`, `ActivationToken` and `NotificationClosed` only
+  to the connection that showed the notification, and destroys an app's
+  notifications when that connection goes away. So `notify-send` and
+  `gdbus call` can't do it: with MDT's desktop entry they vanish at once.
+- Notifications name `desktop-entry` `MDT` (`MDT.desktop`, installed by the
+  packages), so GNOME shows MDT's name and icon and applies its per-app
+  switch.
+- On Wayland a window may take focus only with an activation token, which
+  GNOME sends with the click. MDT passes it to the page, the page to the
+  shell's `present_window` command, and the shell to GTK
+  (`gdk_wayland_display_set_startup_notification_id`, then `present`).
+  On X11 the token is a startup id. Without the shell (a browser on
+  `mix phx.server`) the page still opens the approval.
+- With no session bus or no notification service, MDT keeps track of what
+  it would show and tries again every 30 seconds. Signals are taken only
+  from the service that showed the notification.
 
 ## Image and VM state
 
@@ -1110,6 +1153,7 @@ Each has one job. Proposed modules sit under `lib/mdt_client/sandbox/`.
 | `Ports`                | The VM's address here; reads `ss` and decides what to forward, and why not             |
 | `Forwarder`            | Keeps the SSH connection to a running VM and its forwards in step with the VM's ports  |
 | `VMMemory`             | The OptMem folder and its Transfer participant                                         |
+| `DesktopNotice`        | The desktop notification's text for a waiting approval                                 |
 
 ## Guarantees to test
 
@@ -1195,3 +1239,5 @@ checks used openssl; `:public_key` or the `x509` package are the options).
   stops, in the Approvals queue.
 - Seeding the VM's OptMem with only some projects' memories.
 - Containers inside the VM (klife's Kafka test clusters): unchecked.
+- Desktop notifications elsewhere than GNOME (KDE, macOS), and a sound or
+  urgency per kind of approval.

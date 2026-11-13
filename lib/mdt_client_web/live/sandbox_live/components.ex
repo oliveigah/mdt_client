@@ -300,12 +300,101 @@ defmodule MDTClientWeb.SandboxLive.Components do
   def vm_word(:starting), do: "Starting…"
   def vm_word(:stopping), do: "Stopping…"
 
-  @doc "A card with a title row, optional actions, and a body."
+  @doc """
+  A small "?" that shows its text while hovered or focused, for the
+  explanations a screen doesn't need to show all the time.
+
+  The text is positioned fixed by a hook, so cards that clip their content
+  don't clip it. Its position and open state are set in the browser and kept
+  across patches; its words still follow the server.
+  """
+  attr :id, :string, required: true
+  attr :label, :string, default: "More about this"
+  attr :class, :any, default: nil
+  slot :inner_block, required: true
+
+  def help(assigns) do
+    ~H"""
+    <span id={@id} phx-hook=".Help" class={["inline-flex shrink-0 align-middle", @class]}>
+      <button
+        type="button"
+        aria-label={@label}
+        aria-describedby={"#{@id}-tip"}
+        data-help-trigger
+        class="inline-flex size-4 cursor-help items-center justify-center rounded-full text-faint transition-colors hover:text-accent focus-visible:text-accent focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
+      >
+        <.icon name="hero-question-mark-circle-micro" class="size-3.5" />
+      </button>
+      <span
+        id={"#{@id}-tip"}
+        role="tooltip"
+        data-help-tip
+        phx-mounted={JS.ignore_attributes(["style", "data-open"])}
+        class="pointer-events-none invisible fixed left-0 top-0 z-[70] w-max max-w-80 translate-y-0.5 rounded-lg border border-line bg-panel px-3 py-2 text-left text-[11px] font-normal normal-case leading-[1.125rem] tracking-normal text-ink opacity-0 shadow-xl shadow-black/15 transition-[opacity,translate] duration-150 data-open:visible data-open:translate-y-0 data-open:opacity-100 dark:shadow-black/50"
+      >
+        {render_slot(@inner_block)}
+      </span>
+    </span>
+    <script :type={Phoenix.LiveView.ColocatedHook} name=".Help">
+      export default {
+        mounted() {
+          this.trigger = this.el.querySelector("[data-help-trigger]")
+          this.tip = this.el.querySelector("[data-help-tip]")
+          this.show = () => this.open()
+          this.hide = () => this.close()
+          this.toggle = (event) => {
+            event.preventDefault()
+            this.tip.hasAttribute("data-open") ? this.close() : this.open()
+          }
+          this.onKey = (event) => { if (event.key === "Escape") this.close() }
+          this.el.addEventListener("mouseenter", this.show)
+          this.el.addEventListener("mouseleave", this.hide)
+          this.trigger.addEventListener("focus", this.show)
+          this.trigger.addEventListener("blur", this.hide)
+          this.trigger.addEventListener("click", this.toggle)
+          this.trigger.addEventListener("keydown", this.onKey)
+        },
+        destroyed() {
+          this.close()
+        },
+        open() {
+          const gap = 8
+          const box = this.trigger.getBoundingClientRect()
+          this.tip.setAttribute("data-open", "")
+          const tip = this.tip.getBoundingClientRect()
+          const roomBelow = window.innerHeight - box.bottom
+          const top = roomBelow >= tip.height + gap || box.top < tip.height + gap
+            ? box.bottom + gap
+            : box.top - tip.height - gap
+          const left = Math.min(
+            Math.max(gap, box.left + box.width / 2 - tip.width / 2),
+            window.innerWidth - tip.width - gap
+          )
+          this.tip.style.top = `${Math.max(gap, top)}px`
+          this.tip.style.left = `${left}px`
+          window.addEventListener("scroll", this.hide, {capture: true, passive: true})
+          window.addEventListener("resize", this.hide, {passive: true})
+        },
+        close() {
+          this.tip?.removeAttribute("data-open")
+          window.removeEventListener("scroll", this.hide, {capture: true})
+          window.removeEventListener("resize", this.hide)
+        },
+      }
+    </script>
+    """
+  end
+
+  @doc """
+  A card with a title row, optional actions, and a body. A `help` slot puts
+  a "?" beside the title, for what the subtitle would otherwise spell out.
+  """
   attr :id, :string, required: true
   attr :title, :string, required: true
   attr :subtitle, :string, default: nil
   attr :class, :any, default: nil
   attr :body_class, :any, default: "p-4"
+  slot :help
   slot :actions
   slot :inner_block, required: true
 
@@ -314,7 +403,12 @@ defmodule MDTClientWeb.SandboxLive.Components do
     <section id={@id} class={["overflow-hidden rounded-xl border border-line bg-panel", @class]}>
       <header class="flex min-h-11 items-center gap-3 border-b border-line-soft px-4 py-2.5">
         <div class="min-w-0 flex-1">
-          <h2 class="text-[13px] font-semibold text-ink">{@title}</h2>
+          <h2 class="flex items-center gap-1.5 text-[13px] font-semibold text-ink">
+            {@title}
+            <.help :if={@help != []} id={"#{@id}-help"} label={"About #{@title}"}>
+              {render_slot(@help)}
+            </.help>
+          </h2>
           <p :if={@subtitle} class="mt-0.5 text-[11px] leading-4 text-muted">{@subtitle}</p>
         </div>
         {render_slot(@actions)}
@@ -340,16 +434,26 @@ defmodule MDTClientWeb.SandboxLive.Components do
     """
   end
 
-  @doc "The page title row: a heading, a line under it, and actions on the right."
+  @doc """
+  The page title row: a heading, a line under it, and actions on the right.
+  A `help` slot puts a "?" beside the heading.
+  """
   attr :title, :string, required: true
   attr :subtitle, :string, default: nil
+  attr :id, :string, default: "page-header"
+  slot :help
   slot :actions
 
   def page_header(assigns) do
     ~H"""
-    <header class="mb-5 flex flex-wrap items-end gap-3">
+    <header id={@id} class="mb-5 flex flex-wrap items-end gap-3">
       <div class="min-w-0 flex-1">
-        <h1 class="text-lg font-semibold tracking-tight text-ink">{@title}</h1>
+        <h1 class="flex items-center gap-2 text-lg font-semibold tracking-tight text-ink">
+          {@title}
+          <.help :if={@help != []} id={"#{@id}-help"} label={"About #{@title}"}>
+            {render_slot(@help)}
+          </.help>
+        </h1>
         <p :if={@subtitle} class="mt-1 max-w-2xl text-[13px] leading-5 text-muted">{@subtitle}</p>
       </div>
       <div class="flex items-center gap-2">{render_slot(@actions)}</div>

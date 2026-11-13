@@ -20,6 +20,49 @@ fn set_webview_zoom(webview: tauri::WebviewWindow, scale: f64) -> Result<(), Str
     webview.set_zoom(scale).map_err(|error| error.to_string())
 }
 
+/// Brings the window forward after a desktop notification was clicked.
+/// GNOME on Wayland lets a window take focus only with the activation token
+/// that came with the click; without one it merely flags the window. On X11
+/// the token is a startup id carrying the click's time.
+#[tauri::command]
+fn present_window(window: tauri::WebviewWindow, token: Option<String>) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    if let Some(token) = token.as_deref().filter(|token| !token.is_empty()) {
+        return present_with_token(&window, token);
+    }
+
+    let _ = token;
+    window.unminimize().map_err(|error| error.to_string())?;
+    window.show().map_err(|error| error.to_string())?;
+    window.set_focus().map_err(|error| error.to_string())
+}
+
+#[cfg(target_os = "linux")]
+fn present_with_token(window: &tauri::WebviewWindow, token: &str) -> Result<(), String> {
+    use gtk::glib::translate::ToGlibPtr;
+    use gtk::prelude::*;
+
+    let gtk_window = window.gtk_window().map_err(|error| error.to_string())?;
+    let display = gtk_window.display();
+
+    if display.type_().name() == "GdkWaylandDisplay" {
+        let token = std::ffi::CString::new(token).map_err(|error| error.to_string())?;
+        let display: *mut gtk::gdk::ffi::GdkDisplay = display.to_glib_none().0;
+        // GTK reads it on the next focus request, then forgets it.
+        unsafe {
+            gdk_wayland_sys::gdk_wayland_display_set_startup_notification_id(
+                display.cast(),
+                token.as_ptr(),
+            );
+        }
+    } else {
+        gtk_window.set_startup_id(token);
+    }
+
+    gtk_window.present();
+    Ok(())
+}
+
 #[tauri::command]
 fn restart_app(app: tauri::AppHandle, process: tauri::State<'_, Arc<DesktopProcess>>) {
     process.restarting.store(true, Ordering::SeqCst);
@@ -37,7 +80,11 @@ pub fn run() {
     let pubsub = elixirkit::PubSub::listen("tcp://127.0.0.1:0").expect("failed to listen");
 
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![set_webview_zoom, restart_app])
+        .invoke_handler(tauri::generate_handler![
+            set_webview_zoom,
+            restart_app,
+            present_window
+        ])
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(move |app| {

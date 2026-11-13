@@ -1,8 +1,8 @@
 defmodule MDTClientWeb.SandboxLive.Overview do
   @moduledoc """
   The overview: the VM and its controls, what waits for you, the VM's ports
-  on this machine, what is shared right now, and the latest activity, on
-  one screen.
+  on this machine, what is shared right now, the VM's memory and the latest
+  activity, on one screen.
   """
   use MDTClientWeb, :html
 
@@ -17,6 +17,7 @@ defmodule MDTClientWeb.SandboxLive.Overview do
   attr :proxy, :map, required: true
   attr :tools, :map, required: true
   attr :settings, :any, required: true
+  attr :memory, :map, required: true
   attr :grants, :list, required: true
   attr :grant_map, :map, required: true
   attr :waiting, :list, required: true
@@ -87,7 +88,7 @@ defmodule MDTClientWeb.SandboxLive.Overview do
                 <.icon name="hero-arrow-path-micro" class="size-3.5 animate-spin" /> {@vm.busy}
               </.button>
             <% not @image.loaded? -> %>
-              <.button id="vm-build" variant="primary" patch={~p"/tools/sandbox/settings"}>
+              <.button id="vm-build" variant="primary" patch={~p"/tools/sandbox/setup"}>
                 <.icon name="hero-wrench-screwdriver-micro" class="size-3.5" />
                 {if @image.building?, do: "Image building…", else: "Build the image"}
               </.button>
@@ -130,10 +131,13 @@ defmodule MDTClientWeb.SandboxLive.Overview do
       <div
         :if={not @image.loaded? and not @vm.exists?}
         id="vm-first-run"
-        class="relative border-t border-line-soft px-5 py-3 text-xs leading-5 text-muted"
+        class="relative flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-line-soft px-5 py-3 text-xs leading-5 text-muted"
       >
-        First, build the image in Settings: your Containerfile plus MDT's layer, with podman.
-        Then create the VM. It boots with its traffic pinned to MDT's proxy, your picked folders at their own paths, its own Home, Cache and memory, and nothing else of yours.
+        <.icon name="hero-sparkles-micro" class="size-4 text-accent" />
+        <span>New sandbox: build its image, share your folders, then start it.</span>
+        <.link patch={~p"/tools/sandbox/setup"} class="font-medium text-accent hover:underline">
+          Open Setup
+        </.link>
         <span :if={not @tools.podman} class="text-bad">podman isn't installed.</span>
         <span :if={is_nil(@tools.msb)} class="text-bad">
           This MDT has no microsandbox runtime; in a source checkout, run scripts/build-microsandbox.sh.
@@ -145,8 +149,11 @@ defmodule MDTClientWeb.SandboxLive.Overview do
         class="relative flex flex-wrap items-center gap-3 border-t border-warn/30 bg-warn-soft/30 px-5 py-2.5"
       >
         <.icon name="hero-arrow-path" class="size-4 text-warn" />
-        <p class="flex-1 text-xs text-ink">
-          Settings or the image changed since the VM was created. It keeps the old ones until it is recreated. Recreating asks what happens to its Home (logins, history) and Cache; its memory and your folders stay.
+        <p class="flex flex-1 items-center gap-1.5 text-xs text-ink">
+          Settings or the image changed. Recreate the VM to use them.
+          <.help id="vm-stale-help" label="About recreating">
+            The VM keeps what it was created with until it is recreated. Recreating asks what happens to its Home (logins, history) and Cache; its memory and your folders stay.
+          </.help>
         </p>
         <.button
           id="vm-recreate"
@@ -224,7 +231,7 @@ defmodule MDTClientWeb.SandboxLive.Overview do
         </div>
         <div :if={@waiting == []} class="rounded-xl border border-dashed border-line">
           <.empty icon="hero-check-badge" id="overview-nothing-waiting">
-            Nothing waits for you. Agents asking for a grant or to run a command on this machine, and uses of a grant, show up here, and in the title bar of every tool.
+            Nothing waits for you. Agents' asks show up here and in the title bar of every tool.
           </.empty>
         </div>
         <Approvals.running :if={@running != []} running={@running} now={@now} />
@@ -249,7 +256,7 @@ defmodule MDTClientWeb.SandboxLive.Overview do
           </:actions>
           <div :if={@on == []}>
             <.empty icon="hero-lock-closed">
-              The VM has no credentials or network access beyond the public internet.
+              Nothing beyond the public internet.
             </.empty>
           </div>
           <ul class="divide-y divide-line-soft">
@@ -288,6 +295,8 @@ defmodule MDTClientWeb.SandboxLive.Overview do
           </ul>
         </.card>
 
+        <.memory_card memory={@memory} vm={@vm} />
+
         <.card id="overview-activity" title="Latest activity" body_class="">
           <:actions>
             <.link patch={~p"/tools/sandbox/activity"} class="text-[11px] text-accent hover:underline">
@@ -313,12 +322,63 @@ defmodule MDTClientWeb.SandboxLive.Overview do
         </.card>
       </div>
     </div>
+    """
+  end
 
-    <.connect_card
-      vm={@vm}
-      settings={@settings}
-      launcher={@tools.launcher}
-    />
+  attr :memory, :map, required: true
+  attr :vm, :any, required: true
+
+  # The VM's OptMem and the round trip with yours: the same two buttons as
+  # in Settings, for the end of a session.
+  defp memory_card(assigns) do
+    ~H"""
+    <.card id="overview-memory" title="Memory">
+      <:help>
+        The VM keeps its own OptMem. It can start from a copy of yours, and what it notes joins yours only when you tick it in the review.
+      </:help>
+      <:actions>
+        <.link
+          patch={~p"/tools/sandbox/settings?tab=storage"}
+          class="text-[11px] text-accent hover:underline"
+        >
+          Settings
+        </.link>
+      </:actions>
+      <%= if @memory.host? do %>
+        <p id="overview-memory-state" class="text-xs leading-5 text-muted">
+          <%= if @memory.seeded_at do %>
+            Started from {@memory.seed_count} of your memories on {Calendar.strftime(
+              @memory.seeded_at,
+              "%b %-d"
+            )}.
+          <% else %>
+            Its own, never copied from yours.
+          <% end %>
+        </p>
+        <div class="mt-3 flex flex-wrap gap-2">
+          <.button id="overview-memory-review" variant="primary" phx-click="review_memories">
+            <.icon name="hero-inbox-arrow-down-micro" class="size-3.5" /> Review what it noted
+          </.button>
+          <.button
+            id="overview-memory-seed"
+            phx-click="seed_memory"
+            disabled={@vm.status in [:running, :starting] or not is_nil(@vm.busy)}
+            title={
+              if(@vm.status in [:running, :starting],
+                do: "Stop the VM first",
+                else: "Replace the VM's memory with a copy of yours"
+              )
+            }
+          >
+            <.icon name="hero-document-duplicate-micro" class="size-3.5" /> Copy mine in
+          </.button>
+        </div>
+      <% else %>
+        <p id="overview-memory-state" class="text-xs leading-5 text-muted">
+          OptMem isn't installed on this machine.
+        </p>
+      <% end %>
+    </.card>
     """
   end
 
@@ -330,12 +390,10 @@ defmodule MDTClientWeb.SandboxLive.Overview do
     assigns = assign(assigns, forwarded: forwarded, others: others)
 
     ~H"""
-    <.card
-      id="overview-ports"
-      title="Ports on this machine"
-      subtitle="Servers in the VM show up here by themselves, on the same port."
-      body_class=""
-    >
+    <.card id="overview-ports" title="Ports on this machine" body_class="">
+      <:help>
+        Servers in the VM show up here by themselves, on the same port, at the VM's address on this machine.
+      </:help>
       <:actions>
         <span
           id="ports-address"
@@ -375,7 +433,7 @@ defmodule MDTClientWeb.SandboxLive.Overview do
 
       <div :if={@ports.status == :on and @ports.ports == []}>
         <.empty icon="hero-signal" id="ports-none">
-          Nothing listens in the VM. Start a server there, on 127.0.0.1 or 0.0.0.0, and it shows up here within a few seconds.
+          Nothing listens in the VM yet. A server on 127.0.0.1 or 0.0.0.0 shows up here within seconds.
         </.empty>
       </div>
 
@@ -440,143 +498,6 @@ defmodule MDTClientWeb.SandboxLive.Overview do
 
   defp skipped_words({:skipped, reason}), do: reason
   defp skipped_words(:pending), do: "Starting…"
-
-  @ssh_host "mdt-sandbox"
-
-  attr :vm, :any, required: true
-  attr :settings, :any, required: true
-  attr :launcher, :string, required: true
-
-  # Everything needed to open the VM in Zed, filled in for this VM. The
-  # launcher runs MDT's own msb with MDT's microsandbox home.
-  defp connect_card(assigns) do
-    msb = assigns.launcher
-
-    folders =
-      case assigns.settings.shares do
-        [] -> ["/root"]
-        shares -> Enum.map(shares, & &1.path)
-      end
-
-    assigns =
-      assign(assigns,
-        authorize: "#{msb} ssh authorize --file ~/.ssh/id_ed25519.pub",
-        ssh_config:
-          """
-          Host #{@ssh_host}
-            HostName #{@ssh_host}
-            User root
-            ProxyCommand #{msb} ssh serve #{assigns.vm.name} --stdio --no-inactivity-timeout
-            IdentityFile ~/.ssh/id_ed25519
-            IdentitiesOnly yes
-            ForwardAgent no
-            StrictHostKeyChecking no
-            UserKnownHostsFile /dev/null
-            LogLevel ERROR
-          """
-          |> String.trim_trailing(),
-        open: Enum.map_join(folders, "\n", &"zed ssh://#{@ssh_host}#{&1}"),
-        profile:
-          Jason.encode!(
-            %{
-              "profiles" => %{
-                "MDT Sandbox" => %{
-                  "base" => "default",
-                  "settings" => %{
-                    "context_servers" => %{},
-                    "terminal" => %{
-                      "shell" => %{
-                        "with_arguments" => %{"program" => "/bin/bash", "args" => ["--login"]}
-                      }
-                    }
-                  }
-                }
-              }
-            },
-            pretty: true
-          )
-      )
-
-    ~H"""
-    <details id="connect-zed" class="group mt-5 rounded-xl border border-line bg-panel">
-      <summary class="flex cursor-pointer list-none items-center gap-3 px-4 py-3 [&::-webkit-details-marker]:hidden">
-        <.icon name="hero-command-line" class="size-4 text-accent" />
-        <span class="flex-1">
-          <span class="block text-[13px] font-semibold text-ink">Connect from Zed</span>
-          <span class="block text-[11px] text-muted">
-            Zed's UI stays here; its terminals, agents and language servers run in the VM, over SSH.
-          </span>
-        </span>
-        <.icon
-          name="hero-chevron-down-micro"
-          class="size-4 text-muted transition-transform group-open:rotate-180"
-        />
-      </summary>
-      <ol class="space-y-4 border-t border-line-soft px-4 py-4">
-        <.connect_step
-          n={1}
-          title="Let your SSH key in, once"
-          id="connect-authorize"
-          text={@authorize}
-        >
-          Microsandbox keeps its own list of keys; this adds your public key to MDT's. The command is MDT's own msb, which MDT keeps at this path across updates.
-        </.connect_step>
-        <.connect_step
-          n={2}
-          title="Add the VM to ~/.ssh/config"
-          id="connect-ssh-config"
-          text={@ssh_config}
-        >
-          The connection is a local process, not the network, so host keys aren't checked (they change when the VM is recreated). Your SSH agent is not forwarded. Connecting boots the VM if it's stopped; without MDT running it has no internet.
-        </.connect_step>
-        <.connect_step
-          n={3}
-          title="Give Zed a sandbox profile"
-          id="connect-profile"
-          text={@profile}
-        >
-          Merge it into your Zed user settings, then pick it with "settings profile selector: toggle". This starts terminals in Bash and keeps your host MCP servers out. Zed's own Claude Code and Codex agents install inside the VM, in its Home, so they survive recreating it.
-        </.connect_step>
-        <.connect_step n={4} title="Open a shared folder" id="connect-open" text={@open}>
-          Shared folders keep their paths from this machine; in the VM, ~ is /root, so they are not under ~/projects there. A folder shared after the VM was created appears once it is recreated. Then sign the agents in from a Zed terminal (claude auth login, codex login --device-auth). Logins live in the VM's Home and survive recreating it.
-        </.connect_step>
-      </ol>
-    </details>
-    """
-  end
-
-  attr :n, :integer, required: true
-  attr :title, :string, required: true
-  attr :id, :string, required: true
-  attr :text, :string, required: true
-  slot :inner_block, required: true
-
-  defp connect_step(assigns) do
-    ~H"""
-    <li class="flex gap-3">
-      <span class="flex size-5 shrink-0 items-center justify-center rounded-full bg-accent-soft text-[10px] font-semibold text-accent-strong">
-        {@n}
-      </span>
-      <div class="min-w-0 flex-1">
-        <p class="text-xs font-semibold text-ink">{@title}</p>
-        <p class="mt-0.5 text-[11px] leading-4 text-muted">{render_slot(@inner_block)}</p>
-        <div class="mt-2 overflow-hidden rounded-lg border border-line-soft bg-deep">
-          <div class="flex justify-end border-b border-line-soft px-2 py-1">
-            <button
-              id={"#{@id}-copy"}
-              type="button"
-              phx-hook="CopyText"
-              phx-update="ignore"
-              data-copy-target={@id}
-              class="cursor-pointer rounded px-2 py-0.5 text-[10px] text-accent transition-colors hover:bg-accent-soft"
-            >Copy</button>
-          </div>
-          <pre id={@id} class="overflow-x-auto px-3 py-2 font-mono text-[11px] leading-5 text-ink">{@text}</pre>
-        </div>
-      </div>
-    </li>
-    """
-  end
 
   defp waiting_words(waiting) do
     asks = Enum.count(waiting, &(&1.kind == :activation))

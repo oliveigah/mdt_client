@@ -101,7 +101,10 @@ defmodule MDTClient.Sandbox do
     * `:group` - one of the keys of `Event.groups/0`, or `"all"`
     * `:grant` - a grant id, or `""` for any
     * `:q` - words to look for in the summary, host and path
+    * `:before` - an event id: only events older than it, for the next page
     * `:limit` - at most this many, 200 by default
+
+  The server keeps the latest 1,000 events, in memory only.
 
   """
   @spec events(username(), map()) :: [Event.t()]

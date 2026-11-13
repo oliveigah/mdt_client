@@ -11,6 +11,9 @@ defmodule MDTClient.Sandbox.Settings do
   mounts read-write (Home, Cache, its memory, your shares) per boot; it
   keeps a runaway agent from filling your disk. microsandbox's own default
   is 4 GiB for both.
+
+  `desktop_notifications` puts each approval waiting for you on the
+  desktop.
   """
 
   alias MDTClient.Sandbox.Share
@@ -25,7 +28,8 @@ defmodule MDTClient.Sandbox.Settings do
             hold_seconds: 180,
             shares: [],
             optmem_path: nil,
-            host_notes: ""
+            host_notes: "",
+            desktop_notifications: true
 
   @type t :: %__MODULE__{
           containerfile: String.t() | nil,
@@ -38,6 +42,7 @@ defmodule MDTClient.Sandbox.Settings do
           hold_seconds: pos_integer(),
           shares: [Share.t()],
           optmem_path: String.t() | nil,
-          host_notes: String.t()
+          host_notes: String.t(),
+          desktop_notifications: boolean()
         }
 end

@@ -6,6 +6,8 @@
 System.put_env(%{"GIT_CONFIG_GLOBAL" => "/dev/null", "GIT_CONFIG_NOSYSTEM" => "1"})
 
 # The benchmarks in test/bench take minutes; `mix test --only bench` runs them.
-ExUnit.start(exclude: [:bench])
+# The D-Bus tests start a private dbus-daemon, so they need one installed.
+exclude = if MDTClient.DBusDaemon.available?(), do: [:bench], else: [:bench, :dbus]
+ExUnit.start(exclude: exclude)
 
 ExUnit.after_suite(fn _result -> File.rm_rf!(MDTClient.Accounts.root()) end)

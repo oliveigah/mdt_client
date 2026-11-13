@@ -20,6 +20,13 @@ defmodule MDTClientWeb.ToolsLiveTest do
     assert has_element?(view, "#tool-git")
   end
 
+  test "the agent sandbox leads, across the row", %{conn: conn} do
+    {:ok, view, _html} = live(conn, ~p"/tools")
+
+    assert has_element?(view, "#tools > #tool-sandbox:first-child[data-featured]")
+    refute has_element?(view, "#tool-sandbox-waiting")
+  end
+
   test "the title bar offers the theme toggle", %{conn: conn} do
     {:ok, view, _html} = live(conn, ~p"/tools")
 

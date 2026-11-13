@@ -35,7 +35,8 @@ defmodule MDTClientWeb.Router do
         {MDTClientWeb.Hooks.Theme, :default},
         {MDTClientWeb.Hooks.Updates, :default},
         {MDTClientWeb.Notices, :default},
-        {MDTClientWeb.Hooks.Sandbox, :default}
+        {MDTClientWeb.Hooks.Sandbox, :default},
+        {MDTClientWeb.Hooks.Desktop, :default}
       ] do
       live "/tools", ToolsLive
       live "/tools/http", HttpClientLive
@@ -48,6 +49,7 @@ defmodule MDTClientWeb.Router do
       live "/tools/sandbox/grants/:id", SandboxLive, :grant
       live "/tools/sandbox/activity", SandboxLive, :activity
       live "/tools/sandbox/settings", SandboxLive, :settings
+      live "/tools/sandbox/setup", SandboxLive, :setup
       live "/transfer", TransferLive
       live "/agents", AgentAccessLive
     end
