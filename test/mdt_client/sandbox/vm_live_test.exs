@@ -192,12 +192,14 @@ defmodule MDTClient.Sandbox.VMLiveTest do
 
     ## A project: its mirror, an agent worktree, a handoff back, through msb's pipe
 
-    repo =
-      Path.join(share, "../vm-project-#{System.unique_integer([:positive])}") |> Path.expand()
-
-    on_exit(fn -> File.rm_rf!(repo) end)
+    # Your projects folder, shared read-only in the settings: every
+    # repository in it is a project.
+    projects = Path.join(System.tmp_dir!(), "vm-projects-#{System.unique_integer([:positive])}")
+    repo = Path.join(projects, "app")
+    on_exit(fn -> File.rm_rf!(projects) end)
     File.mkdir_p!(repo)
     project = Path.basename(repo)
+    {:ok, _} = Sandbox.add_share(username, projects, :ro)
 
     git = fn dir, args ->
       {out, 0} =
@@ -220,10 +222,15 @@ defmodule MDTClient.Sandbox.VMLiveTest do
 
     # The sandbox doesn't run this VM, so it is named to it.
     Application.put_env(:mdt_client, Projects, guest: Guest.vm(username, name))
-    on_exit(fn -> Application.delete_env(:mdt_client, Projects) end)
+    Application.put_env(:mdt_client, MDTClient.Sandbox.Zed, open: fn _address -> :ok end)
+
+    on_exit(fn ->
+      Application.delete_env(:mdt_client, Projects)
+      Application.delete_env(:mdt_client, MDTClient.Sandbox.Zed)
+    end)
 
     assert {:ok, _} = exec.("apk add --no-cache git >/dev/null 2>&1; git --version")
-    assert {:ok, _project} = Projects.add(username, repo)
+    assert {:ok, _project} = Projects.open(username, repo)
     assert {:ok, "from your machine\n"} = exec.("cat /work/#{project}/a.txt")
     assert {:ok, "master\n"} = exec.("git -C /work/#{project} branch --show-current")
 
@@ -408,10 +415,14 @@ defmodule MDTClient.Sandbox.VMLiveTest do
     assert [%{id: _}] = Sandbox.snapshot(username).snapshots
 
     # A project, the agent's side done by the real `mdt` command in the VM.
-    repo = Path.join(System.tmp_dir!(), "vm-flow-#{System.unique_integer([:positive])}")
-    on_exit(fn -> File.rm_rf!(repo) end)
+    projects = Path.join(System.tmp_dir!(), "vm-flow-#{System.unique_integer([:positive])}")
+    repo = Path.join(projects, "flow")
+    on_exit(fn -> File.rm_rf!(projects) end)
     File.mkdir_p!(repo)
     project = Path.basename(repo)
+    {:ok, _} = Sandbox.add_share(username, projects, :ro)
+    Application.put_env(:mdt_client, MDTClient.Sandbox.Zed, open: fn _address -> :ok end)
+    on_exit(fn -> Application.delete_env(:mdt_client, MDTClient.Sandbox.Zed) end)
 
     git = fn args ->
       {out, 0} =
@@ -437,7 +448,7 @@ defmodule MDTClient.Sandbox.VMLiveTest do
     assert {:ok, login} = exec.("bash -lic true 2>&1")
     assert login =~ "This is the VM MDT runs"
 
-    assert {:ok, _} = Projects.add(username, repo)
+    assert {:ok, _} = Projects.open(username, repo)
     assert {:ok, here} = exec.("cd /work/#{project} && /mnt/mdt/bin/mdt project")
     assert here =~ "You are in the mirror"
 

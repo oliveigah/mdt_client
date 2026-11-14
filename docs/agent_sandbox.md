@@ -114,6 +114,8 @@ folders with it, and sits between it and the network.
 | 2026-11-13 | A pull request is never for a repository the VM can write (in a read-write share), or one in or holding a folder shares refuse. MDT runs git there. |
 | 2026-11-13 | Pull requests become handoffs, with these terms: project, target branch, mirror, agent worktree, handoff, catch up, accept, send back ([Terms](#terms)). "PR" and "host sync" are not used. Supersedes the five rows above where they differ. |
 | 2026-11-13 | Each git repository is a project, made when you open it in the VM from the Projects page, which starts Zed. Its settings (target branches, the default one, how handoffs are accepted) live there. Submodules are left out for now. |
+| 2026-11-13 | Shared folders decide what the VM sees: the projects are the git repositories found in them, listed on their own, and nothing outside them can be opened. A project's mirror is made the first time you open it. Supersedes opening any repository by its path. |
+| 2026-11-13 | A repository in a read-write shared folder is listed but never opened: the VM can write its `.git`, and MDT runs git there. Share project folders read-only; agents work in their worktrees on the Work disk and hand off, so they never need to write them. |
 | 2026-11-13 | A project's mirror is its main worktree in the VM: your default target branch as committed, kept current within about 2 s of each commit while the VM runs, view only. It is the sync point: agent worktrees share its refs and catch up with `git merge host`. Your uncommitted work never travels. |
 | 2026-11-13 | The mirror is view only by instruction, a banner and rescue: agents run as root, so MDT keeps whatever was changed in it on a `rescued/…` branch and puts it back on your branch. |
 | 2026-11-13 | Handoffs come only from agent worktrees of a project, onto one of its target branches. `mdt handoff` refuses work that doesn't merge with that branch as it is now. |
@@ -338,23 +340,36 @@ your repository (upstream)                     the VM, /work
 
 #### Opening a project
 
-- The Projects page opens a repository in the VM: you give its folder (or
-  pick one open in the Git tool) and press Open in Zed. The first time,
-  that makes it a project and its mirror; every time, it brings the
-  mirror up to date and starts `zed ssh://mdt-sandbox/work/<name>`. The
-  VM must run, and `~/.ssh/config` must reach it through this identity's
-  launcher (the Setup page).
-- Opening a repository is what decides which of your code the VM can
-  read; nothing else of yours goes in.
-- **Never a repository the VM can write:** the repository, its git folder
-  and the folder its worktrees share must not be in or hold a read-write
-  share, MDT's data folder, or a folder shares refuse. MDT runs git there.
-- **Settings:** the target branches (checked out or not), the default one
-  (the branch checked out when the project was made), and whether handoffs
-  are accepted as commits or as changes by default.
-- **The page shows** each project's mirror (on which branch, at which
-  commit, when; rescues and failures), its target branches, and its agent
-  worktrees, each with its handoff and an Open in Zed button.
+- **Shared folders decide what the VM sees, and every git repository in
+  one is a project.** The Projects page lists each shared folder with the
+  repositories found in it (`Discovery`): a folder with a `.git` folder,
+  at most 4 levels down; nothing inside a repository is looked at; linked
+  worktrees, hidden folders, symlinks and build or dependency folders
+  (`node_modules`, `deps`, `_build`, `target`, …) are skipped. It looks
+  again when the page opens, after you act, and on Look again.
+- **Open in Zed** on one makes it a project the first time (a record with
+  its name in the VM and its settings) and its mirror; every time, it
+  brings the mirror up to date and starts `zed ssh://mdt-sandbox/work/<name>`.
+  The VM must run, and `~/.ssh/config` must reach it through this
+  identity's launcher (the Setup page).
+- **Only from a read-only shared folder.** In a read-write one the VM can
+  write the repository's `.git`, and MDT runs git there (the mirror,
+  accepting a handoff); a hook or `core.fsmonitor` line planted there would
+  run on your machine, as you. Those repositories are listed with a warning
+  and can't be opened; making the folder read-only recreates the VM.
+  Agents don't need to write there: they work in worktrees on the Work disk
+  and hand off. MDT's data folder and the folders shares refuse are never
+  projects either.
+- **A project whose folder stops being shared** is listed apart: MDT stops
+  keeping its mirror current, and you can forget its settings. Its mirror
+  and worktrees stay in the VM.
+- **Settings,** once opened: the target branches (checked out or not), the
+  default one (the branch checked out when it was first opened), and
+  whether handoffs are accepted as commits or as changes by default.
+- **The page shows,** for an opened project, its mirror (on which branch,
+  at which commit, when; rescues and failures), its open handoffs and, in
+  full, its settings and agent worktrees, each with its handoff and an
+  Open in Zed button.
 
 #### The mirror
 
@@ -609,7 +624,7 @@ through a real VM, with the real `mdt` command in it:
 
 Later that day pull requests replaced all of step 3 but `Guest` and
 `HostGit`, and were replaced in turn by [projects and handoffs](#projects):
-`Project`, `Projects`, `Mirror`, `Zed`, `Handoff`, `HandoffStore`,
+`Project`, `Projects`, `Discovery`, `Mirror`, `Zed`, `Handoff`, `HandoffStore`,
 `Accept` and `Handoffs`; the `mdt project`, `mdt worktree new`, `mdt
 handoff` and `mdt handoffs` commands; the Projects and Handoffs pages.
 Their tests are `handoffs_test.exs`, `sandbox_projects_live_test.exs` and
@@ -1922,7 +1937,8 @@ date on 2026-11-13, after step 5).
 | `Settings`, `Share`, `Shares`           | The VM's settings and their checks; shared folders and their mounts                   |
 | `Inbox`, `Instructions`                 | What the VM reads at `/mnt/mdt`; the text agents are given                            |
 | `Memory`                                | The VM's own OptMem folder and its seeding                                            |
-| `Projects`, `Project`, `Mirror`, `Zed`  | Projects as the pages and the channel use them; one and its settings; its mirror; opening Zed |
+| `Projects`, `Project`, `Discovery`      | Projects as the pages and the channel use them; one and its settings; the repositories in the shared folders |
+| `Mirror`, `Zed`                         | A project's mirror in the VM; opening a VM folder in Zed                              |
 | `Handoffs`, `Handoff`, `HandoffStore`, `Accept` | Handoffs as the pages and the channel use them; one and its facts; MDT's store; accepting one |
 | `Guest`                                 | Reaching into the VM: a command, and git's address for a repository there             |
 | `HostGit`                               | git on your repository, bounded                                                       |

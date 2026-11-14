@@ -68,8 +68,8 @@ defmodule MDTClientWeb.SandboxLive do
      |> assign(:handoff_tab, "conversation")
      |> assign(:handoff_filter, "open")
      |> assign(:handoff_view, nil)
-     |> assign(:project_form, to_form(%{"path" => ""}, as: :project))
-     |> assign(:project_error, nil)
+     |> assign(:project_overview, %{shared: [], unshared: []})
+     |> assign(:project_open, nil)
      |> assign(:project_settings, nil)
      |> assign(:project_worktrees, %{})
      |> assign(:vm_errors, %{})
@@ -107,7 +107,7 @@ defmodule MDTClientWeb.SandboxLive do
           )
 
         :projects ->
-          assign_worktrees(socket)
+          assign_overview(socket)
 
         :setup ->
           assign(
@@ -254,14 +254,12 @@ defmodule MDTClientWeb.SandboxLive do
                 />
               <% :projects -> %>
                 <ProjectsPage.page
-                  projects={@projects}
+                  overview={@project_overview}
                   mirror={@mirror}
                   handoffs={@handoffs}
-                  worktrees={@project_worktrees}
+                  open={@project_open}
                   settings={@project_settings}
-                  suggestions={suggestions(@projects)}
-                  form={@project_form}
-                  error={@project_error}
+                  worktrees={@project_worktrees}
                   vm={@vm}
                   now={@now}
                 />
@@ -1006,63 +1004,35 @@ defmodule MDTClientWeb.SandboxLive do
 
   ## Projects
 
-  def handle_event("open_repository", params, socket) do
-    path = params["path"] || get_in(params, ["project", "path"]) || ""
-    username = socket.assigns.username
-
-    with {:ok, project} <- Projects.add(username, path),
-         :ok <- Projects.open(username, project.name) do
-      {:noreply,
-       socket
-       |> assign(project_form: to_form(%{"path" => ""}, as: :project), project_error: nil)
-       |> refresh()
-       |> assign_worktrees()
-       |> put_notice(:success, "#{project.name} opened in Zed",
-         body:
-           "Its mirror is /work/#{project.name}, view only. Agents work in worktrees beside it."
-       )}
-    else
-      {:error, reason} ->
+  def handle_event("open_project", %{"path" => project} = params, socket) do
+    case Projects.open(socket.assigns.username, project, params["folder"]) do
+      {:ok, opened} ->
         {:noreply,
          socket
          |> refresh()
-         |> assign(
-           project_form: to_form(%{"path" => path}, as: :project),
-           project_error: Projects.explain(reason)
+         |> assign_overview()
+         |> put_notice(:success, "#{opened.name} opened in Zed",
+           body: params["folder"] || "Its mirror, /work/#{opened.name}: view only."
          )}
-    end
-  end
-
-  def handle_event("open_project", %{"name" => name} = params, socket) do
-    case Projects.open(socket.assigns.username, name, params["folder"]) do
-      :ok ->
-        {:noreply,
-         socket
-         |> refresh()
-         |> put_notice(:success, "Opened in Zed", body: params["folder"] || "/work/#{name}")}
 
       {:error, reason} ->
         {:noreply,
          socket
          |> refresh()
+         |> assign_overview()
          |> put_notice(:warning, "Zed didn't open", body: Projects.explain(reason))}
     end
   end
 
-  def handle_event("toggle_project_settings", %{"name" => name}, socket) do
-    settings =
-      case socket.assigns.project_settings do
-        %{name: ^name} ->
-          nil
-
-        _ ->
-          case Enum.find(socket.assigns.projects, &(&1.name == name)) do
-            nil -> nil
-            project -> project_settings(project, nil)
-          end
-      end
-
-    {:noreply, assign(socket, :project_settings, settings)}
+  def handle_event("toggle_project", %{"path" => path}, socket) do
+    if socket.assigns.project_open == path do
+      {:noreply, assign(socket, project_open: nil, project_settings: nil)}
+    else
+      {:noreply,
+       socket
+       |> assign(:project_open, path)
+       |> assign_project_detail(nil)}
+    end
   end
 
   def handle_event("save_project", %{"name" => name} = params, socket) do
@@ -1072,25 +1042,22 @@ defmodule MDTClientWeb.SandboxLive do
       {:ok, _project} ->
         {:noreply,
          socket
-         |> assign(:project_settings, nil)
          |> refresh()
+         |> assign_overview()
          |> put_notice(:success, "Settings of #{name} saved")}
 
       {:error, reason} ->
-        project = Enum.find(socket.assigns.projects, &(&1.name == name))
-
-        {:noreply,
-         assign(
-           socket,
-           :project_settings,
-           project && project_settings(project, Projects.explain(reason))
-         )}
+        {:noreply, assign_project_detail(socket, Projects.explain(reason))}
     end
   end
 
-  def handle_event("remove_project", %{"name" => name}, socket) do
-    Projects.remove(socket.assigns.username, name)
-    {:noreply, socket |> assign(:project_settings, nil) |> refresh()}
+  def handle_event("forget_project", %{"name" => name}, socket) do
+    Projects.forget(socket.assigns.username, name)
+    {:noreply, socket |> refresh() |> assign_overview()}
+  end
+
+  def handle_event("rescan_projects", _params, socket) do
+    {:noreply, socket |> refresh() |> assign_overview()}
   end
 
   ## Handoffs
@@ -1473,39 +1440,44 @@ defmodule MDTClientWeb.SandboxLive do
 
   defp note_form, do: to_form(%{"note" => ""}, as: :send_back)
 
-  # Each project's agent worktrees, read from the VM when the page opens or
-  # after you act on a project. Not on every refresh: it goes into the VM.
-  defp assign_worktrees(socket) do
-    username = socket.assigns.username
+  # The repositories in your shared folders, looked for when the page opens
+  # and after you act on a project, not on every refresh: it reads the
+  # filesystem. The one shown in full keeps its detail.
+  defp assign_overview(socket) do
+    overview = Projects.overview(socket.assigns.username)
+    assign_project_detail(assign(socket, :project_overview, overview), nil)
+  end
 
-    worktrees =
-      if socket.assigns.vm.status == :running do
-        Map.new(socket.assigns.projects, fn project ->
-          {project.name, ok(Projects.worktrees(username, project.name)) || []}
+  # The settings and agent worktrees of the project shown in full. Its
+  # worktrees are read from the VM, so only for that one, and only then.
+  defp assign_project_detail(socket, error) do
+    path = socket.assigns.project_open
+
+    project =
+      path &&
+        Enum.find_value(socket.assigns.project_overview.shared, fn %{repos: repos} ->
+          Enum.find_value(repos, &(&1.path == path && &1.project))
         end)
-      else
-        %{}
-      end
 
-    assign(socket, :project_worktrees, worktrees)
-  end
+    case project do
+      nil ->
+        assign(socket, project_settings: nil)
 
-  defp project_settings(project, error) do
-    %{
-      name: project.name,
-      branches: MDTClient.Sandbox.Project.branches(project),
-      form: to_form(%{}, as: :project),
-      error: error
-    }
-  end
+      project ->
+        worktrees =
+          if socket.assigns.vm.status == :running,
+            do: ok(Projects.worktrees(socket.assigns.username, project.name)) || [],
+            else: []
 
-  # Repositories open in the Git tool that aren't projects yet.
-  defp suggestions(projects) do
-    known = MapSet.new(projects, & &1.path)
-
-    MDTClientWeb.GitLive.Session.repositories()
-    |> Enum.reject(&MapSet.member?(known, &1))
-    |> Enum.take(8)
+        socket
+        |> assign(:project_settings, %{
+          name: project.name,
+          branches: MDTClient.Sandbox.Project.branches(project),
+          form: to_form(%{}, as: :project),
+          error: error
+        })
+        |> update(:project_worktrees, &Map.put(&1, project.name, worktrees))
+    end
   end
 
   defp assign_page_data(socket, grant_map) do

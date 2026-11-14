@@ -5,7 +5,7 @@ This is a web application written using the Phoenix web framework.
 - Use `mix precommit` alias when you are done with all changes and fix any pending issues
 - Use the already included and available `:req` (`Req`) library for HTTP requests, **avoid** `:httpoison`, `:tesla`, and `:httpc`. Req is included by default and is the preferred HTTP client for Phoenix apps
 
-### In the agent sandbox, work in a worktree
+### In the agent sandbox, work in a worktree of the project
 
 This whole section, down to its last rule, is for agents running inside
 MDT's agent sandbox: the VM that MDT starts. Check which side you are on
@@ -18,21 +18,19 @@ before anything else:
 - **On the user's own machine** there is no `/mnt/mdt`. Skip this section,
   its rule about `msb` and `~/.mdt_client` included.
 
-In the sandbox, the user's MDT, the one running your VM, runs from this
-checkout, and its dev server loads whatever lands here. So never edit, build
-or test in the checkout itself: an unfinished edit would run in the process
-holding your own VM, and a build with other tools would break the user's
-`_build`.
+In the sandbox, this repository is a project (`mdt project` says so): its
+mirror, `/work/mdt_client`, is the user's branch as they committed it, kept
+current by MDT and view only. The user's own checkout, where their MDT runs,
+is out of your reach, or read-only at its own path: never work there either.
 
-1. Start every task in a worktree of your own, from the checkout:
+1. Start every task in a worktree of your own, from the mirror:
 
-       git worktree add .worktrees/<name> -b <name> master
-       cd .worktrees/<name> && mise install && mix deps.get
+       cd /work/mdt_client && mdt worktree new <name>
+       cd /work/mdt_client.wt/<name> && mise install && mix deps.get
 
-   It must be under `.worktrees/`: that folder is shared with the user, and
-   ignored by git and by the dev server. A worktree anywhere else lives only
-   on the VM's disk, where the user can't see it and recreating the VM
-   deletes it.
+   If your thread is in the mirror and you need to change code, stop: give
+   the user the Zed line `mdt worktree new` prints, and ask them to start
+   your thread again there.
 2. Work, build and test only there. `.tool-versions` pins the Erlang and
    Elixir the user builds with; never build with another
    (`mise exec elixir@...`). To see it running, use the run-mdt skill with a
@@ -42,20 +40,18 @@ holding your own VM, and a build with other tools would break the user's
 3. The VM cannot run VMs: creating, starting and stopping a VM, the proxy in
    front of a real VM and the `mdt` CLI over vsock can't be tried here. Cover
    them with tests (they run without msb), and say in your handoff what the
-   user should check once it's merged.
-4. When it's ready and `mix precommit` passes, commit on your branch, then
-   bring it onto `master` from the worktree:
+   user should check once it's accepted.
+4. When it's ready and `mix precommit` passes, commit on your branch, catch
+   up with the user's branch, and hand it off:
 
-       git rebase master
-       git -C ../.. merge --ff-only <name>
+       git merge host
+       mix precommit
+       mdt handoff --title "What this is" --body notes.md
 
-   That is when the user's MDT picks it up. If the merge refuses, because
-   `master` moved or the user has uncommitted changes in the same files,
-   rebase again or stop and tell the user. Never stash, reset, check out or
-   force anything in the checkout.
-5. Then clean up from the checkout:
-   `cd ../.. && git worktree remove .worktrees/<name> && git branch -d <name>`.
-6. Don't run `msb`, and don't touch `~/.mdt_client`: both are the user's.
+   `mdt handoff` refuses work that doesn't merge with their branch as it is
+   now: catch up again, resolve, commit. The user accepts it onto their
+   branch; `mdt handoffs` says when they did, or what they sent back.
+5. Don't run `msb`, and don't touch `~/.mdt_client`: both are the user's.
 
 ### Phoenix v1.8 guidelines
 

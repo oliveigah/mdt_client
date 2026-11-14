@@ -950,11 +950,12 @@ defmodule MDTClient.Sandbox.Server do
     if state.vm.status == :running and state.projects != [] and
          :mirror not in Map.values(state.tasks) do
       %{username: username, projects: projects, mirror: mirror} = state
+      shares = state.settings.shares
       vm = %{name: state.vm.name, status: state.vm.status, started_at: state.vm.started_at}
 
       {:noreply,
        State.task(state, :mirror, fn ->
-         Projects.follow(username, projects, mirror, vm, @mirror_retry_seconds)
+         Projects.follow(username, projects, mirror, vm, @mirror_retry_seconds, shares)
        end)}
     else
       {:noreply, state}

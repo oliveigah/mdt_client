@@ -7,6 +7,7 @@ defmodule MDTClientWeb.SandboxProjectsLiveTest do
 
   alias MDTClient.Sandbox
   alias MDTClient.Sandbox.{Guest, Projects, Zed}
+  alias MDTClientWeb.SandboxLive.Projects, as: Page
 
   @me [
     {"GIT_AUTHOR_NAME", "Someone"},
@@ -27,7 +28,8 @@ defmodule MDTClientWeb.SandboxProjectsLiveTest do
     base = Path.join(System.tmp_dir!(), "projects-live-#{System.unique_integer([:positive])}")
     on_exit(fn -> File.rm_rf!(base) end)
 
-    repo = Path.join(base, "app")
+    shared = Path.join(base, "projects")
+    repo = Path.join(shared, "app")
     File.mkdir_p!(repo)
     git(repo, ["init", "-q", "-b", "master"])
     File.write!(Path.join(repo, "a.txt"), "one\n")
@@ -51,44 +53,52 @@ defmodule MDTClientWeb.SandboxProjectsLiveTest do
       Application.delete_env(:mdt_client, Zed)
     end)
 
-    Map.merge(context, %{repo: repo, vm: vm})
+    Map.merge(context, %{repo: repo, shared: shared, vm: vm})
   end
 
-  test "opening a repository makes it a project, mirrors it, and opens it in Zed", %{
+  test "with no shared folder, the page says where projects come from", %{conn: conn} do
+    {:ok, view, _html} = live(conn, ~p"/tools/sandbox/projects")
+    assert has_element?(view, "#projects-no-shares")
+  end
+
+  test "every repository in a shared folder is listed; opening one mirrors it and opens Zed", %{
     conn: conn,
     username: username,
     repo: repo,
+    shared: shared,
     vm: vm
   } do
+    {:ok, _} = Sandbox.add_share(username, shared, :ro)
     {:ok, view, _html} = live(conn, ~p"/tools/sandbox/projects")
-    assert has_element?(view, "#projects-empty")
+    row = "#repo-#{Page.key(repo)}"
+    assert has_element?(view, "#share-#{Page.key(shared)}", "read-only")
+    assert has_element?(view, row, "app")
+    assert has_element?(view, "#repo-state-#{Page.key(repo)}", "not opened yet")
 
-    view |> form("#project-form", project: %{path: Path.join(repo, "nope")}) |> render_submit()
-    assert has_element?(view, "#project-error", "is not a folder in a git repository")
+    # The VM is stopped in tests, so the button is off; the event is sent as it would be.
+    assert has_element?(view, "#repo-zed-#{Page.key(repo)}[disabled]")
+    render_click(view, "open_project", %{"path" => repo})
 
-    view |> form("#project-form", project: %{path: repo}) |> render_submit()
     mirror = Path.join(vm, "app")
     assert_received {:zed, "ssh://mdt-sandbox" <> ^mirror}
     assert has_element?(view, "#notices", "app opened in Zed")
-    assert has_element?(view, "#project-app", repo)
-    assert has_element?(view, "#project-targets-app", "master")
+    assert has_element?(view, "#repo-state-#{Page.key(repo)}", "mirror /work/app")
     assert File.read!(Path.join(mirror, "a.txt")) == "one\n"
-
-    # The button is off while the VM is stopped, as it is in tests.
-    assert has_element?(view, "#project-zed-app[disabled]")
-    render_click(view, "open_project", %{"name" => "app", "folder" => mirror <> ".wt/fix"})
-    assert_received {:zed, "ssh://mdt-sandbox" <> folder}
-    assert folder == mirror <> ".wt/fix"
-
     assert [%{name: "app"}] = Sandbox.snapshot(username).projects
   end
 
-  test "its settings are saved, and checked", %{conn: conn, username: username, repo: repo} do
-    {:ok, _} = Projects.add(username, repo)
+  test "an opened project's settings are saved, and checked", %{
+    conn: conn,
+    username: username,
+    repo: repo,
+    shared: shared
+  } do
+    {:ok, _} = Sandbox.add_share(username, shared, :ro)
+    {:ok, _} = Projects.open(username, repo)
     git(repo, ["branch", "develop"])
 
     {:ok, view, _html} = live(conn, ~p"/tools/sandbox/projects")
-    view |> element("#project-settings-app") |> render_click()
+    view |> element("#repo-toggle-#{Page.key(repo)}") |> render_click()
     assert has_element?(view, "#project-settings-form-app", "develop")
 
     view
@@ -106,13 +116,48 @@ defmodule MDTClientWeb.SandboxProjectsLiveTest do
     |> render_submit()
 
     assert has_element?(view, "#notices", "Settings of app saved")
-    assert has_element?(view, "#project-targets-app", "develop")
-    assert has_element?(view, "#project-targets-app", "accepted as changes")
 
     assert [%{targets: ["master", "develop"], default_target: "develop", accept: :changes}] =
              Sandbox.snapshot(username).projects
+  end
 
-    view |> element("#project-remove-app") |> render_click()
-    assert has_element?(view, "#projects-empty")
+  test "a read-write shared folder's repositories are listed, and can't be opened", %{
+    conn: conn,
+    username: username,
+    repo: repo,
+    shared: shared
+  } do
+    {:ok, _} = Sandbox.add_share(username, shared, :rw)
+    {:ok, view, _html} = live(conn, ~p"/tools/sandbox/projects")
+
+    assert has_element?(
+             view,
+             "#share-writable-#{Page.key(shared)}",
+             "The VM can write this folder"
+           )
+
+    assert has_element?(view, "#repo-zed-#{Page.key(repo)}[disabled]")
+
+    render_click(view, "open_project", %{"path" => repo})
+    assert has_element?(view, "#notices", "which the VM can write")
+    refute_received {:zed, _}
+    assert Sandbox.snapshot(username).projects == []
+  end
+
+  test "a project whose folder is no longer shared is listed apart, and forgotten", %{
+    conn: conn,
+    username: username,
+    repo: repo,
+    shared: shared
+  } do
+    {:ok, _} = Sandbox.add_share(username, shared, :ro)
+    {:ok, _} = Projects.open(username, repo)
+    :ok = Sandbox.remove_share(username, shared)
+
+    {:ok, view, _html} = live(conn, ~p"/tools/sandbox/projects")
+    assert has_element?(view, "#projects-unshared", "app")
+    view |> element("#project-forget-app") |> render_click()
+    refute has_element?(view, "#projects-unshared")
+    assert Sandbox.snapshot(username).projects == []
   end
 end

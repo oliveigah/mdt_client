@@ -1,8 +1,14 @@
 defmodule MDTClient.Sandbox.Projects do
   @moduledoc """
   The projects of one identity, as the pages and the agent channel use
-  them: opening a repository in the VM, its settings, its mirror and its
-  agent worktrees.
+  them: the repositories in your shared folders (`MDTClient.Sandbox.Discovery`),
+  opening one in the VM, its settings, its mirror and its agent worktrees.
+
+  Every repository in a shared folder is a project. The sandbox keeps a
+  record of one (its name in the VM and its settings) from the first time
+  you open it, and only then makes its mirror. A repository in a
+  read-write share is listed but never opened: the VM can write its `.git`,
+  and MDT runs git there.
 
   The sandbox (`MDTClient.Sandbox.Server`) keeps the records; the git work
   runs here, in the caller's process, or in the server's mirror task
@@ -13,40 +19,81 @@ defmodule MDTClient.Sandbox.Projects do
   folder of this machine in its place.
   """
 
-  alias MDTClient.Sandbox.{Guest, Handoffs, HostGit, Mirror, Project, Server, Shown, Zed}
+  alias MDTClient.Sandbox.{
+    Discovery,
+    Guest,
+    Handoffs,
+    HostGit,
+    Mirror,
+    Project,
+    Server,
+    Share,
+    Shares,
+    Shown,
+    Zed
+  }
 
   @type error ::
           :vm_not_running
           | :not_found
           | :not_in_a_project
+          | :not_shared
           | {:bad_task, String.t()}
           | {:task_taken, String.t()}
           | Project.error()
           | Zed.error()
           | String.t()
 
-  @doc "Every project, in the order they were added."
+  @doc "Every project with a record, in the order they were first opened."
   @spec list(String.t()) :: [Project.t()]
   def list(username), do: Server.call(username, :projects).projects
 
   @doc """
-  Makes the repository `path` is in a project, and mirrors it into the VM
-  when the VM runs. A repository that is a project already is that project.
+  What the projects page shows: each shared folder with the repositories
+  in it, each with its record when it has one; and the records whose
+  repository is no longer in a shared folder.
   """
-  @spec add(String.t(), String.t()) :: {:ok, Project.t()} | {:error, error()}
-  def add(username, path) do
+  @spec overview(String.t()) :: %{shared: [map()], unshared: [Project.t()]}
+  def overview(username) do
+    %{projects: projects, shares: shares} = Server.call(username, :projects)
+    by_path = Map.new(projects, &{&1.path, &1})
+    found = Discovery.repositories(shares)
+
+    shared =
+      for share <- shares do
+        repos =
+          for %{share: ^share} = repo <- found do
+            Map.merge(repo, %{name: Path.basename(repo.path), project: by_path[repo.path]})
+          end
+
+        %{share: share, repos: repos}
+      end
+
+    seen = MapSet.new(found, & &1.path)
+    %{shared: shared, unshared: Enum.reject(projects, &MapSet.member?(seen, &1.path))}
+  end
+
+  @doc "The shared folder `path` is in, or nil."
+  @spec share_of(Path.t(), [Share.t()]) :: Share.t() | nil
+  def share_of(path, shares), do: Enum.find(shares, &Shares.within?(path, &1.path))
+
+  @doc """
+  The project of the repository at `path`, made the first time: the
+  repository must be in a read-only shared folder (`Project.check/2`).
+  """
+  @spec ensure(String.t(), String.t()) :: {:ok, Project.t()} | {:error, error()}
+  def ensure(username, path) do
     %{projects: projects, shares: shares} = Server.call(username, :projects)
 
-    with {:ok, top} <- Project.check(path, shares: shares) do
+    with {:ok, top} <- Project.check(path, shares: shares),
+         %Share{} <- share_of(top, shares) || {:error, :not_shared} do
       case Enum.find(projects, &(&1.path == top)) do
         %Project{} = project ->
           {:ok, project}
 
         nil ->
-          with {:ok, project} <- Project.new(top, projects, shares: shares),
-               {:ok, project} <- Server.call(username, {:add_project, project}) do
-            mirror(username, project.name)
-            {:ok, project}
+          with {:ok, project} <- Project.new(top, projects, shares: shares) do
+            Server.call(username, {:add_project, project})
           end
       end
     end
@@ -54,14 +101,25 @@ defmodule MDTClient.Sandbox.Projects do
 
   @doc """
   Opens a project in Zed: its mirror, or `folder`, a folder of the VM (an
-  agent worktree). The mirror is brought up to date first.
+  agent worktree). `project` is a project's name, or the path of a
+  repository in a shared folder, which becomes a project the first time.
+  The mirror is made or brought up to date first.
   """
-  @spec open(String.t(), String.t(), String.t() | nil) :: :ok | {:error, error()}
-  def open(username, name, folder \\ nil) do
-    with {:ok, project, %{vm: vm}} <- find(username, name),
+  @spec open(String.t(), String.t(), String.t() | nil) :: {:ok, Project.t()} | {:error, error()}
+  def open(username, project, folder \\ nil) do
+    with {:ok, project} <- named_or_ensured(username, project),
+         {:ok, project, %{vm: vm}} <- find(username, project.name),
          {:ok, guest} <- guest(username, vm),
-         {:ok, _} <- mirror(username, name) do
-      Zed.open(username, folder || Project.mirror_path(project, guest))
+         {:ok, _} <- mirror(username, project.name),
+         :ok <- Zed.open(username, folder || Project.mirror_path(project, guest)) do
+      {:ok, project}
+    end
+  end
+
+  defp named_or_ensured(username, name_or_path) do
+    case Enum.find(list(username), &(&1.name == name_or_path)) do
+      nil -> ensure(username, name_or_path)
+      project -> {:ok, project}
     end
   end
 
@@ -77,9 +135,13 @@ defmodule MDTClient.Sandbox.Projects do
     end
   end
 
-  @doc "Stops a repository being a project. Its mirror and worktrees in the VM stay, for the VM to delete."
-  @spec remove(String.t(), String.t()) :: :ok | {:error, error()}
-  def remove(username, name) do
+  @doc """
+  Lets go of a project's record: its name and settings. A repository still
+  in a shared folder stays listed, and is a project again when opened.
+  Its mirror and worktrees in the VM stay, for the VM to delete.
+  """
+  @spec forget(String.t(), String.t()) :: :ok | {:error, error()}
+  def forget(username, name) do
     with {:ok, _project} <- Server.call(username, {:remove_project, name}), do: :ok
   end
 
@@ -91,7 +153,8 @@ defmodule MDTClient.Sandbox.Projects do
   """
   @spec mirror(String.t(), String.t()) :: {:ok, Mirror.result()} | {:error, error()}
   def mirror(username, name) do
-    with {:ok, project, %{vm: vm}} <- find(username, name),
+    with {:ok, project, %{vm: vm, shares: shares}} <- find(username, name),
+         :ok <- workable(project, shares),
          {:ok, guest} <- guest(username, vm) do
       update_mirror(username, project, guest, vm)
     end
@@ -116,15 +179,26 @@ defmodule MDTClient.Sandbox.Projects do
     result
   end
 
+  # A project is worked on only while its repository is in a read-only
+  # shared folder.
+  defp workable(project, shares) do
+    case share_of(project.path, shares) do
+      nil -> {:error, :not_shared}
+      %Share{mode: :rw, path: path} -> {:error, {:writable, path}}
+      %Share{} -> :ok
+    end
+  end
+
   @doc """
   One look at every mirror, for the server's task: each whose branches
   moved, whose settings changed, or that the VM hasn't had since it
   started, is updated. A failed one is tried again after `retry` seconds.
+  Only projects still in a read-only shared folder are followed.
   """
-  @spec follow(String.t(), [Project.t()], map(), map(), pos_integer()) :: :ok
-  def follow(username, projects, mirror, vm, retry) do
+  @spec follow(String.t(), [Project.t()], map(), map(), pos_integer(), [Share.t()]) :: :ok
+  def follow(username, projects, mirror, vm, retry, shares) do
     with {:ok, guest} <- guest(username, vm) do
-      for project <- projects do
+      for project <- projects, workable(project, shares) == :ok do
         last = Map.get(mirror, project.name)
         tips = Mirror.tips(project)
 
@@ -280,6 +354,10 @@ defmodule MDTClient.Sandbox.Projects do
   @spec explain(error()) :: String.t()
   def explain(:vm_not_running), do: "The VM isn't running."
   def explain(:not_found), do: "That project is gone."
+
+  def explain(:not_shared),
+    do:
+      "That repository isn't in a shared folder. Share the folder it is in, read-only, to work on it in the VM."
 
   def explain(:not_in_a_project),
     do:

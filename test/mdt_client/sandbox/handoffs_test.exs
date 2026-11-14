@@ -49,14 +49,22 @@ defmodule MDTClient.Sandbox.HandoffsTest do
     vm = Path.join(base, "vm")
     File.mkdir_p!(vm)
     Application.put_env(:mdt_client, Projects, guest: Guest.local(vm))
-    on_exit(fn -> Application.delete_env(:mdt_client, Projects) end)
+    Application.put_env(:mdt_client, MDTClient.Sandbox.Zed, open: fn _address -> :ok end)
+
+    on_exit(fn ->
+      Application.delete_env(:mdt_client, Projects)
+      Application.delete_env(:mdt_client, MDTClient.Sandbox.Zed)
+    end)
+
+    # Your projects folder, shared read-only: every repository in it is a project.
+    {:ok, _} = Sandbox.add_share(username, Path.join(base, "host"), :ro)
 
     %{username: username, repo: repo, vm: vm, base: base, mirror: Path.join(vm, "app")}
   end
 
   # A project, and an agent worktree of it made the way an agent makes one.
   defp project_with_worktree(%{username: username, repo: repo, mirror: mirror}, task \\ "fix") do
-    {:ok, project} = Projects.add(username, repo)
+    {:ok, project} = Projects.open(username, repo)
     {0, _} = Channel.answer("worktree", %{"cwd" => mirror, "name" => task}, username)
     {project, Path.join(mirror <> ".wt", task)}
   end
@@ -77,6 +85,59 @@ defmodule MDTClient.Sandbox.HandoffsTest do
   defp handoffs(username), do: Sandbox.snapshot(username).handoffs
 
   describe "a project" do
+    test "is every repository in a shared folder, and only those", %{
+      username: username,
+      repo: repo,
+      base: base
+    } do
+      # Another repository beside it, deeper down; a linked worktree, a
+      # dependency folder and a hidden one, which are not projects.
+      other = Path.join(base, "host/group/lib")
+      File.mkdir_p!(other)
+      git(other, ["init", "-q", "-b", "main"])
+      commit(other, [{"x.txt", "x\n"}], "x")
+      git(repo, ["worktree", "add", "-q", Path.join(base, "host/app-wt"), "-b", "side"])
+      File.mkdir_p!(Path.join(base, "host/node_modules/dep/.git"))
+      File.mkdir_p!(Path.join(base, "host/.cache/thing/.git"))
+
+      outside = Path.join(base, "elsewhere")
+      File.mkdir_p!(outside)
+      git(outside, ["init", "-q", "-b", "main"])
+      commit(outside, [{"y.txt", "y\n"}], "y")
+
+      assert %{shared: [%{share: %Share{mode: :ro}, repos: repos}], unshared: []} =
+               Projects.overview(username)
+
+      assert [
+               %{path: ^repo, name: "app", branch: "master", project: nil},
+               %{path: ^other, name: "lib", branch: "main", project: nil}
+             ] = repos
+
+      assert Projects.open(username, outside) == {:error, :not_shared}
+
+      # Opened, it has its record; once its folder isn't shared, it is listed apart.
+      {:ok, _} = Projects.open(username, repo)
+
+      assert %{shared: [%{repos: [%{project: %Project{name: "app"}} | _]}]} =
+               Projects.overview(username)
+
+      :ok = Sandbox.remove_share(username, Path.join(base, "host"))
+      assert %{shared: [], unshared: [%Project{name: "app"}]} = Projects.overview(username)
+      assert Projects.mirror(username, "app") == {:error, :not_shared}
+    end
+
+    test "is never opened from a read-write shared folder", %{
+      username: username,
+      repo: repo,
+      base: base
+    } do
+      host = Path.join(base, "host")
+      :ok = Sandbox.set_share_mode(username, host, :rw)
+      assert %{shared: [%{share: %Share{mode: :rw}, repos: [_]}]} = Projects.overview(username)
+      assert Projects.open(username, repo) == {:error, {:writable, host}}
+      assert Projects.explain({:writable, host}) =~ "which the VM can write"
+    end
+
     test "opening a repository makes it one, with a mirror of its branch", %{
       username: username,
       repo: repo,
@@ -85,10 +146,10 @@ defmodule MDTClient.Sandbox.HandoffsTest do
     } do
       assert {:ok,
               %Project{name: "app", path: ^repo, default_target: "master", targets: ["master"]}} =
-               Projects.add(username, Path.join(repo, "."))
+               Projects.open(username, Path.join(repo, "."))
 
       # Opening it again is the same project.
-      assert {:ok, %Project{name: "app"}} = Projects.add(username, repo)
+      assert {:ok, %Project{name: "app"}} = Projects.open(username, repo)
       assert [%Project{}] = Projects.list(username)
 
       assert File.read!(Path.join(mirror, "a.txt")) == "one\ntwo\nthree\n"
@@ -99,7 +160,7 @@ defmodule MDTClient.Sandbox.HandoffsTest do
       assert %{"app" => %{error: nil, default: "master", rescued: nil}} =
                Sandbox.snapshot(username).mirror
 
-      assert {:error, {:not_a_repository, _}} = Projects.add(username, base)
+      assert {:error, {:not_a_repository, _}} = Projects.open(username, base)
       shares = [%Share{path: Path.join(base, "host"), mode: :rw}]
       assert Project.check(repo, shares: shares) == {:error, {:writable, Path.join(base, "host")}}
 
@@ -112,7 +173,7 @@ defmodule MDTClient.Sandbox.HandoffsTest do
       repo: repo,
       mirror: mirror
     } do
-      {:ok, _} = Projects.add(username, repo)
+      {:ok, _} = Projects.open(username, repo)
       commit(repo, [{"b.txt", "yours\n"}], "second")
       File.write!(Path.join(repo, "uncommitted.txt"), "never travels\n")
 
@@ -139,18 +200,19 @@ defmodule MDTClient.Sandbox.HandoffsTest do
       repo: repo,
       mirror: mirror
     } do
-      {:ok, _} = Projects.add(username, repo)
+      {:ok, _} = Projects.open(username, repo)
       vm = %{name: "vm", status: :running, started_at: nil}
       %{projects: projects, mirror: entries} = Sandbox.snapshot(username)
       entries = Map.new(entries, fn {name, entry} -> {name, %{entry | vm_started_at: nil}} end)
 
       # Nothing moved: a stray file stays where it is.
       File.write!(Path.join(mirror, "stray.txt"), "x\n")
-      :ok = Projects.follow(username, projects, entries, vm, 60)
+      shares = Sandbox.snapshot(username).settings.shares
+      :ok = Projects.follow(username, projects, entries, vm, 60, shares)
       assert File.exists?(Path.join(mirror, "stray.txt"))
 
       commit(repo, [{"b.txt", "yours\n"}], "second")
-      :ok = Projects.follow(username, projects, entries, vm, 60)
+      :ok = Projects.follow(username, projects, entries, vm, 60, shares)
       refute File.exists?(Path.join(mirror, "stray.txt"))
       assert sha(mirror, "HEAD") == sha(repo, "master")
       assert Mirror.tips(hd(projects)) == %{"master" => sha(repo, "master")}
@@ -161,7 +223,7 @@ defmodule MDTClient.Sandbox.HandoffsTest do
       repo: repo,
       mirror: mirror
     } do
-      {:ok, _} = Projects.add(username, repo)
+      {:ok, _} = Projects.open(username, repo)
       git(repo, ["branch", "develop"])
 
       assert {:error, :no_targets} = Projects.update(username, "app", %{"targets" => []})
@@ -186,7 +248,7 @@ defmodule MDTClient.Sandbox.HandoffsTest do
       {:ok, _} = Projects.update(username, "app", %{"targets" => ["master"]})
       refute git(mirror, ["for-each-ref", "refs/remotes/host/"]) =~ "develop"
 
-      assert :ok = Projects.remove(username, "app")
+      assert :ok = Projects.forget(username, "app")
       assert Projects.list(username) == []
     end
   end
@@ -197,7 +259,7 @@ defmodule MDTClient.Sandbox.HandoffsTest do
       repo: repo,
       mirror: mirror
     } do
-      {:ok, _} = Projects.add(username, repo)
+      {:ok, _} = Projects.open(username, repo)
 
       assert {0, made} = Channel.answer("worktree", %{"cwd" => mirror, "name" => "fix"}, username)
       tree = Path.join(mirror <> ".wt", "fix")

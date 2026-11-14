@@ -38,9 +38,15 @@ defmodule MDTClientWeb.SandboxHandoffsLiveTest do
     vm = Path.join(base, "vm")
     File.mkdir_p!(vm)
     Application.put_env(:mdt_client, Projects, guest: Guest.local(vm))
-    on_exit(fn -> Application.delete_env(:mdt_client, Projects) end)
+    Application.put_env(:mdt_client, MDTClient.Sandbox.Zed, open: fn _address -> :ok end)
 
-    {:ok, _} = Projects.add(context.username, repo)
+    on_exit(fn ->
+      Application.delete_env(:mdt_client, Projects)
+      Application.delete_env(:mdt_client, MDTClient.Sandbox.Zed)
+    end)
+
+    {:ok, _} = MDTClient.Sandbox.add_share(context.username, repo, :ro)
+    {:ok, _} = Projects.open(context.username, repo)
     Map.merge(context, %{repo: repo, vm: vm})
   end
 

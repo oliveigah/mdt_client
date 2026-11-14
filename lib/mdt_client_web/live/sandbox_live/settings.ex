@@ -146,7 +146,7 @@ defmodule MDTClientWeb.SandboxLive.Settings do
     <div class="space-y-5">
       <.card id="settings-shares" title="Shared folders" body_class="">
         <:help>
-          Each folder appears at the same path in the VM, read-only unless you say otherwise. What the VM writes in a read-write folder can run on your machine when you use that folder: a git hook, a build script, an editor task. The VM's own work belongs on its Work disk (/work), which nothing here opens. Never shared: your home folder itself, ~/.ssh, ~/.gnupg, ~/.optmem, cloud CLI logins and MDT's own data. Folders can't sit inside one another, since the VM could unmount the inner one.
+          Each folder appears at the same path in the VM, read-only unless you say otherwise. What the VM writes in a read-write folder can run on your machine when you use that folder: a git hook, a build script, an editor task. The VM's own work belongs on its Work disk (/work), which nothing here opens. Every git repository in a shared folder is a project: the Projects page opens it in the VM, with a mirror in /work, and only from a read-only folder. Never shared: your home folder itself, ~/.ssh, ~/.gnupg, ~/.optmem, cloud CLI logins and MDT's own data. Folders can't sit inside one another, since the VM could unmount the inner one.
         </:help>
         <:actions>
           <span class="text-[11px] text-faint">{length(@settings.shares)} shared</span>

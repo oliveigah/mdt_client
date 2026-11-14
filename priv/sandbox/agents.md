@@ -17,8 +17,10 @@ than building in them.
 
 ## Projects: the mirror, your worktree, and handoffs
 
-A project is a git repository of the user's that MDT mirrors here, at
-`/work/NAME`. `mdt project` says where you are in one and what its rules are.
+A project is a git repository in a folder the user shared, which MDT
+mirrors here at `/work/NAME`. The shared folder itself, at its own path, is
+read-only: read it, but work in the project. `mdt project` says where you
+are in one and what its rules are.
 
 - **The mirror, `/work/NAME`, is view only.** It is the user's target
   branch as they committed it, and MDT keeps it current. Read it, run
