@@ -172,6 +172,22 @@ defmodule MDTClient.Sandbox.HandoffsTest do
       assert %{"app" => %{error: nil, default: "master", rescued: nil}} =
                Sandbox.snapshot(username).mirror
 
+      # Its worktree slots too: on no branch at your branch, clean, locked,
+      # free, so each opens in Zed before any task.
+      for n <- 1..3 do
+        slot = Path.join(mirror <> ".wt", "slot-#{n}")
+        assert sha(slot, "HEAD") == sha(repo, "master")
+        assert git(slot, ["branch", "--show-current"]) == ""
+        assert git(slot, ["status", "--porcelain"]) == ""
+      end
+
+      assert git(mirror, ["worktree", "list", "--porcelain"])
+             |> String.split("locked MDT worktree slot")
+             |> length() == 4
+
+      assert {:ok, %{slots: slots}} = Projects.slots(username, "app")
+      assert Enum.map(slots, &{&1.state, &1.free?}) == List.duplicate({:clean, true}, 3)
+
       assert {:error, {:not_a_repository, _}} = Projects.open(username, base)
       shares = [%Share{path: Path.join(base, "host"), mode: :rw}]
       assert Project.check(repo, shares: shares) == {:error, {:writable, Path.join(base, "host")}}
@@ -304,7 +320,7 @@ defmodule MDTClient.Sandbox.HandoffsTest do
       assert {0, here} = Channel.answer("project", %{"cwd" => mirror}, username)
       assert here =~ "You are in the mirror" and here =~ "view only"
       assert here =~ "slot-1  fix, no handoff yet"
-      assert here =~ "slot-3  free, not made yet"
+      assert here =~ "slot-3  free\n"
 
       assert {0, there} = Channel.answer("project", %{"cwd" => tree}, username)
       assert there =~ "You are in slot-1, #{tree}, on the task branch fix"
@@ -595,6 +611,36 @@ defmodule MDTClient.Sandbox.HandoffsTest do
       assert made =~ "in slot-1"
       assert git(one, ["branch", "--show-current"]) == "again\n"
       assert git(mirror, ["branch", "--list", "fix"]) =~ "fix"
+    end
+
+    test "the mirror's updates make slots again, and new ones; a folder there is left alone", %{
+      username: username,
+      mirror: mirror
+    } do
+      # Removed, a folder of someone else's where slot-2 goes, and slot-3's
+      # folder deleted with git's record of it left.
+      git(mirror, ["worktree", "remove", "-f", "-f", slot(mirror, 1)])
+      git(mirror, ["worktree", "remove", "-f", "-f", slot(mirror, 2)])
+      File.mkdir_p!(slot(mirror, 2))
+      File.write!(Path.join(slot(mirror, 2), "mine.txt"), "mine\n")
+      File.rm_rf!(slot(mirror, 3))
+
+      {:ok, _} = Projects.mirror(username, "app")
+      assert git(slot(mirror, 1), ["branch", "--show-current"]) == ""
+      assert git(slot(mirror, 3), ["branch", "--show-current"]) == ""
+      assert File.ls!(slot(mirror, 2)) == ["mine.txt"]
+
+      # One more slot in the settings: made when they're saved.
+      {:ok, _} = Projects.update(username, "app", %{"slots" => "4"})
+      assert File.dir?(slot(mirror, 4))
+
+      assert [
+               {"slot-1", nil, true},
+               {"slot-2", nil, false},
+               {"slot-3", nil, true},
+               {"slot-4", nil, true}
+             ] =
+               states(username)
     end
 
     test "uncommitted work is never switched away", %{username: username, mirror: mirror} do

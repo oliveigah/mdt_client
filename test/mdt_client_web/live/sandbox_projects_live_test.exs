@@ -216,9 +216,10 @@ defmodule MDTClientWeb.SandboxProjectsLiveTest do
     assert text.("#slot-state-app-slot-1") =~ "busy"
     assert text.("#slot-app-slot-1") =~ "fix" and text.("#slot-app-slot-1") =~ "no handoff yet"
     assert text.("#slot-state-app-slot-2") =~ "uncommitted"
+    # Made with the mirror: free, and it opens in Zed before any task.
     assert text.("#slot-state-app-slot-3") =~ "free"
-    assert text.("#slot-app-slot-3") =~ "not made yet"
-    assert LazyHTML.query(page, "#slot-zed-app-slot-3[disabled]") |> Enum.count() == 1
+    assert text.("#slot-app-slot-3") =~ "on no branch"
+    assert LazyHTML.query(page, "#slot-zed-app-slot-3:not([disabled])") |> Enum.count() == 1
     assert text.("#project-worktrees-app") =~ "push-options"
   end
 end

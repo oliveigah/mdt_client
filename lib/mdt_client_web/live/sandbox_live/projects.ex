@@ -400,7 +400,7 @@ defmodule MDTClientWeb.SandboxLive.Projects do
           </p>
         <% true -> %>
           <p class="px-4 pt-0.5 text-[11px] leading-5 text-faint">
-            Fixed folders agents take one task at a time (mdt worktree new TASK), each task on a branch of its own. What git ignores stays between tasks, so builds stay warm. A slot is free again once its handoff is accepted or closed.
+            Fixed folders, made with the mirror, that agents take one task at a time (mdt worktree new TASK), each task on a branch of its own. What git ignores stays between tasks, so builds stay warm. A slot is free again once its handoff is accepted or closed.
           </p>
           <ul id={"project-slots-#{@project.name}"} class="mt-1 divide-y divide-line-soft">
             <li

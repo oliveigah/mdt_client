@@ -122,6 +122,7 @@ folders with it, and sits between it and the network.
 | 2026-11-13 | A handoff is accepted onto its target branch only where that branch is checked out with no pending work (no uncommitted change to a tracked file), even when there is no conflict. Supersedes choosing a worktree or a new one. |
 | 2026-11-13 | Every VM says which it is: MDT records an id for each VM it creates, the VM gets it at boot, and `mdt vm` and every login shell say whether this is the VM MDT runs. The Setup page warns when `~/.ssh/config` reaches the VM through anything but this identity's launcher. |
 | 2026-11-14 | Agents work in a few fixed worktree slots per project (3 by default), one task branch at a time, instead of a new worktree per task: builds stay warm and Zed paths stay the same. A slot is free again once its handoff is accepted or closed with nothing done since, or after `mdt worktree free`; a sent-back branch whose slot went to another task resumes in a free slot (`mdt worktree resume`). Slots are git-locked against Zed's worktree removal ([Worktree slots](#worktree-slots)). |
+| 2026-11-14 | A project's worktree slots are made with its mirror, on no branch at your default target branch, rather than when a task first takes them: each can be opened in Zed from the Projects page before any task. A slot whose folder went is made again at the mirror's next update. |
 
 <a id="first-release"></a>
 
@@ -405,10 +406,15 @@ Decided 2026-11-14: a new worktree per task left every build cold (empty
   `slot-N` (the project's setting, 3 by default, 1 to 9). A slot keeps its
   folder between tasks, so what git ignores stays warm, and its Zed line
   stays the same.
+- **Made with the mirror** (`Slots.ensure/2`, at each of its updates: when
+  you open the project, save its settings, start the VM, or commit to a
+  target branch): each slot whose folder isn't there is made on no branch
+  at `host/<default target>`, clean and locked, so it is free and opens in
+  Zed before any task. A folder that is there is left alone.
 - **One task branch at a time in each.** Handoffs go by branch, so a slot
   never holds one fixed branch: task 2 would overwrite task 1's handoff.
 - **Git keeps the state; MDT keeps none** (`Slots.look/4`): a slot is
-  *free* when it is absent (never made, or its folder is gone), on no
+  *free* when it is absent (not made yet, or its folder is gone), on no
   branch and clean, or on a branch whose latest handoff was accepted or
   closed at the commit it is on, clean. Uncommitted work makes any slot
   busy.
@@ -437,7 +443,8 @@ Decided 2026-11-14: a new worktree per task left every build cold (empty
   per-task worktrees vanished on 2026-11-14, folder and record gone, branch
   kept, each within a minute of a Zed window opening on the repository. A
   slot whose folder is deleted anyway counts as free; its record is cleared
-  and the folder made again when taken, and its branch stays.
+  and the folder made again when taken or at the mirror's next update, and
+  its branch stays.
 - **The Projects page** shows each slot (free, busy, uncommitted, or in
   the way) with its task branch and that branch's handoff, how many are
   free, and the project's other worktrees apart.

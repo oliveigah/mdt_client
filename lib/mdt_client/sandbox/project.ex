@@ -9,8 +9,9 @@ defmodule MDTClient.Sandbox.Project do
       branch as committed, kept current by MDT (`MDTClient.Sandbox.Mirror`)
       and view only;
     * **worktree slots** beside it, `/work/<name>.wt/slot-1` to
-      `slot-<slots>`: fixed folders agents take one task at a time, each
-      task on a branch of its own (`MDTClient.Sandbox.Slots`). Older
+      `slot-<slots>`, made with the mirror: fixed folders agents take one
+      task at a time, each task on a branch of its own
+      (`MDTClient.Sandbox.Slots`). Older
       projects may have per-task worktrees there too, which keep working.
       They all share the mirror's refs, so `host/<branch>` is your branch
       as it is now in every one of them, and an agent catches up with

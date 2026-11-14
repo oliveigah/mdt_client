@@ -145,8 +145,9 @@ defmodule MDTClient.Sandbox.Projects do
   end
 
   @doc """
-  Updates a project's mirror now, and keeps the handoffs' sizes and
-  conflicts current with your branches. Without a running VM there is
+  Updates a project's mirror now, makes its worktree slots that aren't
+  there yet, and keeps the handoffs' sizes and conflicts current with your
+  branches. Without a running VM there is
   nothing to update: `{:error, :vm_not_running}`, and the server mirrors
   it once the VM runs.
   """
@@ -159,8 +160,12 @@ defmodule MDTClient.Sandbox.Projects do
     end
   end
 
+  # The mirror, then any of its worktree slots not there yet.
   defp update_mirror(username, project, guest, vm) do
-    result = Mirror.run(project, guest)
+    result =
+      with {:ok, done} <- Mirror.run(project, guest),
+           :ok <- Slots.ensure(project, guest),
+           do: {:ok, done}
 
     entry =
       case result do

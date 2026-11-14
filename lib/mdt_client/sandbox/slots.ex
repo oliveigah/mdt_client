@@ -9,9 +9,14 @@ defmodule MDTClient.Sandbox.Slots do
   it in Zed stays the same. Each task still gets a branch of its own,
   since handoffs go by branch: a slot never holds one fixed branch.
 
+  The slots are made with the mirror (`ensure/2`, at each of its updates):
+  on no branch, at your default target branch, so each is there to open in
+  Zed before any task. One whose folder went is made again then.
+
   Git keeps every slot's state; MDT keeps none of its own:
 
-    * **absent** (never made, or its folder is gone): free, made when taken;
+    * **absent** (not made yet, or its folder is gone): free, made when
+      taken or at the mirror's next update;
     * **on no branch** (`mdt worktree free` detached it) and clean: free;
     * **on a task branch**: busy, until that branch's latest handoff is
       accepted or closed with nothing done in the slot since (no change,
@@ -126,6 +131,23 @@ defmodule MDTClient.Sandbox.Slots do
   fi
   """
 
+  # Makes each slot $4… whose folder isn't there, on no branch at $2, and
+  # locks it with the reason $3. A folder that is there is left alone,
+  # whatever it holds. A slot whose folder went loses its record first, as
+  # when it is taken.
+  @make """
+  set -e
+  m=$1 start=$2 lock=$3
+  shift 3
+  for p in "$@"; do
+    [ -e "$p" ] && continue
+    git -C "$m" worktree remove -f -f "$p" 2>/dev/null || true
+    mkdir -p "$(dirname "$p")"
+    git -C "$m" worktree add -q --detach "$p" "$start"
+    git -C "$m" worktree lock --reason "$lock" "$p"
+  done
+  """
+
   # Takes the slot $1 off its branch, at the same commit, unless it has
   # uncommitted work.
   @free """
@@ -145,6 +167,24 @@ defmodule MDTClient.Sandbox.Slots do
   @doc "The names of the project's slots, in order."
   @spec names(Project.t()) :: [String.t()]
   def names(%Project{slots: count}), do: Enum.map(1..count//1, &"slot-#{&1}")
+
+  @doc """
+  Makes the project's slots that aren't there, in the VM: on no branch, at
+  `host/<default target>`, so they are free and can be opened in Zed
+  before any task. Run once the mirror is up to date, which has that
+  branch.
+  """
+  @spec ensure(Project.t(), map()) :: :ok | {:error, String.t()}
+  def ensure(project, guest) do
+    mirror = Project.mirror_path(project, guest)
+    start = "refs/remotes/host/" <> project.default_target
+    paths = Enum.map(names(project), &path(project, guest, &1))
+
+    case guest.exec.(["sh", "-c", @make, "mdt-slots", mirror, start, @lock | paths]) do
+      {:ok, _} -> :ok
+      {:error, text} -> {:error, "MDT couldn't make the worktree slots: " <> Shown.text(text)}
+    end
+  end
 
   @doc """
   The project's slots and other worktrees as the VM has them now, each

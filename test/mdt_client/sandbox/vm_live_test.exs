@@ -453,6 +453,9 @@ defmodule MDTClient.Sandbox.VMLiveTest do
     assert {:ok, _} = Projects.open(username, repo)
     assert {:ok, here} = exec.("cd /work/#{project} && /mnt/mdt/bin/mdt project")
     assert here =~ "You are in the mirror"
+    # Its slots are made with it, on no branch, before any task.
+    assert here =~ "slot-3  free\n"
+    assert {:ok, ""} = exec.("git -C /work/#{project}.wt/slot-3 branch --show-current")
 
     assert {:ok, made} = exec.("cd /work/#{project} && /mnt/mdt/bin/mdt worktree new task")
     assert made =~ "zed ssh://mdt-sandbox/work/#{project}.wt/slot-1"
@@ -485,7 +488,8 @@ defmodule MDTClient.Sandbox.VMLiveTest do
              exec.("cd /work/#{project}.wt/slot-1 && /mnt/mdt/bin/mdt worktree free")
 
     assert freed =~ "Freed slot-1"
-    assert {:ok, "\n"} = exec.("git -C /work/#{project}.wt/slot-1 branch --show-current")
+    # On no branch, git prints nothing, not even a newline.
+    assert {:ok, ""} = exec.("git -C /work/#{project}.wt/slot-1 branch --show-current")
 
     # A command grant, asked through the real `mdt` in the VM. With none,
     # nothing can be asked; with a script of yours, the agent sends no text,
