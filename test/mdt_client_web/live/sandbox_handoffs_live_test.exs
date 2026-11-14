@@ -50,11 +50,14 @@ defmodule MDTClientWeb.SandboxHandoffsLiveTest do
     Map.merge(context, %{repo: repo, vm: vm})
   end
 
-  # An agent's handoff: a worktree with one commit, then `mdt handoff`.
+  # An agent's handoff: a task in a worktree slot with one commit, then
+  # `mdt handoff`.
   defp hand_off(username, vm, task, title, change) do
     mirror = Path.join(vm, "app")
-    {0, _} = Channel.answer("worktree", %{"cwd" => mirror, "name" => task}, username)
-    tree = Path.join(mirror <> ".wt", task)
+
+    {:ok, _project, %{path: tree}, :started, _onto, _where} =
+      Projects.take_slot(username, mirror, :new, task)
+
     change.(tree)
     git(tree, ["add", "--all"])
     git(tree, ["commit", "-q", "-m", "work on #{task}"])

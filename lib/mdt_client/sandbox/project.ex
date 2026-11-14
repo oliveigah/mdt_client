@@ -8,10 +8,13 @@ defmodule MDTClient.Sandbox.Project do
     * **the mirror**, its main worktree at `/work/<name>`: your target
       branch as committed, kept current by MDT (`MDTClient.Sandbox.Mirror`)
       and view only;
-    * **agent worktrees** beside it, under `/work/<name>.wt/`, one per
-      agent thread. They share the mirror's refs, so `host/<branch>` is
-      your branch as it is now in every one of them, and an agent catches
-      up with `git merge host`.
+    * **worktree slots** beside it, `/work/<name>.wt/slot-1` to
+      `slot-<slots>`: fixed folders agents take one task at a time, each
+      task on a branch of its own (`MDTClient.Sandbox.Slots`). Older
+      projects may have per-task worktrees there too, which keep working.
+      They all share the mirror's refs, so `host/<branch>` is your branch
+      as it is now in every one of them, and an agent catches up with
+      `git merge host`.
 
   Work comes back as handoffs (`MDTClient.Sandbox.Handoff`) to one of the
   project's `targets`, `default_target` unless the agent names another.
@@ -24,7 +27,9 @@ defmodule MDTClient.Sandbox.Project do
   alias MDTClient.Sandbox.{HostGit, Share, Shares}
 
   @enforce_keys [:name, :path, :default_target]
-  defstruct [:name, :path, :default_target, :added_at, targets: [], accept: :commits]
+  defstruct [:name, :path, :default_target, :added_at, targets: [], accept: :commits, slots: 3]
+
+  @max_slots 9
 
   @type accept :: :commits | :changes
 
@@ -34,6 +39,7 @@ defmodule MDTClient.Sandbox.Project do
           default_target: String.t(),
           targets: [String.t()],
           accept: accept(),
+          slots: pos_integer(),
           added_at: DateTime.t() | nil
         }
 
@@ -47,6 +53,7 @@ defmodule MDTClient.Sandbox.Project do
           | :no_targets
           | {:not_a_branch, String.t()}
           | :default_not_a_target
+          | :bad_slots
 
   @doc """
   The project for the repository `path` is in, not one of `existing`. Its
@@ -150,8 +157,9 @@ defmodule MDTClient.Sandbox.Project do
 
   @doc """
   The project with the settings a form sent: `targets` (branch names),
-  `default_target` and `accept` (`"commits"` or `"changes"`), checked
-  against the repository's branches. A field not sent stays as it is.
+  `default_target`, `accept` (`"commits"` or `"changes"`) and `slots`
+  (how many worktree slots, 1 to 9), checked against the repository's
+  branches. A field not sent stays as it is.
   """
   @spec update(t(), map()) :: {:ok, t()} | {:error, error()}
   def update(%__MODULE__{} = project, attrs) do
@@ -166,13 +174,42 @@ defmodule MDTClient.Sandbox.Project do
         _ -> project.accept
       end
 
+    slots =
+      case Map.get(attrs, "slots", project.slots) do
+        n when is_integer(n) -> n
+        text when is_binary(text) -> parse_count(text)
+        _ -> nil
+      end
+
     cond do
-      targets == [] -> {:error, :no_targets}
-      missing = Enum.find(targets, &(&1 not in branches)) -> {:error, {:not_a_branch, missing}}
-      default not in targets -> {:error, :default_not_a_target}
-      true -> {:ok, %{project | targets: targets, default_target: default, accept: accept}}
+      targets == [] ->
+        {:error, :no_targets}
+
+      missing = Enum.find(targets, &(&1 not in branches)) ->
+        {:error, {:not_a_branch, missing}}
+
+      default not in targets ->
+        {:error, :default_not_a_target}
+
+      slots not in 1..@max_slots//1 ->
+        {:error, :bad_slots}
+
+      true ->
+        {:ok,
+         %{project | targets: targets, default_target: default, accept: accept, slots: slots}}
     end
   end
+
+  defp parse_count(text) do
+    case Integer.parse(String.trim(text)) do
+      {n, ""} -> n
+      _ -> nil
+    end
+  end
+
+  @doc "A project as saved by an older MDT, with the fields added since at their defaults."
+  @spec upgrade(t() | map()) :: t()
+  def upgrade(project), do: struct(__MODULE__, Map.drop(Map.from_struct(project), [:__struct__]))
 
   @doc "Your repository's local branches, by name."
   @spec branches(t() | Path.t()) :: [String.t()]
@@ -189,7 +226,7 @@ defmodule MDTClient.Sandbox.Project do
   @spec mirror_path(t(), %{root: Path.t()}) :: Path.t()
   def mirror_path(%__MODULE__{name: name}, guest), do: Path.join(guest.root, name)
 
-  @doc "Where agent worktrees go in the VM."
+  @doc "Where worktree slots (and older per-task worktrees) go in the VM."
   @spec worktrees_path(t(), %{root: Path.t()}) :: Path.t()
   def worktrees_path(project, guest), do: mirror_path(project, guest) <> ".wt"
 
@@ -220,4 +257,5 @@ defmodule MDTClient.Sandbox.Project do
   def explain(:no_targets), do: "Choose at least one target branch."
   def explain({:not_a_branch, name}), do: "Your repository has no branch #{name}."
   def explain(:default_not_a_target), do: "The default must be one of the target branches."
+  def explain(:bad_slots), do: "A project has 1 to #{@max_slots} worktree slots."
 end

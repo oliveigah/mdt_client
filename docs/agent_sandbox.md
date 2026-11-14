@@ -121,6 +121,7 @@ folders with it, and sits between it and the network.
 | 2026-11-13 | Handoffs come only from agent worktrees of a project, onto one of its target branches. `mdt handoff` refuses work that doesn't merge with that branch as it is now. |
 | 2026-11-13 | A handoff is accepted onto its target branch only where that branch is checked out with no pending work (no uncommitted change to a tracked file), even when there is no conflict. Supersedes choosing a worktree or a new one. |
 | 2026-11-13 | Every VM says which it is: MDT records an id for each VM it creates, the VM gets it at boot, and `mdt vm` and every login shell say whether this is the VM MDT runs. The Setup page warns when `~/.ssh/config` reaches the VM through anything but this identity's launcher. |
+| 2026-11-14 | Agents work in a few fixed worktree slots per project (3 by default), one task branch at a time, instead of a new worktree per task: builds stay warm and Zed paths stay the same. A slot is free again once its handoff is accepted or closed with nothing done since, or after `mdt worktree free`; a sent-back branch whose slot went to another task resumes in a free slot (`mdt worktree resume`). Slots are git-locked against Zed's worktree removal ([Worktree slots](#worktree-slots)). |
 
 <a id="first-release"></a>
 
@@ -323,7 +324,8 @@ Your repository is upstream; the VM's worktrees are contributors.
 | **Project**        | A git repository of yours that MDT mirrors into the VM, with its settings on the Projects page. One per repository; submodules are left out for now. |
 | **Target branch**  | A branch of yours handoffs go onto. A project has one or more, and a default.                                                  |
 | **Mirror**         | The project's main worktree in the VM, `/work/<name>`: your default target branch as committed, kept current by MDT, view only. The sync point. |
-| **Agent worktree** | Any other worktree of the project in the VM, `/work/<name>.wt/<task>`, one per agent thread (`mdt worktree new TASK`).         |
+| **Worktree slot**  | One of a few fixed worktrees of the project in the VM, `/work/<name>.wt/slot-N` (3 by default), holding one task branch at a time (`mdt worktree new TASK`). |
+| **Agent worktree** | Any worktree of the project in the VM but the mirror: its slots, and per-task ones made before slots (`/work/<name>.wt/<task>`), which keep working. |
 | **Handoff**        | Finished work from an agent worktree, offered to a target branch (`mdt handoff`). Handing off again on the same branch makes a revision. |
 | **Catch up**       | The agent merging your branch, as the mirror has it, into its worktree: `git merge host`.                                      |
 | **Accept**         | Landing a handoff on its target branch, as the agent's commits or as uncommitted changes.                                      |
@@ -333,8 +335,9 @@ Your repository is upstream; the VM's worktrees are contributors.
 your repository (upstream)                     the VM, /work
   main ── each commit, ~2 s ──▶  mirror  /work/app            your main as committed, view only
                                   ├── host/main, host/develop  every target branch, in every worktree
-                                  ├── /work/app.wt/fix-login   an agent worktree: one thread works here
-                                  └── /work/app.wt/cart        another
+                                  ├── /work/app.wt/slot-1      a worktree slot: one task branch (fix-login) at a time
+                                  ├── /work/app.wt/slot-2      another (cart)
+                                  └── /work/app.wt/slot-3      free
   main ◀── accept ── handoff #7  ◀── mdt handoff (after git merge host)
 ```
 
@@ -364,12 +367,13 @@ your repository (upstream)                     the VM, /work
   keeping its mirror current, and you can forget its settings. Its mirror
   and worktrees stay in the VM.
 - **Settings,** once opened: the target branches (checked out or not), the
-  default one (the branch checked out when it was first opened), and
-  whether handoffs are accepted as commits or as changes by default.
+  default one (the branch checked out when it was first opened), whether
+  handoffs are accepted as commits or as changes by default, and how many
+  worktree slots it has.
 - **The page shows,** for an opened project, its mirror (on which branch,
   at which commit, when; rescues and failures), its open handoffs and, in
-  full, its settings and agent worktrees, each with its handoff and an
-  Open in Zed button.
+  full, its settings, its worktree slots and its other worktrees, each
+  with its branch's handoff and an Open in Zed button.
 
 #### The mirror
 
@@ -390,13 +394,57 @@ your repository (upstream)                     the VM, /work
   in the VM and the mirror is put back exactly on your branch. The rescue
   is in the activity log and on the project.
 
-#### Agent worktrees
+<a id="worktree-slots"></a>
 
-- `mdt worktree new TASK [--onto BRANCH]` makes `/work/<name>.wt/<task>`
-  on a new branch `task` from `host/<branch>`, and prints the Zed line for
-  you. The agent tells you to open it, and its thread continues there.
-- They share the mirror's refs, so `host/<branch>` is your branch as it is
-  now in every one of them, and catching up is a local merge.
+#### Worktree slots
+
+Decided 2026-11-14: a new worktree per task left every build cold (empty
+`deps` and `_build`) and a new Zed path each time.
+
+- **A few fixed worktrees per project,** `/work/<name>.wt/slot-1` to
+  `slot-N` (the project's setting, 3 by default, 1 to 9). A slot keeps its
+  folder between tasks, so what git ignores stays warm, and its Zed line
+  stays the same.
+- **One task branch at a time in each.** Handoffs go by branch, so a slot
+  never holds one fixed branch: task 2 would overwrite task 1's handoff.
+- **Git keeps the state; MDT keeps none** (`Slots.look/4`): a slot is
+  *free* when it is absent (never made, or its folder is gone), on no
+  branch and clean, or on a branch whose latest handoff was accepted or
+  closed at the commit it is on, clean. Uncommitted work makes any slot
+  busy.
+- **MDT frees slots on its own, without touching them:** a slot counts as
+  free as soon as its handoff is accepted or closed with nothing done in it
+  since, and the next task takes it then. Nothing is written in the VM at
+  accept time: it may be stopped, and the thread may still be open there.
+- `mdt worktree new TASK [--onto BRANCH] [--slot SLOT]` starts the new
+  branch `TASK` from `host/<branch>` in the slot the agent is in when it is
+  free (its thread goes on there), else the first free one, or the slot
+  named. A busy or dirty slot is refused, with what it holds; with none
+  free, the agent is told what each holds. It prints the Zed line.
+- `mdt worktree free [SLOT]` takes a slot off its branch (detached at the
+  same commit; the branch stays with its commits), so the next task can
+  take it. Refused with uncommitted work.
+- `mdt worktree resume BRANCH [--slot SLOT]`: **a handoff sent back after
+  its slot went to another task resumes in a free slot.** A busy slot is
+  never switched under the thread working in it; the branch holds
+  everything committed, so it continues anywhere. `mdt handoffs` says where
+  each unfinished handoff's branch is, or that it is in no worktree and
+  how to resume it. A new revision records the slot it came from.
+- **Locked** (`git worktree lock`): `git worktree remove` and `prune`
+  leave a slot alone unless forced twice. Zed removes worktrees with
+  `git worktree remove` and at most one `--force` (its worktree picker's
+  delete, its thread archive, a failed creation's rollback): that is how
+  per-task worktrees vanished on 2026-11-14, folder and record gone, branch
+  kept, each within a minute of a Zed window opening on the repository. A
+  slot whose folder is deleted anyway counts as free; its record is cleared
+  and the folder made again when taken, and its branch stays.
+- **The Projects page** shows each slot (free, busy, uncommitted, or in
+  the way) with its task branch and that branch's handoff, how many are
+  free, and the project's other worktrees apart.
+- They all share the mirror's refs, so `host/<branch>` is your branch as
+  it is now in every one of them, and catching up is a local merge.
+- **Per-task worktrees made before slots** keep working: listed apart,
+  opened in Zed, handed off from. `mdt worktree new` makes no more.
 
 #### Handoffs
 
@@ -751,7 +799,7 @@ VM kept is still where it was, in the identity's sandbox folder
 - **Not built yet for handoffs:** a desktop notification when one
   arrives, a folder picker on the Projects page, handoffs in MDT's Git
   tool, cleaning up a store whose repository is gone, and removing an
-  agent worktree from the page.
+  agent worktree, or freeing a slot, from the page.
 - **Submodules and LFS files** in a project.
 - **A large repository.** At the pipe's speed, 1 GiB would take about
   17 s to go in; not tried.

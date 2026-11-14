@@ -119,7 +119,9 @@ defmodule MDTClient.Sandbox.Handoffs do
     }
   end
 
-  defp build(%Handoff{} = handoff, _id, words, _project, onto, _source, head) do
+  # A new revision may come from another folder than the last: its branch
+  # moved to another worktree slot.
+  defp build(%Handoff{} = handoff, _id, words, _project, onto, source, head) do
     moved? = handoff.head != head
 
     %{
@@ -130,6 +132,7 @@ defmodule MDTClient.Sandbox.Handoffs do
         thread: words.thread || handoff.thread,
         thread_id: words.thread_id || handoff.thread_id,
         onto: onto,
+        source: source,
         head: head,
         status: :open,
         updated_at: now(),
@@ -158,15 +161,18 @@ defmodule MDTClient.Sandbox.Handoffs do
 
   @doc """
   The handoffs of the project `cwd` is in, in the VM, newest first, each
-  with what MDT can say of it now, and the folder `cwd` is in.
+  with what MDT can say of it now; the folder `cwd` is in; and the
+  project's worktrees as the VM has them now (`Projects.place/2`), to say
+  where each handoff's branch is.
   """
   @spec for_agent(String.t(), String.t()) ::
-          {:ok, Project.t(), [{Handoff.t(), map() | nil}], :mirror | {:worktree, String.t()}}
+          {:ok, Project.t(), [{Handoff.t(), map() | nil}], :mirror | {:worktree, String.t()},
+           MDTClient.Sandbox.Slots.look() | nil}
           | {:error, error()}
   def for_agent(username, cwd) do
     %{handoffs: handoffs, dir: dir} = Server.call(username, :projects)
 
-    with {:ok, project, where, _guest} <- Projects.locate(username, cwd) do
+    with {:ok, project, where, look} <- Projects.place(username, cwd) do
       mine =
         handoffs
         |> Enum.filter(&(&1.project == project.name))
@@ -179,7 +185,7 @@ defmodule MDTClient.Sandbox.Handoffs do
           {handoff, facts}
         end)
 
-      {:ok, project, mine, where}
+      {:ok, project, mine, where, look}
     end
   end
 

@@ -54,10 +54,10 @@ defmodule MDTClient.Sandbox.Channel do
     Handoffs,
     HostCommand,
     Instructions,
-    Project,
     Projects,
     Server,
     Shown,
+    Slots,
     Sockets,
     Zed
   }
@@ -246,7 +246,7 @@ defmodule MDTClient.Sandbox.Channel do
     )
   end
 
-  defp handoff_words({handoff, facts}, where) do
+  defp handoff_words({handoff, facts}, where, look) do
     state =
       case handoff.status do
         :open -> "open, waiting for the user"
@@ -255,17 +255,45 @@ defmodule MDTClient.Sandbox.Channel do
         :closed -> "closed by the user"
       end
 
-    yours = if where == {:worktree, handoff.source.top}, do: " (this worktree)", else: ""
+    held = look && Enum.find(look.worktrees, &(&1.branch == handoff.source.branch))
+    yours = if held && where == {:worktree, held.path}, do: " (this branch)", else: ""
 
     lines =
       [
         "##{handoff.id}  #{state}#{yours}",
         "  #{handoff.title}",
-        "  #{handoff.source.branch} onto #{handoff.onto}, from #{handoff.source.top}; revision #{handoff.revision}"
-      ] ++ fact_lines(handoff, facts) ++ note_lines(handoff)
+        "  #{handoff.source.branch} onto #{handoff.onto}; revision #{handoff.revision}"
+      ] ++
+        place_lines(handoff, look, held) ++ fact_lines(handoff, facts) ++ note_lines(handoff)
 
     Enum.join(lines, "\n")
   end
+
+  # Where an unfinished handoff's branch is now, so its thread finds it.
+  defp place_lines(_handoff, nil, _held), do: []
+
+  defp place_lines(%{status: status} = handoff, look, held)
+       when status in [:open, :sent_back] do
+    case held do
+      nil ->
+        [
+          "  Its branch is in no worktree now. To continue it: mdt worktree resume #{handoff.source.branch}"
+        ]
+
+      %{missing?: true} ->
+        [
+          "  Its worktree's folder is gone; the branch stays. To continue it: mdt worktree resume #{handoff.source.branch}"
+        ]
+
+      %{path: path} ->
+        case Slots.slot_at(look, path) do
+          %{name: name} -> ["  In #{name}, #{path}."]
+          nil -> ["  In #{path}."]
+        end
+    end
+  end
+
+  defp place_lines(_handoff, _look, _held), do: []
 
   defp fact_lines(_handoff, nil), do: []
 
@@ -302,15 +330,22 @@ defmodule MDTClient.Sandbox.Channel do
 
   defp note_lines(_handoff), do: []
 
-  defp project_words(project, where, guest) do
-    mirror = Project.mirror_path(project, guest)
+  defp project_words(project, where, look) do
+    mirror = if look, do: look.mirror, else: "/work/#{project.name}"
+    here = where != :mirror && look && Slots.slot_at(look, elem(where, 1))
 
     place =
-      case where do
-        :mirror ->
-          "You are in the mirror, #{mirror}: the user's #{project.default_target} as they committed it, kept current by MDT. It is view only: read and run things here, but change nothing. To change code, stop and ask the user to start your thread again in a worktree of its own: mdt worktree new TASK makes one."
+      case {where, here} do
+        {:mirror, _} ->
+          "You are in the mirror, #{mirror}: the user's #{project.default_target} as they committed it, kept current by MDT. It is view only: read and run things here, but change nothing. To change code, stop: mdt worktree new TASK starts your task in a worktree slot, and you ask the user to start your thread again there."
 
-        {:worktree, top} ->
+        {_, %{branch: nil} = slot} ->
+          "You are in #{slot.name}, #{slot.path}, on no branch: #{Slots.words(slot)}. Start your task here with mdt worktree new TASK."
+
+        {_, %{} = slot} ->
+          "You are in #{slot.name}, #{slot.path}, on the task branch #{slot.branch}: yours to change while it holds your task. Hand your work off from here with mdt handoff."
+
+        {{:worktree, top}, _} ->
           "You are in the worktree #{top}, yours to change. Hand your work off from here with mdt handoff."
       end
 
@@ -329,11 +364,80 @@ defmodule MDTClient.Sandbox.Channel do
         "Project #{project.name}.",
         place,
         targets,
-        "host/BRANCH is each target branch as the user committed it, in every worktree of the project; host is #{project.default_target}.",
-        "Before handing off, catch up: git merge host, resolve, commit. mdt handoff refuses work that doesn't merge."
-      ],
+        "host/BRANCH is each target branch as the user committed it, in every worktree of the project; host is #{project.default_target}."
+      ] ++
+        slot_lines(look, here) ++
+        [
+          "Before handing off, catch up: git merge host, resolve, commit. mdt handoff refuses work that doesn't merge."
+        ],
       "\n"
     )
+  end
+
+  defp slot_lines(nil, _here), do: []
+
+  defp slot_lines(look, here) do
+    width = look.slots |> Enum.map(&String.length(&1.name)) |> Enum.max(fn -> 0 end)
+
+    [
+      "Worktree slots, each holding one task branch at a time (what git ignores stays between tasks):"
+    ] ++
+      Enum.map(look.slots, fn slot ->
+        mark = if here && slot.path == here.path, do: "  (here)", else: ""
+        "  #{String.pad_trailing(slot.name, width)}  #{Slots.words(slot)}#{mark}"
+      end) ++
+      [
+        "Start a task: mdt worktree new TASK. Free the slot of a finished task: mdt worktree free. Continue a sent-back branch: mdt worktree resume BRANCH."
+      ]
+  end
+
+  defp taken_words(slot, outcome, onto, where) do
+    here? = where == {:worktree, slot.path}
+
+    what =
+      case outcome do
+        :started ->
+          "Started the task #{slot.branch} in #{slot.name}, #{slot.path}: a new branch from the user's #{onto}. What git ignores there (deps, _build, …) stays from the slot's last task."
+
+        :resumed ->
+          "Put the branch #{slot.branch}, as it was, in #{slot.name}, #{slot.path}. Catch up there (git merge host) before handing off again."
+
+        :already ->
+          "#{slot.branch} is in #{slot.name} already, #{slot.path}."
+      end
+
+    go =
+      if here?,
+        do: ["You are in it: continue here. In Zed: #{Zed.command(slot.path)}"],
+        else: [
+          "Tell the user to open it and start the thread there. In Zed: #{Zed.command(slot.path)}",
+          "or from MDT's Projects page."
+        ]
+
+    Enum.join([what | go], "\n")
+  end
+
+  defp freed_words(%{state: state} = slot) when state in [:absent, :missing],
+    do: "#{slot.name} is free already: #{Slots.words(slot)}."
+
+  defp freed_words(%{branch: nil} = slot),
+    do: "#{slot.name} is free already: the next mdt worktree new can take it."
+
+  defp freed_words(slot) do
+    after_words =
+      case slot.handoff do
+        %{status: status, id: id} when status in [:open, :sent_back] ->
+          " Its handoff ##{id} is #{Slots.status_word(status)}: if the user sends it back, continue it with mdt worktree resume #{slot.branch}."
+
+        nil ->
+          " It has no handoff."
+
+        _done ->
+          ""
+      end
+
+    "Freed #{slot.name}, #{slot.path}: it is on no branch now, and the next mdt worktree new can take it. The branch #{slot.branch} stays, with its commits." <>
+      after_words
   end
 
   defp count(1, word), do: "1 #{word}"
@@ -357,24 +461,31 @@ defmodule MDTClient.Sandbox.Channel do
   def answer("host", _ask, username), do: {0, Server.call(username, :host_text)}
 
   def answer("project", ask, username) do
-    case Projects.locate(username, ask["cwd"]) do
-      {:ok, project, where, guest} -> {0, project_words(project, where, guest)}
+    case Projects.place(username, ask["cwd"]) do
+      {:ok, project, where, look} -> {0, project_words(project, where, look)}
+      {:error, reason} -> {1, Projects.explain(reason)}
+    end
+  end
+
+  # A worktree slot: taken for a new task (`new`, also an ask without an
+  # action, as older mdt commands send), for a branch to continue
+  # (`resume`), or freed (`free`).
+  def answer("worktree", %{"action" => "free"} = ask, username) do
+    case Projects.free_slot(username, ask["cwd"], ask["slot"]) do
+      {:ok, _project, slot} -> {0, freed_words(slot)}
       {:error, reason} -> {1, Projects.explain(reason)}
     end
   end
 
   def answer("worktree", ask, username) do
-    case Projects.new_worktree(username, ask["cwd"], ask["name"], ask["onto"]) do
-      {:ok, _project, path, onto} ->
-        {0,
-         Enum.join(
-           [
-             "Made the worktree #{path}, on the new branch #{ask["name"]}, from the user's #{onto}.",
-             "Tell the user to open it and start the thread there. In Zed: #{Zed.command(path)}",
-             "or from MDT's Projects page."
-           ],
-           "\n"
-         )}
+    how = if ask["action"] == "resume", do: :resume, else: :new
+
+    case Projects.take_slot(username, ask["cwd"], how, ask["name"],
+           onto: ask["onto"],
+           slot: ask["slot"]
+         ) do
+      {:ok, _project, slot, outcome, onto, where} ->
+        {0, taken_words(slot, outcome, onto, where)}
 
       {:error, reason} ->
         {1, Projects.explain(reason)}
@@ -400,11 +511,11 @@ defmodule MDTClient.Sandbox.Channel do
 
   def answer("handoffs", ask, username) do
     case Handoffs.for_agent(username, ask["cwd"]) do
-      {:ok, project, [], _where} ->
+      {:ok, project, [], _where, _look} ->
         {0, "No handoffs in #{project.name} yet."}
 
-      {:ok, _project, handoffs, where} ->
-        {0, Enum.map_join(handoffs, "\n\n", &handoff_words(&1, where))}
+      {:ok, _project, handoffs, where, look} ->
+        {0, Enum.map_join(handoffs, "\n\n", &handoff_words(&1, where, look))}
 
       {:error, reason} ->
         {1, Projects.explain(reason)}

@@ -1448,8 +1448,8 @@ defmodule MDTClientWeb.SandboxLive do
     assign_project_detail(assign(socket, :project_overview, overview), nil)
   end
 
-  # The settings and agent worktrees of the project shown in full. Its
-  # worktrees are read from the VM, so only for that one, and only then.
+  # The settings and worktree slots of the project shown in full. Its
+  # slots are read from the VM, so only for that one, and only then.
   defp assign_project_detail(socket, error) do
     path = socket.assigns.project_open
 
@@ -1466,8 +1466,8 @@ defmodule MDTClientWeb.SandboxLive do
       project ->
         worktrees =
           if socket.assigns.vm.status == :running,
-            do: ok(Projects.worktrees(socket.assigns.username, project.name)) || [],
-            else: []
+            do: Projects.slots(socket.assigns.username, project.name),
+            else: nil
 
         socket
         |> assign(:project_settings, %{

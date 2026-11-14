@@ -29,9 +29,20 @@ are in one and what its rules are.
   moves. If your thread is in the mirror and you need to change code,
   stop. Run `mdt worktree new TASK`, give the user the line it prints, and
   ask them to start your thread again there.
-- **Your worktree, `/work/NAME.wt/TASK`, is yours.** One per thread, on a
-  branch of its own, made by `mdt worktree new TASK`. Work, build and test
-  there, and commit as you go.
+- **Tasks run in worktree slots, `/work/NAME.wt/slot-1` to `slot-3`.**
+  `mdt worktree new TASK` starts a new branch TASK from `host` in a free
+  slot: the one you are in when it is free, else the first free one. What
+  git ignores (`deps`, `_build`, `node_modules`) stays there from the
+  slot's last task, so builds start warm. Work, build and test there, and
+  commit as you go. The slot is yours while it holds your branch: after a
+  pause, check `git branch --show-current` before you go on.
+- **A slot is free again** once its handoff is accepted or closed, with
+  nothing done in it since; MDT then gives it to the next task. To free it
+  sooner, when its task is done or dropped: `mdt worktree free` (refused
+  with uncommitted work; the branch stays). `mdt project` lists the slots.
+- **A handoff sent back after its slot went to another task:** run
+  `mdt worktree resume BRANCH`. It puts your branch in a free slot; never
+  switch another task's slot. Give the user the line it prints.
 - **`host/BRANCH` is the user's branch, live,** in every worktree of the
   project; `host` alone is the default target branch. Catch up with it by
   merging, not rebasing: `git merge host`.

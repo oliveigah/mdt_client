@@ -182,7 +182,7 @@ defmodule MDTClient.Sandbox.Server do
       builds: builds,
       # A copy whose file is gone can't be brought back: it isn't listed.
       snapshots: Enum.filter(saved[:snapshots] || [], &Disks.snapshot?(folders, &1)),
-      projects: saved[:projects] || [],
+      projects: Enum.map(saved[:projects] || [], &Project.upgrade/1),
       # project name => what its last update did; kept in memory only.
       mirror: %{},
       handoffs: saved[:handoffs] || [],

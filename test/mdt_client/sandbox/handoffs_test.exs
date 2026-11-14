@@ -62,11 +62,12 @@ defmodule MDTClient.Sandbox.HandoffsTest do
     %{username: username, repo: repo, vm: vm, base: base, mirror: Path.join(vm, "app")}
   end
 
-  # A project, and an agent worktree of it made the way an agent makes one.
+  # A project, and a task started in its first worktree slot the way an
+  # agent starts one.
   defp project_with_worktree(%{username: username, repo: repo, mirror: mirror}, task \\ "fix") do
     {:ok, project} = Projects.open(username, repo)
     {0, _} = Channel.answer("worktree", %{"cwd" => mirror, "name" => task}, username)
-    {project, Path.join(mirror <> ".wt", task)}
+    {project, Path.join(mirror <> ".wt", "slot-1")}
   end
 
   defp ask(cwd, extra \\ %{}),
@@ -254,7 +255,7 @@ defmodule MDTClient.Sandbox.HandoffsTest do
   end
 
   describe "an agent" do
-    test "makes a worktree of its own, and is told where it is", %{
+    test "starts its task in a worktree slot, and is told where it is", %{
       username: username,
       repo: repo,
       mirror: mirror
@@ -262,13 +263,18 @@ defmodule MDTClient.Sandbox.HandoffsTest do
       {:ok, _} = Projects.open(username, repo)
 
       assert {0, made} = Channel.answer("worktree", %{"cwd" => mirror, "name" => "fix"}, username)
-      tree = Path.join(mirror <> ".wt", "fix")
-      assert made =~ "Made the worktree #{tree}, on the new branch fix, from the user's master."
+      tree = Path.join(mirror <> ".wt", "slot-1")
+
+      assert made =~
+               "Started the task fix in slot-1, #{tree}: a new branch from the user's master."
+
       assert made =~ "zed ssh://mdt-sandbox#{tree}"
       assert git(tree, ["branch", "--show-current"]) == "fix\n"
 
-      assert {1, taken} = Channel.answer("worktree", %{"cwd" => tree, "name" => "fix"}, username)
-      assert taken =~ "called fix already"
+      assert {1, taken} =
+               Channel.answer("worktree", %{"cwd" => mirror, "name" => "fix"}, username)
+
+      assert taken =~ "There is a branch fix already" and taken =~ "mdt worktree resume fix"
 
       assert {1, bad} =
                Channel.answer(
@@ -279,11 +285,22 @@ defmodule MDTClient.Sandbox.HandoffsTest do
 
       assert bad =~ "isn't a target branch"
 
+      assert {1, bad_name} =
+               Channel.answer("worktree", %{"cwd" => mirror, "name" => "-x"}, username)
+
+      assert bad_name =~ "can't be a branch name"
+
       assert {0, here} = Channel.answer("project", %{"cwd" => mirror}, username)
       assert here =~ "You are in the mirror" and here =~ "view only"
+      assert here =~ "slot-1  fix, no handoff yet"
+      assert here =~ "slot-3  free, not made yet"
+
       assert {0, there} = Channel.answer("project", %{"cwd" => tree}, username)
-      assert there =~ "You are in the worktree #{tree}"
-      assert {:ok, [%{path: ^tree, branch: "fix"}]} = Projects.worktrees(username, "app")
+      assert there =~ "You are in slot-1, #{tree}, on the task branch fix"
+      assert there =~ "slot-1  fix, no handoff yet  (here)"
+
+      assert {:ok, %{slots: [%{name: "slot-1", branch: "fix", free?: false}, _, _], others: []}} =
+               Projects.slots(username, "app")
 
       assert {1, nowhere} = Channel.answer("project", %{"cwd" => "/"}, username)
       assert nowhere =~ "isn't in a project"
@@ -337,7 +354,7 @@ defmodule MDTClient.Sandbox.HandoffsTest do
       assert [%Handoff{revision: 2, title: "The fix"}] = handoffs(username)
 
       assert {0, listed} = Channel.answer("handoffs", %{"cwd" => tree}, username)
-      assert listed =~ "#1  open, waiting for the user (this worktree)"
+      assert listed =~ "#1  open, waiting for the user (this branch)"
       assert listed =~ "merges cleanly"
     end
 
@@ -471,6 +488,236 @@ defmodule MDTClient.Sandbox.HandoffsTest do
       assert {:ok, %Handoff{status: :closed}} = Handoffs.close(username, 1)
       assert Handoffs.accept(username, 1, :commits) == {:error, :not_open}
       assert {:ok, %Handoff{status: :open}} = Handoffs.reopen(username, 1)
+    end
+  end
+
+  describe "worktree slots" do
+    setup %{username: username, repo: repo} do
+      # The build's output, which git ignores, is what a slot keeps warm.
+      commit(repo, [{".gitignore", "_build/\n"}], "ignore the build")
+      {:ok, _} = Projects.open(username, repo)
+      :ok
+    end
+
+    defp slot(mirror, n), do: Path.join(mirror <> ".wt", "slot-#{n}")
+
+    defp worktree(username, cwd, action, fields \\ %{}),
+      do:
+        Channel.answer(
+          "worktree",
+          Map.merge(%{"cwd" => cwd, "action" => action}, fields),
+          username
+        )
+
+    defp states(username) do
+      {:ok, %{slots: slots}} = Projects.slots(username, "app")
+      Enum.map(slots, &{&1.name, &1.branch, &1.free?})
+    end
+
+    test "a task gets its own branch in a slot that keeps what git ignores", %{
+      username: username,
+      repo: repo,
+      mirror: mirror
+    } do
+      {0, _} = worktree(username, mirror, "new", %{"name" => "fix"})
+      one = slot(mirror, 1)
+      File.mkdir_p!(Path.join(one, "_build"))
+      File.write!(Path.join(one, "_build/app.beam"), "warm\n")
+      commit(one, [{"a.txt", "one\ntwo\nthree\nfour\n"}], "the fix")
+      {0, _} = Channel.answer("handoff", ask(one), username)
+
+      # Busy while its handoff is open: the next task takes the next slot.
+      {0, second} = worktree(username, mirror, "new", %{"name" => "cart"})
+      assert second =~ "in slot-2, #{slot(mirror, 2)}"
+
+      assert [{"slot-1", "fix", false}, {"slot-2", "cart", false}, {"slot-3", nil, true}] =
+               states(username)
+
+      # Accepted: slot-1 is free without anyone touching it, and the next
+      # task takes it, on a new branch from your branch as it is now.
+      {:ok, _} = Handoffs.accept(username, 1, :commits)
+      {:ok, _} = Projects.mirror(username, "app")
+      assert [{"slot-1", "fix", true} | _] = states(username)
+
+      {0, third} = worktree(username, mirror, "new", %{"name" => "docs"})
+      assert third =~ "Started the task docs in slot-1"
+      assert git(one, ["branch", "--show-current"]) == "docs\n"
+      assert sha(one, "HEAD") == sha(repo, "master")
+      assert File.read!(Path.join(one, "_build/app.beam")) == "warm\n"
+
+      # The handoff's branch stays, with its commits.
+      assert git(mirror, ["log", "-1", "--format=%s", "fix"]) == "the fix\n"
+    end
+
+    test "a slot is locked, so git worktree remove leaves it; one whose folder went is made again",
+         %{username: username, mirror: mirror} do
+      {0, _} = worktree(username, mirror, "new", %{"name" => "fix"})
+      one = slot(mirror, 1)
+
+      assert git(mirror, ["worktree", "list", "--porcelain"]) =~ "locked MDT worktree slot"
+
+      # What Zed's worktree picker and thread archive run.
+      assert {_, status} =
+               System.cmd("git", ["-C", mirror, "worktree", "remove", "--force", one],
+                 env: Guest.git_env(),
+                 stderr_to_stdout: true
+               )
+
+      assert status != 0
+      assert File.dir?(one)
+
+      # Its folder deleted anyway: the slot is free, its branch stays, and
+      # the next task makes the folder again.
+      File.rm_rf!(one)
+      assert [{"slot-1", "fix", true} | _] = states(username)
+      assert {0, free} = worktree(username, mirror, "free", %{"slot" => "1"})
+      assert free =~ "slot-1 is free already: free, its folder is gone (the branch fix stays)"
+      {0, made} = worktree(username, mirror, "new", %{"name" => "again"})
+      assert made =~ "in slot-1"
+      assert git(one, ["branch", "--show-current"]) == "again\n"
+      assert git(mirror, ["branch", "--list", "fix"]) =~ "fix"
+    end
+
+    test "uncommitted work is never switched away", %{username: username, mirror: mirror} do
+      {0, _} = worktree(username, mirror, "new", %{"name" => "fix"})
+      one = slot(mirror, 1)
+      File.write!(Path.join(one, "notes.txt"), "not committed\n")
+
+      assert {1, refused} = worktree(username, one, "free")
+      assert refused =~ "slot-1 has uncommitted work (fix)"
+
+      assert {1, busy} = worktree(username, mirror, "new", %{"name" => "cart", "slot" => "1"})
+      assert busy =~ "slot-1 has uncommitted work"
+
+      assert {1, nope} = worktree(username, mirror, "new", %{"name" => "cart", "slot" => "7"})
+      assert nope =~ "There is no slot slot-7: the project has 3"
+
+      assert git(one, ["branch", "--show-current"]) == "fix\n"
+      assert File.read!(Path.join(one, "notes.txt")) == "not committed\n"
+    end
+
+    test "with none free, the agent is told what each holds", %{
+      username: username,
+      mirror: mirror
+    } do
+      {:ok, _} = Projects.update(username, "app", %{"slots" => "1"})
+      {0, _} = worktree(username, mirror, "new", %{"name" => "fix"})
+
+      assert {1, full} = worktree(username, mirror, "new", %{"name" => "cart"})
+      assert full =~ "No slot is free:\n  slot-1: fix, no handoff yet"
+      assert full =~ "mdt worktree free SLOT"
+
+      assert {:error, :bad_slots} = Projects.update(username, "app", %{"slots" => "0"})
+      assert {:error, :bad_slots} = Projects.update(username, "app", %{"slots" => "x"})
+    end
+
+    test "freed, a slot goes off its branch, and a new task from it stays there", %{
+      username: username,
+      mirror: mirror
+    } do
+      {0, _} = worktree(username, mirror, "new", %{"name" => "fix"})
+      {0, _} = worktree(username, mirror, "new", %{"name" => "cart"})
+      two = slot(mirror, 2)
+      commit(two, [{"c.txt", "cart\n"}], "the cart")
+
+      assert {0, freed} = worktree(username, mirror, "free", %{"slot" => "slot-2"})
+      assert freed =~ "Freed slot-2" and freed =~ "The branch cart stays, with its commits."
+      assert freed =~ "It has no handoff."
+      assert git(two, ["branch", "--show-current"]) == ""
+      assert {0, again} = worktree(username, two, "free")
+      assert again =~ "slot-2 is free already"
+
+      # slot-1 is busy; the agent in slot-2 starts its next task where it is.
+      {0, next} = worktree(username, two, "new", %{"name" => "next"})
+      assert next =~ "Started the task next in slot-2"
+      assert next =~ "You are in it: continue here."
+      assert git(mirror, ["log", "-1", "--format=%s", "cart"]) == "the cart\n"
+
+      assert {1, not_slot} = worktree(username, mirror, "free")
+      assert not_slot =~ "This folder isn't a slot"
+    end
+
+    test "a handoff sent back after its slot went to another task resumes in a free slot", %{
+      username: username,
+      repo: repo,
+      mirror: mirror
+    } do
+      {0, _} = worktree(username, mirror, "new", %{"name" => "fix"})
+      one = slot(mirror, 1)
+      commit(one, [{"a.txt", "one\ntwo\nthree\nfour\n"}], "the fix")
+      {0, _} = Channel.answer("handoff", ask(one), username)
+
+      # Freed while the user looks at it, then taken by another task.
+      {0, _} = worktree(username, one, "free")
+      {0, _} = worktree(username, one, "new", %{"name" => "other"})
+      {:ok, _} = Handoffs.send_back(username, 1, "Add a test.")
+
+      assert {0, listed} = Channel.answer("handoffs", %{"cwd" => one}, username)
+      assert listed =~ "sent back to you"
+      assert listed =~ "Its branch is in no worktree now. To continue it: mdt worktree resume fix"
+      refute listed =~ "(this branch)"
+
+      assert {1, no_branch} = worktree(username, one, "resume", %{"name" => "nope"})
+      assert no_branch =~ "There is no branch nope"
+      assert {1, target} = worktree(username, one, "resume", %{"name" => "master"})
+      assert target =~ "one of the user's target branches"
+      assert {0, held} = worktree(username, mirror, "resume", %{"name" => "other"})
+      assert held =~ "other is in slot-1 already"
+
+      # The busy slot stays as it is; the branch goes to a free one.
+      assert {0, resumed} = worktree(username, one, "resume", %{"name" => "fix"})
+      two = slot(mirror, 2)
+      assert resumed =~ "Put the branch fix, as it was, in slot-2, #{two}"
+      assert resumed =~ "zed ssh://mdt-sandbox#{two}"
+      assert git(one, ["branch", "--show-current"]) == "other\n"
+      assert git(two, ["branch", "--show-current"]) == "fix\n"
+
+      assert {0, already} = worktree(username, mirror, "resume", %{"name" => "fix"})
+      assert already =~ "fix is in slot-2 already"
+
+      assert {0, listed} = Channel.answer("handoffs", %{"cwd" => two}, username)
+      assert listed =~ "#1  sent back to you (this branch)"
+      assert listed =~ "In slot-2, #{two}."
+
+      # Its next revision comes from the new slot.
+      commit(two, [{"t.txt", "test\n"}], "a test")
+      {0, said} = Channel.answer("handoff", %{"cwd" => two}, username)
+      assert said =~ "Updated handoff #1 (revision 2)"
+      assert [%Handoff{source: %{top: ^two, branch: "fix"}, status: :open}] = handoffs(username)
+      assert sha(repo, "master") != sha(two, "HEAD")
+    end
+
+    test "a per-task worktree made before slots keeps working beside them", %{
+      username: username,
+      mirror: mirror,
+      vm: vm
+    } do
+      old = Path.join(vm, "app.wt/push-options")
+
+      git(mirror, [
+        "worktree",
+        "add",
+        "-q",
+        "--no-track",
+        "-b",
+        "push-options",
+        old,
+        "host/master"
+      ])
+
+      assert {0, there} = Channel.answer("project", %{"cwd" => old}, username)
+      assert there =~ "You are in the worktree #{old}"
+
+      assert {:ok, %{others: [%{path: ^old, branch: "push-options"}]}} =
+               Projects.slots(username, "app")
+
+      commit(old, [{"p.txt", "push\n"}], "push options")
+      assert {0, said} = Channel.answer("handoff", ask(old), username)
+      assert said =~ "Handed off as #1: push-options onto the user's master."
+
+      # It can't be resumed into a slot while it is checked out there.
+      assert {1, held} = worktree(username, mirror, "resume", %{"name" => "push-options"})
+      assert held =~ "push-options is checked out in #{old}: continue it there."
     end
   end
 end

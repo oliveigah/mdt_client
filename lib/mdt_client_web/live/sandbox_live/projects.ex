@@ -1,27 +1,32 @@
 defmodule MDTClientWeb.SandboxLive.Projects do
   @moduledoc """
   The projects page: every git repository in your shared folders, each
-  opened in Zed from here.
+  opened in Zed from here, with its worktree slots: which are free, and
+  which task branch and handoff each of the others holds.
 
   Shared folders decide what the VM sees, so the page lists them, each
   with the repositories found in it (`MDTClient.Sandbox.Discovery`). The
   first time you open one, MDT makes its mirror at `/work/<name>`; from
-  then on it shows the mirror, its target branches, its settings and its
-  agent worktrees. A repository in a read-write share is listed but can't
+  then on it shows the mirror, its target branches, its settings, its
+  worktree slots and any other worktrees it has. A repository in a read-write share is listed but can't
   be opened, and the page says why.
   """
   use MDTClientWeb, :html
 
   import MDTClientWeb.SandboxLive.Components
 
-  alias MDTClient.Sandbox.Zed
+  alias MDTClient.Sandbox.{Slots, Zed}
 
   attr :overview, :map, required: true, doc: "from `MDTClient.Sandbox.Projects.overview/1`"
   attr :mirror, :map, required: true
   attr :handoffs, :list, required: true
   attr :open, :any, required: true, doc: "the path of the repository shown in full, or nil"
   attr :settings, :any, required: true, doc: "the open project's settings form, or nil"
-  attr :worktrees, :map, required: true, doc: "project name => its agent worktrees, as last read"
+
+  attr :worktrees, :map,
+    required: true,
+    doc: "project name => its slots and other worktrees, as last read (`Projects.slots/2`)"
+
   attr :vm, :any, required: true
   attr :now, DateTime, required: true
 
@@ -29,7 +34,7 @@ defmodule MDTClientWeb.SandboxLive.Projects do
     ~H"""
     <.page_header id="projects-header" title="Projects">
       <:help>
-        Every git repository in a folder you share is a project. Open one in Zed: the first time, MDT makes its mirror at /work/NAME, your target branch as committed, kept current while the VM runs and view only. Agents work in worktrees of their own beside it (mdt worktree new TASK), catch up with your branch (git merge host) and hand their work off (mdt handoff). Only committed work travels; nothing of your working tree.
+        Every git repository in a folder you share is a project. Open one in Zed: the first time, MDT makes its mirror at /work/NAME, your target branch as committed, kept current while the VM runs and view only. Agents work beside it in a few fixed worktree slots, one task branch at a time (mdt worktree new TASK), catch up with your branch (git merge host) and hand their work off (mdt handoff). Only committed work travels; nothing of your working tree.
       </:help>
       <:actions>
         <.button id="projects-rescan" variant="ghost" phx-click="rescan_projects">
@@ -216,7 +221,7 @@ defmodule MDTClientWeb.SandboxLive.Projects do
           variant="ghost"
           phx-click="toggle_project"
           phx-value-path={@repo.path}
-          title="Settings and worktrees"
+          title="Settings and worktree slots"
         >
           <.icon name="hero-cog-6-tooth-micro" class="size-3.5" />
           <.icon
@@ -328,6 +333,18 @@ defmodule MDTClientWeb.SandboxLive.Projects do
           </select>
         </label>
         <label class="block">
+          <span class="mb-1 block text-[11px] font-medium text-ink">Worktree slots</span>
+          <input
+            type="number"
+            id={"project-slots-input-#{@project.name}"}
+            name="project[slots]"
+            value={@project.slots}
+            min="1"
+            max="9"
+            class={[input_classes(), "w-20 font-mono text-xs"]}
+          />
+        </label>
+        <label class="block">
           <span class="mb-1 block text-[11px] font-medium text-ink">Accept as</span>
           <select name="project[accept]" class={[input_classes(), "w-48 text-xs"]}>
             <option value="commits" selected={@project.accept == :commits}>
@@ -354,74 +371,178 @@ defmodule MDTClientWeb.SandboxLive.Projects do
   end
 
   attr :project, :map, required: true
-  attr :worktrees, :any, required: true
+  attr :worktrees, :any, required: true, doc: "`Projects.slots/2`'s answer, or nil"
   attr :handoffs, :list, required: true
   attr :vm, :any, required: true
 
   defp worktree_list(assigns) do
+    assigns =
+      assign(assigns,
+        look: match?({:ok, _}, assigns.worktrees) && elem(assigns.worktrees, 1)
+      )
+
     ~H"""
     <div class="border-t border-line-soft">
-      <p class="px-4 pt-3 text-[10px] font-semibold uppercase tracking-wide text-faint">
-        Agent worktrees
-      </p>
+      <div class="flex items-baseline gap-2 px-4 pt-3">
+        <p class="text-[10px] font-semibold uppercase tracking-wide text-faint">
+          Worktree slots
+        </p>
+        <p :if={@look} id={"project-slots-free-#{@project.name}"} class="text-[11px] text-faint">
+          {Enum.count(@look.slots, & &1.free?)} of {length(@look.slots)} free
+        </p>
+      </div>
       <%= cond do %>
         <% @vm.status != :running -> %>
           <p class="px-4 pt-1 pb-3 text-[12px] text-faint">Shown while the VM runs.</p>
-        <% @worktrees in [nil, []] -> %>
-          <p
-            id={"project-worktrees-#{@project.name}"}
-            class="px-4 pt-1 pb-3 text-[12px] text-faint"
-          >
-            None yet. An agent makes one with mdt worktree new TASK; each thread works in its own.
+        <% !@look -> %>
+          <p id={"project-slots-error-#{@project.name}"} class="px-4 pt-1 pb-3 text-[12px] text-bad">
+            {slots_error(@worktrees)}
           </p>
         <% true -> %>
-          <ul id={"project-worktrees-#{@project.name}"} class="mt-1 divide-y divide-line-soft">
-            <li :for={wt <- @worktrees} class="flex items-center gap-3 px-4 py-2">
-              <.icon name="hero-folder-micro" class="size-4 shrink-0 text-faint" />
+          <p class="px-4 pt-0.5 text-[11px] leading-5 text-faint">
+            Fixed folders agents take one task at a time (mdt worktree new TASK), each task on a branch of its own. What git ignores stays between tasks, so builds stay warm. A slot is free again once its handoff is accepted or closed.
+          </p>
+          <ul id={"project-slots-#{@project.name}"} class="mt-1 divide-y divide-line-soft">
+            <li
+              :for={slot <- @look.slots}
+              id={"slot-#{@project.name}-#{slot.name}"}
+              class="group flex items-center gap-3 px-4 py-2 transition-colors hover:bg-deep/30"
+            >
+              <span class={["size-2 shrink-0 rounded-full", slot_dot(slot)]}></span>
               <div class="min-w-0 flex-1">
-                <p class="truncate font-mono text-[12px] text-ink" title={wt.path}>
-                  {Path.basename(wt.path)}
+                <p class="flex items-center gap-2 text-[12px]" title={slot.path}>
+                  <span class="font-mono text-ink">{slot.name}</span>
+                  <span
+                    id={"slot-state-#{@project.name}-#{slot.name}"}
+                    class={[
+                      "rounded px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide",
+                      slot_badge_class(slot)
+                    ]}
+                  >
+                    {slot_badge(slot)}
+                  </span>
                 </p>
                 <p class="truncate text-[11px] text-faint">
-                  {wt.branch || "no branch"}
-                  <%= case handoff_of(@handoffs, wt.path) do %>
-                    <% nil -> %>
-                    <% handoff -> %>
+                  <%= cond do %>
+                    <% slot.state == :absent -> %>
+                      not made yet: the first task to take it makes it
+                    <% slot.state == :missing -> %>
+                      its folder is gone; made again when taken
+                      <span :if={slot.branch}>
+                        · the branch <span class="font-mono">{slot.branch}</span> stays
+                      </span>
+                    <% slot.state == :foreign -> %>
+                      <span class="text-bad">
+                        a folder that isn't a worktree of the project is in the way
+                      </span>
+                    <% is_nil(slot.branch) -> %>
+                      on no branch · ready for the next task
+                    <% true -> %>
+                      <span class="font-mono text-muted">{slot.branch}</span>
                       ·
-                      <.link
-                        patch={~p"/tools/sandbox/handoffs?id=#{handoff.id}"}
-                        class="text-accent hover:underline"
-                      >
-                        {handoff_label(handoff)}
-                      </.link>
+                      <%= case slot.handoff do %>
+                        <% nil -> %>
+                          no handoff yet
+                        <% handoff -> %>
+                          <.link
+                            patch={~p"/tools/sandbox/handoffs?id=#{handoff.id}"}
+                            class="text-accent hover:underline"
+                          >
+                            {handoff_label(handoff)}
+                          </.link>
+                      <% end %>
+                      <span :if={slot.state == :dirty} class="text-warn-strong">
+                        · uncommitted work
+                      </span>
                   <% end %>
                 </p>
               </div>
               <.button
+                id={"slot-zed-#{@project.name}-#{slot.name}"}
                 variant="ghost"
                 phx-click="open_project"
                 phx-value-path={@project.name}
-                phx-value-folder={wt.path}
-                title={Zed.command(wt.path)}
+                phx-value-folder={slot.path}
+                disabled={slot.state in [:absent, :missing, :foreign]}
+                title={Zed.command(slot.path)}
               >
                 <.icon name="hero-arrow-top-right-on-square-micro" class="size-3.5" /> Zed
               </.button>
             </li>
           </ul>
+          <div :if={@look.others != []}>
+            <p class="px-4 pt-3 text-[10px] font-semibold uppercase tracking-wide text-faint">
+              Other worktrees
+            </p>
+            <ul id={"project-worktrees-#{@project.name}"} class="mt-1 divide-y divide-line-soft">
+              <li :for={wt <- @look.others} class="flex items-center gap-3 px-4 py-2">
+                <.icon name="hero-folder-micro" class="size-4 shrink-0 text-faint" />
+                <div class="min-w-0 flex-1">
+                  <p class="truncate font-mono text-[12px] text-ink" title={wt.path}>
+                    {Path.basename(wt.path)}
+                  </p>
+                  <p class="truncate text-[11px] text-faint">
+                    {wt.branch || "no branch"}
+                    <span :if={wt.missing?} class="text-warn-strong">· its folder is gone</span>
+                    <%= case wt.branch && handoff_of(@handoffs, wt.branch) do %>
+                      <% nil -> %>
+                      <% handoff -> %>
+                        ·
+                        <.link
+                          patch={~p"/tools/sandbox/handoffs?id=#{handoff.id}"}
+                          class="text-accent hover:underline"
+                        >
+                          {handoff_label(handoff)}
+                        </.link>
+                    <% end %>
+                  </p>
+                </div>
+                <.button
+                  variant="ghost"
+                  phx-click="open_project"
+                  phx-value-path={@project.name}
+                  phx-value-folder={wt.path}
+                  disabled={wt.missing?}
+                  title={Zed.command(wt.path)}
+                >
+                  <.icon name="hero-arrow-top-right-on-square-micro" class="size-3.5" /> Zed
+                </.button>
+              </li>
+            </ul>
+          </div>
+          <div class="h-2"></div>
       <% end %>
     </div>
     """
   end
+
+  defp slots_error({:error, reason}), do: MDTClient.Sandbox.Projects.explain(reason)
+  defp slots_error(_), do: "The worktree slots couldn't be read."
+
+  defp slot_badge(%{state: :dirty}), do: "uncommitted"
+  defp slot_badge(%{state: :foreign}), do: "in the way"
+  defp slot_badge(%{free?: true}), do: "free"
+  defp slot_badge(_slot), do: "busy"
+
+  defp slot_badge_class(%{state: :dirty}), do: "bg-warn-soft/60 text-warn-strong"
+  defp slot_badge_class(%{state: :foreign}), do: "bg-bad-soft/40 text-bad"
+  defp slot_badge_class(%{free?: true}), do: "bg-ok-soft/60 text-ok-strong"
+  defp slot_badge_class(_slot), do: "bg-accent-soft/50 text-accent-strong"
+
+  defp slot_dot(%{state: :dirty}), do: "bg-warn"
+  defp slot_dot(%{state: :foreign}), do: "bg-bad"
+  defp slot_dot(%{free?: true}), do: "bg-ok"
+  defp slot_dot(_slot), do: "bg-accent"
 
   @doc "A short id for a path, for DOM ids."
   @spec key(Path.t()) :: String.t()
   def key(path),
     do: :crypto.hash(:sha256, path) |> Base.encode16(case: :lower) |> binary_part(0, 12)
 
-  # The open handoff of a worktree, or its latest.
-  defp handoff_of(handoffs, path) do
+  # The open handoff of a branch, or its latest.
+  defp handoff_of(handoffs, branch) do
     handoffs
-    |> Enum.filter(&(&1.source.top == path))
+    |> Enum.filter(&(&1.source.branch == branch))
     |> Enum.sort_by(&{&1.status in [:open, :sent_back], &1.id}, :desc)
     |> List.first()
   end
@@ -429,14 +550,9 @@ defmodule MDTClientWeb.SandboxLive.Projects do
   defp handoff_label(handoff) do
     conflicts? = (handoff.stats[:conflicts] || 0) > 0 and handoff.status in [:open, :sent_back]
 
-    "handoff ##{handoff.id}, #{status_word(handoff.status)}" <>
+    "handoff ##{handoff.id}, #{Slots.status_word(handoff.status)}" <>
       if(conflicts?, do: ", conflicts", else: "")
   end
-
-  defp status_word(:open), do: "open"
-  defp status_word(:sent_back), do: "sent back"
-  defp status_word(:accepted), do: "accepted"
-  defp status_word(:closed), do: "closed"
 
   defp count(1, word), do: "1 #{word}"
   defp count(n, "repository"), do: "#{n} repositories"

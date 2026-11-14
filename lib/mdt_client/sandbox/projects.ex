@@ -2,7 +2,7 @@ defmodule MDTClient.Sandbox.Projects do
   @moduledoc """
   The projects of one identity, as the pages and the agent channel use
   them: the repositories in your shared folders (`MDTClient.Sandbox.Discovery`),
-  opening one in the VM, its settings, its mirror and its agent worktrees.
+  opening one in the VM, its settings, its mirror and its worktree slots.
 
   Every repository in a shared folder is a project. The sandbox keeps a
   record of one (its name in the VM and its settings) from the first time
@@ -29,7 +29,7 @@ defmodule MDTClient.Sandbox.Projects do
     Server,
     Share,
     Shares,
-    Shown,
+    Slots,
     Zed
   }
 
@@ -38,8 +38,7 @@ defmodule MDTClient.Sandbox.Projects do
           | :not_found
           | :not_in_a_project
           | :not_shared
-          | {:bad_task, String.t()}
-          | {:task_taken, String.t()}
+          | Slots.error()
           | Project.error()
           | Zed.error()
           | String.t()
@@ -219,38 +218,15 @@ defmodule MDTClient.Sandbox.Projects do
   end
 
   @doc """
-  The project's agent worktrees in the VM: each one's folder and branch,
-  the mirror left out.
+  The project's worktree slots and its other worktrees, as the VM has them
+  now, each slot with its branch's latest handoff and whether it is free
+  (`MDTClient.Sandbox.Slots.look/4`).
   """
-  @spec worktrees(String.t(), String.t()) :: {:ok, [map()]} | {:error, error()}
-  def worktrees(username, name) do
-    with {:ok, project, %{vm: vm}} <- find(username, name),
+  @spec slots(String.t(), String.t()) :: {:ok, Slots.look()} | {:error, error()}
+  def slots(username, name) do
+    with {:ok, project, %{vm: vm, handoffs: handoffs}} <- find(username, name),
          {:ok, guest} <- guest(username, vm) do
-      mirror = Project.mirror_path(project, guest)
-
-      case guest.exec.(["git", "-C", mirror, "worktree", "list", "--porcelain"]) do
-        {:ok, output} ->
-          {:ok,
-           output
-           |> String.split("\n\n", trim: true)
-           |> Enum.map(&String.split(&1, "\n", trim: true))
-           |> Enum.flat_map(fn
-             ["worktree " <> path | fields] when path != mirror ->
-               branch =
-                 Enum.find_value(fields, fn
-                   "branch refs/heads/" <> branch -> branch
-                   _ -> nil
-                 end)
-
-               [%{path: Shown.text(path), branch: branch && Shown.text(branch)}]
-
-             _ ->
-               []
-           end)}
-
-        {:error, _} ->
-          {:ok, []}
-      end
+      Slots.look(project, guest, handoffs)
     end
   end
 
@@ -279,49 +255,73 @@ defmodule MDTClient.Sandbox.Projects do
   end
 
   @doc """
-  Makes an agent worktree, `/work/<name>.wt/<task>`, on a new branch
-  `task` started from your target branch `onto` (the default unless
-  named), as it is in the mirror.
+  Where the folder `cwd` of the VM is, as `locate/2` says, and the
+  project's slots as the VM has them now (nil when they can't be read).
   """
-  @spec new_worktree(String.t(), String.t() | nil, String.t(), String.t() | nil) ::
-          {:ok, Project.t(), Path.t(), String.t()}
-          | {:error, error() | MDTClient.Sandbox.Handoff.refusal()}
-  def new_worktree(username, cwd, task, onto) do
-    task = task |> to_string() |> String.trim()
+  @spec place(String.t(), String.t() | nil) ::
+          {:ok, Project.t(), :mirror | {:worktree, String.t()}, Slots.look() | nil}
+          | {:error, error()}
+  def place(username, cwd) do
+    with {:ok, project, where, guest} <- locate(username, cwd) do
+      look =
+        case Slots.look(project, guest, handoffs(username)) do
+          {:ok, look} -> look
+          {:error, _} -> nil
+        end
 
-    with {:ok, project, _where, guest} <- locate(username, cwd),
-         onto = if(onto in [nil, ""], do: project.default_target, else: onto),
-         true <-
-           onto in project.targets or {:error, {:not_a_target, onto, project.targets}},
-         true <- task?(task) or {:error, {:bad_task, Shown.text(task)}},
-         path = Path.join(Project.worktrees_path(project, guest), String.replace(task, "/", "-")),
-         {:ok, _} <-
-           guest.exec.([
-             "git",
-             "-C",
-             Project.mirror_path(project, guest),
-             "worktree",
-             "add",
-             "--quiet",
-             "--no-track",
-             "-b",
-             task,
-             path,
-             "refs/remotes/host/#{onto}"
-           ]) do
-      {:ok, project, path, onto}
-    else
-      {:error, text} when is_binary(text) -> {:error, {:task_taken, task}}
-      {:error, reason} -> {:error, reason}
+      {:ok, project, where, look}
     end
   end
 
-  # A branch name, and a folder name once its slashes are dashes.
-  defp task?(task) do
-    task =~ ~r"\A[A-Za-z0-9][A-Za-z0-9._/-]{0,99}\z" and
-      not String.contains?(task, ["..", "//", "@{"]) and
-      not String.ends_with?(task, ["/", ".", ".lock"])
+  @doc """
+  Takes a worktree slot of the project the folder `cwd` of the VM is in,
+  for the task `task` (`MDTClient.Sandbox.Slots.take/5`): `:new` starts the
+  branch `task` from your target branch `onto` (the default unless named),
+  as it is in the mirror; `:resume` puts the existing branch `task` in a
+  free slot. `slot` names the slot to take; otherwise it is the one `cwd`
+  is in when that is free, else the first free one.
+  """
+  @spec take_slot(String.t(), String.t() | nil, :new | :resume, String.t(), keyword()) ::
+          {:ok, Project.t(), Slots.slot(), :started | :resumed | :already, String.t(),
+           :mirror | {:worktree, String.t()}}
+          | {:error, error() | MDTClient.Sandbox.Handoff.refusal()}
+  def take_slot(username, cwd, how, task, opts \\ []) do
+    task = task |> to_string() |> String.trim()
+    onto = Keyword.get(opts, :onto)
+
+    with {:ok, project, where, guest} <- locate(username, cwd),
+         onto = if(onto in [nil, ""], do: project.default_target, else: onto),
+         true <- onto in project.targets or {:error, {:not_a_target, onto, project.targets}},
+         {:ok, slot, outcome} <-
+           Slots.take(project, guest, how, task,
+             onto: onto,
+             slot: Keyword.get(opts, :slot),
+             here: here(where),
+             handoffs: handoffs(username)
+           ) do
+      {:ok, project, slot, outcome, onto, where}
+    end
   end
+
+  @doc """
+  Frees a worktree slot of the project the folder `cwd` of the VM is in:
+  `which` (a name or number), or the slot `cwd` is in
+  (`MDTClient.Sandbox.Slots.free/4`). Returns the slot as it was.
+  """
+  @spec free_slot(String.t(), String.t() | nil, String.t() | nil) ::
+          {:ok, Project.t(), Slots.slot()} | {:error, error()}
+  def free_slot(username, cwd, which) do
+    with {:ok, project, where, guest} <- locate(username, cwd),
+         {:ok, slot} <-
+           Slots.free(project, guest, which, here: here(where), handoffs: handoffs(username)) do
+      {:ok, project, slot}
+    end
+  end
+
+  defp here({:worktree, top}), do: top
+  defp here(:mirror), do: nil
+
+  defp handoffs(username), do: Server.call(username, :projects).handoffs
 
   ## Shared
 
@@ -363,11 +363,20 @@ defmodule MDTClient.Sandbox.Projects do
     do:
       "This folder isn't in a project MDT mirrors. The user opens a repository from MDT's Projects page; it appears at /work/NAME."
 
-  def explain({:bad_task, task}),
-    do: "\"#{task}\" can't be a branch name. Use letters, digits, dots, dashes and slashes."
-
-  def explain({:task_taken, task}),
-    do: "There is a branch or worktree called #{task} already. Choose another name."
+  def explain(reason)
+      when is_tuple(reason) and
+             elem(reason, 0) in [
+               :no_free_slot,
+               :no_such_slot,
+               :slot_busy,
+               :not_a_slot,
+               :branch_exists,
+               :no_branch,
+               :checked_out,
+               :is_a_target,
+               :bad_task
+             ],
+      do: Slots.explain(reason)
 
   def explain(reason)
       when reason in [:no_zed, :no_ssh_entry] or

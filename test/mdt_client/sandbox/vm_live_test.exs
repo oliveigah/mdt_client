@@ -234,9 +234,11 @@ defmodule MDTClient.Sandbox.VMLiveTest do
     assert {:ok, "from your machine\n"} = exec.("cat /work/#{project}/a.txt")
     assert {:ok, "master\n"} = exec.("git -C /work/#{project} branch --show-current")
 
-    # An agent's worktree, a commit, a handoff.
-    assert {:ok, _, tree, "master"} =
-             Projects.new_worktree(username, "/work/#{project}", "fix", nil)
+    # A task in a worktree slot, a commit, a handoff.
+    assert {:ok, _, %{path: tree}, :started, "master", :mirror} =
+             Projects.take_slot(username, "/work/#{project}", :new, "fix")
+
+    assert tree == "/work/#{project}.wt/slot-1"
 
     assert {:ok, _} =
              exec.("""
@@ -453,16 +455,16 @@ defmodule MDTClient.Sandbox.VMLiveTest do
     assert here =~ "You are in the mirror"
 
     assert {:ok, made} = exec.("cd /work/#{project} && /mnt/mdt/bin/mdt worktree new task")
-    assert made =~ "zed ssh://mdt-sandbox/work/#{project}.wt/task"
+    assert made =~ "zed ssh://mdt-sandbox/work/#{project}.wt/slot-1"
 
     assert {:ok, handed} =
              exec.("""
-             cd /work/#{project}.wt/task && echo 'the vm' >> a.txt &&
+             cd /work/#{project}.wt/slot-1 && echo 'the vm' >> a.txt &&
              git -c user.name=Agent -c user.email=agent@vm.invalid commit -q -am 'the task' &&
              /mnt/mdt/bin/mdt handoff --title 'The task' && /mnt/mdt/bin/mdt handoffs
              """)
 
-    assert handed =~ "Handed off as #1" and handed =~ "open, waiting for the user (this worktree)"
+    assert handed =~ "Handed off as #1" and handed =~ "open, waiting for the user (this branch)"
 
     assert [%Handoff{id: id, title: "The task", source: %{branch: "task"}, status: :open}] =
              Sandbox.snapshot(username).handoffs
@@ -471,6 +473,19 @@ defmodule MDTClient.Sandbox.VMLiveTest do
     assert File.read!(Path.join(repo, "a.txt")) == "yours\nthe vm\n"
     assert git.(["status", "--porcelain"]) == ""
     assert git.(["log", "-1", "--format=%s %an"]) == "the task Agent\n"
+
+    # Accepted, its slot is free: the next task takes it, through the real
+    # mdt, and a freed slot goes off its branch.
+    assert {:ok, next} =
+             exec.("cd /work/#{project}.wt/slot-1 && /mnt/mdt/bin/mdt worktree new next")
+
+    assert next =~ "Started the task next in slot-1" and next =~ "continue here"
+
+    assert {:ok, freed} =
+             exec.("cd /work/#{project}.wt/slot-1 && /mnt/mdt/bin/mdt worktree free")
+
+    assert freed =~ "Freed slot-1"
+    assert {:ok, "\n"} = exec.("git -C /work/#{project}.wt/slot-1 branch --show-current")
 
     # A command grant, asked through the real `mdt` in the VM. With none,
     # nothing can be asked; with a script of yours, the agent sends no text,

@@ -111,14 +111,33 @@ defmodule MDTClientWeb.SandboxProjectsLiveTest do
 
     view
     |> form("#project-settings-form-app",
-      project: %{targets: ["master", "develop"], default_target: "develop", accept: "changes"}
+      project: %{targets: ["master"], default_target: "master", slots: "12"}
+    )
+    |> render_submit()
+
+    assert has_element?(view, "#project-settings-error-app", "1 to 9 worktree slots")
+
+    view
+    |> form("#project-settings-form-app",
+      project: %{
+        targets: ["master", "develop"],
+        default_target: "develop",
+        accept: "changes",
+        slots: "2"
+      }
     )
     |> render_submit()
 
     assert has_element?(view, "#notices", "Settings of app saved")
 
-    assert [%{targets: ["master", "develop"], default_target: "develop", accept: :changes}] =
-             Sandbox.snapshot(username).projects
+    assert [
+             %{
+               targets: ["master", "develop"],
+               default_target: "develop",
+               accept: :changes,
+               slots: 2
+             }
+           ] = Sandbox.snapshot(username).projects
   end
 
   test "a read-write shared folder's repositories are listed, and can't be opened", %{
@@ -159,5 +178,47 @@ defmodule MDTClientWeb.SandboxProjectsLiveTest do
     view |> element("#project-forget-app") |> render_click()
     refute has_element?(view, "#projects-unshared")
     assert Sandbox.snapshot(username).projects == []
+  end
+
+  test "an opened project shows its worktree slots: which are free, and what the others hold", %{
+    username: username,
+    repo: repo,
+    shared: shared,
+    vm: vm
+  } do
+    {:ok, _} = Sandbox.add_share(username, shared, :ro)
+    {:ok, _} = Projects.open(username, repo)
+    mirror = Path.join(vm, "app")
+    {:ok, _, _, :started, _, _} = Projects.take_slot(username, mirror, :new, "fix")
+    {:ok, _, _, :started, _, _} = Projects.take_slot(username, mirror, :new, "cart")
+    File.write!(Path.join(vm, "app.wt/slot-2/a.txt"), "changed\n")
+    old = Path.join(vm, "app.wt/push-options")
+    git(mirror, ["worktree", "add", "-q", "--no-track", "-b", "push-options", old, "host/master"])
+
+    snapshot = Sandbox.snapshot(username)
+
+    html =
+      render_component(&Page.page/1,
+        overview: Projects.overview(username),
+        mirror: snapshot.mirror,
+        handoffs: snapshot.handoffs,
+        open: repo,
+        settings: nil,
+        worktrees: %{"app" => Projects.slots(username, "app")},
+        vm: %{status: :running},
+        now: DateTime.utc_now()
+      )
+
+    page = LazyHTML.from_fragment(html)
+    text = fn selector -> page |> LazyHTML.query(selector) |> LazyHTML.text() end
+
+    assert text.("#project-slots-free-app") =~ "1 of 3 free"
+    assert text.("#slot-state-app-slot-1") =~ "busy"
+    assert text.("#slot-app-slot-1") =~ "fix" and text.("#slot-app-slot-1") =~ "no handoff yet"
+    assert text.("#slot-state-app-slot-2") =~ "uncommitted"
+    assert text.("#slot-state-app-slot-3") =~ "free"
+    assert text.("#slot-app-slot-3") =~ "not made yet"
+    assert LazyHTML.query(page, "#slot-zed-app-slot-3[disabled]") |> Enum.count() == 1
+    assert text.("#project-worktrees-app") =~ "push-options"
   end
 end

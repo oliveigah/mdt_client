@@ -2,8 +2,8 @@
 # mdt: ask MDT, the user's control panel, for access. Written by MDT to
 # /mnt/mdt/bin/mdt. It reaches MDT over vsock (socat), and can only read the
 # grants and the host's description, ask the user to turn a grant on, ask
-# them to run a command on their machine, and work in projects: make a
-# worktree, hand work off. See MDTClient.Sandbox.Channel.
+# them to run a command on their machine, and work in projects: take a
+# worktree slot, hand work off. See MDTClient.Sandbox.Channel.
 set -u
 
 channel=${MDT_CHANNEL:-VSOCK-CONNECT:2:5000}
@@ -50,10 +50,22 @@ mdt - ask MDT, the user's control panel, for access
       Where you are in a project: its mirror (view only) or a worktree of
       your own, its target branches, and the rules.
 
-  mdt worktree new TASK [--onto BRANCH]
-      Make a worktree of your own, /work/NAME.wt/TASK, on a new branch TASK
-      from the user's target branch (the default one unless --onto). Prints
-      the line that opens it in Zed: give it to the user, and continue there.
+  mdt worktree new TASK [--onto BRANCH] [--slot SLOT]
+      Start a task in a worktree slot, /work/NAME.wt/slot-N: a new branch
+      TASK from the user's target branch (the default one unless --onto).
+      It takes the slot you are in when that is free, else the first free
+      one, or the one --slot names. What git ignores (deps, _build) stays
+      there from the slot's last task. Prints the line that opens it in
+      Zed: give it to the user, and continue there.
+
+  mdt worktree resume BRANCH [--slot SLOT]
+      Put an existing branch, such as one whose handoff was sent back after
+      its slot went to another task, in a free slot.
+
+  mdt worktree free [SLOT]
+      Free the slot you are in, or SLOT, once its task is done: it goes off
+      its branch, which stays with its commits. Refused with uncommitted
+      work. A slot whose handoff is accepted or closed is free already.
 
   mdt handoff --title "what this is" [--body FILE] [--onto BRANCH]
       In your worktree, with everything committed and caught up (git merge
@@ -260,7 +272,7 @@ command=${1:-help}
 wrong=1
 [ "$command" = run ] && wrong=122
 
-grant="" need="" reason="" minutes=60 wait=60 id="" dir="" timeout=120 title="" body="" onto=""
+grant="" need="" reason="" minutes=60 wait=60 id="" dir="" timeout=120 title="" body="" onto="" slot=""
 positional=()
 words=()
 while [ $# -gt 0 ]; do
@@ -273,6 +285,8 @@ while [ $# -gt 0 ]; do
     --body=*) body=${1#*=}; shift ;;
     --onto) onto=${2-}; shift 2 || shift ;;
     --onto=*) onto=${1#*=}; shift ;;
+    --slot) slot=${2-}; shift 2 || shift ;;
+    --slot=*) slot=${1#*=}; shift ;;
     --need) need=${2-}; shift 2 || shift ;;
     --need=*) need=${1#*=}; shift ;;
     --minutes) minutes=$(number --minutes "${2-}" "$wrong") || exit "$wrong"; shift 2 || shift ;;
@@ -367,11 +381,25 @@ case $command in
     send "{\"command\":\"project\",\"cwd\":$(json "$(pwd -P)")}"
     ;;
   worktree)
-    if [ "${positional[0]:-}" != new ] || [ -z "${positional[1]:-}" ]; then
-      echo "mdt: make a worktree with: mdt worktree new TASK [--onto BRANCH]" >&2
-      exit 1
-    fi
-    send "{\"command\":\"worktree\",\"cwd\":$(json "$(pwd -P)"),\"name\":$(json "${positional[1]}"),\"onto\":$(json "$onto")}"
+    action=${positional[0]:-}
+    case $action in
+      new | resume)
+        if [ -z "${positional[1]:-}" ]; then
+          echo "mdt: name the task: mdt worktree $action TASK" >&2
+          exit 1
+        fi
+        name=${positional[1]}
+        ;;
+      free)
+        name=""
+        [ -z "$slot" ] && slot=${positional[1]:-}
+        ;;
+      *)
+        echo "mdt: mdt worktree new TASK [--onto BRANCH] [--slot SLOT], mdt worktree resume BRANCH, or mdt worktree free [SLOT]" >&2
+        exit 1
+        ;;
+    esac
+    send "{\"command\":\"worktree\",\"action\":$(json "$action"),\"cwd\":$(json "$(pwd -P)"),\"name\":$(json "$name"),\"onto\":$(json "$onto"),\"slot\":$(json "$slot")}"
     ;;
   handoff)
     text=""

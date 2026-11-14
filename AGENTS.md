@@ -23,14 +23,17 @@ mirror, `/work/mdt_client`, is the user's branch as they committed it, kept
 current by MDT and view only. The user's own checkout, where their MDT runs,
 is out of your reach, or read-only at its own path: never work there either.
 
-1. Start every task in a worktree of your own, from the mirror:
+1. Start every task in a worktree slot, from the mirror (or from the slot
+   you are in, when its last task is done):
 
        cd /work/mdt_client && mdt worktree new <name>
-       cd /work/mdt_client.wt/<name> && mise install && mix deps.get
+       cd /work/mdt_client.wt/slot-<n> && mise install && mix deps.get
 
-   If your thread is in the mirror and you need to change code, stop: give
-   the user the Zed line `mdt worktree new` prints, and ask them to start
-   your thread again there.
+   It starts the branch `<name>` in a free slot, `/work/mdt_client.wt/slot-N`,
+   where `deps` and `_build` stay from the slot's last task. If your thread
+   is in the mirror and you need to change code, stop: give the user the
+   Zed line `mdt worktree new` prints, and ask them to start your thread
+   again there.
 2. Work, build and test only there. `.tool-versions` pins the Erlang and
    Elixir the user builds with; never build with another
    (`mise exec elixir@...`). To see it running, use the run-mdt skill with a
