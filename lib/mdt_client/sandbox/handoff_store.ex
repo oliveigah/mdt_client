@@ -1,21 +1,20 @@
-defmodule MDTClient.Sandbox.PullStore do
+defmodule MDTClient.Sandbox.HandoffStore do
   @moduledoc """
-  Where a pull request's commits wait until you bring them in: a bare git
-  repository of MDT's own, one per repository of yours that pull requests
-  are for, in the identity's sandbox folder.
+  Where a handoff's commits wait until you accept it: a bare git repository
+  of MDT's own, one per project, in the identity's sandbox folder.
 
   Nothing of the VM's is written into your repository while it waits. The
   store borrows your repository's objects instead (git's alternates: its
-  `objects/info/alternates` names your `.git/objects`), so a pull request
-  brings only what is new, and git can work out its base, its diff and
-  whether it merges, all here, from both histories at once. Your
-  repository is only read.
+  `objects/info/alternates` names your `.git/objects`), so a handoff brings
+  only what is new, and git can work out its base, its diff and whether it
+  merges, all here, from both histories at once. Your repository is only
+  read.
 
   What MDT works out to show you (a merge, a snapshot of your working tree)
   runs in `view/2`: git writes what it makes into a folder of its own that
   is deleted after, not into the store and not into your repository.
 
-  Pull requests sit under `refs/pulls/<id>`.
+  Handoffs sit under `refs/handoffs/<id>`.
   """
 
   alias MDTClient.Sandbox.{Guest, HostGit}
@@ -24,7 +23,7 @@ defmodule MDTClient.Sandbox.PullStore do
   @spec path(Path.t(), Path.t()) :: Path.t()
   def path(dir, repo) do
     hash = :crypto.hash(:sha256, repo) |> Base.encode16(case: :lower) |> binary_part(0, 16)
-    Path.join([dir, "pulls", "#{Path.basename(repo)}-#{hash}.git"])
+    Path.join([dir, "handoffs", "#{Path.basename(repo)}-#{hash}.git"])
   end
 
   @doc """
@@ -65,8 +64,8 @@ defmodule MDTClient.Sandbox.PullStore do
 
   @doc """
   Fetches `branch` of the repository at `folder` in the VM into
-  `refs/pulls/<id>`, under a limit on what git may write (in MiB). Returns
-  the commit that arrived.
+  `refs/handoffs/<id>`, under a limit on what git may write (in MiB).
+  Returns the commit that arrived.
   """
   @spec receive(Path.t(), Guest.t(), Path.t(), String.t(), pos_integer(), pos_integer()) ::
           {:ok, String.t()} | {:error, :too_large | String.t()}
@@ -121,11 +120,18 @@ defmodule MDTClient.Sandbox.PullStore do
     end
   end
 
-  @doc "The ref a pull request's commit sits at in the store."
+  @doc "The ref a handoff's commit sits at in the store."
   @spec ref(pos_integer()) :: String.t()
-  def ref(id), do: "refs/pulls/#{id}"
+  def ref(id), do: "refs/handoffs/#{id}"
 
-  @doc "Lets go of a pull request's commit."
+  @doc "Puts a handoff's ref back on `commit`, as when a new revision is refused."
+  @spec point(Path.t(), pos_integer(), String.t()) :: :ok
+  def point(store, id, commit) do
+    HostGit.run(store, ["update-ref", ref(id), commit])
+    :ok
+  end
+
+  @doc "Lets go of a handoff's commit."
   @spec drop(Path.t(), pos_integer()) :: :ok
   def drop(store, id) do
     if File.dir?(store), do: HostGit.run(store, ["update-ref", "-d", ref(id)])
@@ -154,13 +160,13 @@ defmodule MDTClient.Sandbox.PullStore do
   end
 
   @doc """
-  Brings a pull request's commits into your repository, at
-  `refs/mdt/pulls/<id>`, a ref no tool lists as a branch. Done only when
-  you bring it in.
+  Brings a handoff's commits into your repository, at
+  `refs/mdt/handoffs/<id>`, a ref no tool lists as a branch. Done only when
+  you accept it.
   """
   @spec copy_into(Path.t(), Path.t(), pos_integer()) :: {:ok, String.t()} | {:error, String.t()}
   def copy_into(store, repo, id) do
-    target = "refs/mdt/pulls/#{id}"
+    target = "refs/mdt/handoffs/#{id}"
 
     with {:ok, _} <-
            HostGit.run(
@@ -171,7 +177,7 @@ defmodule MDTClient.Sandbox.PullStore do
          commit when is_binary(commit) <- HostGit.line(repo, ["rev-parse", "--verify", target]) do
       {:ok, commit}
     else
-      nil -> {:error, "The pull request's commits did not arrive in your repository."}
+      nil -> {:error, "The handoff's commits did not arrive in your repository."}
       {:error, reason} -> {:error, reason}
     end
   end

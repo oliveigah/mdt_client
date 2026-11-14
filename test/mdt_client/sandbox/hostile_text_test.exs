@@ -16,12 +16,12 @@ defmodule MDTClient.Sandbox.HostileTextTest do
     Channel,
     Describe,
     Dns,
+    Accept,
     Guest,
+    Handoff,
+    HandoffStore,
     HostCommand,
     HostGit,
-    Landing,
-    PullRequest,
-    PullStore,
     RequestView,
     Shown
   }
@@ -314,7 +314,7 @@ defmodule MDTClient.Sandbox.HostileTextTest do
       end
 
       # And through the channel, as a line.
-      for command <- ["request", "run", "wait", "pr", "prs", "grants", "nope"] do
+      for command <- ~w(request run wait project worktree handoff handoffs grants nope) do
         line =
           Jason.encode!(%{
             command: command,
@@ -430,7 +430,7 @@ defmodule MDTClient.Sandbox.HostileTextTest do
     end
   end
 
-  describe "a pull request" do
+  describe "a handoff" do
     @me [
       {"GIT_AUTHOR_NAME", "Someone"},
       {"GIT_AUTHOR_EMAIL", "someone@example.test"},
@@ -466,8 +466,8 @@ defmodule MDTClient.Sandbox.HostileTextTest do
       {_, 0} = System.cmd("git", ["clone", "-q", repo, clone], env: Guest.git_env())
       git(clone, ["checkout", "-q", "-b", "task"])
 
-      store = PullStore.path(Path.join(base, "sandbox"), repo)
-      :ok = PullStore.ensure(store, repo)
+      store = HandoffStore.path(Path.join(base, "sandbox"), repo)
+      :ok = HandoffStore.ensure(store, repo)
       %{repo: repo, guest: Guest.local(vm), clone: clone, store: store}
     end
 
@@ -478,13 +478,14 @@ defmodule MDTClient.Sandbox.HostileTextTest do
       limit = Keyword.get(opts, :size_limit_mib, 1024)
 
       with {:ok, head} <-
-             PullStore.receive(context.store, context.guest, folder, "task", 1, limit) do
+             HandoffStore.receive(context.store, context.guest, folder, "task", 1, limit) do
         {:ok,
-         %PullRequest{
+         %Handoff{
            id: 1,
            title: "The work",
+           project: "app",
            repo: context.repo,
-           base: "master",
+           onto: "master",
            source: %{folder: folder, top: context.clone, branch: "task"},
            head: head,
            opened_at: DateTime.utc_now()
@@ -503,14 +504,14 @@ defmodule MDTClient.Sandbox.HostileTextTest do
         "clear" <> @esc <> "[2J\r\n" <> @zwsp <> "\n"
       )
 
-      assert {:ok, pull} = open(context, message: "fix " <> @rlo <> "kcah a ton")
+      assert {:ok, handoff} = open(context, message: "fix " <> @rlo <> "kcah a ton")
 
-      assert {:ok, facts} = PullRequest.facts(context.store, pull)
+      assert {:ok, facts} = Handoff.facts(context.store, handoff)
       assert length(facts.files) == 4
       assert_shown(facts)
       assert Enum.any?(facts.commits, &(&1.subject =~ "\\u{202E}"))
 
-      assert {:ok, diff} = PullRequest.diff(context.store, pull, facts.merge_base)
+      assert {:ok, diff} = Handoff.diff(context.store, handoff, facts.merge_base)
       assert_shown(diff)
       assert length(diff.files) == 4
 
@@ -521,8 +522,8 @@ defmodule MDTClient.Sandbox.HostileTextTest do
              end)
 
       # And it still comes in whole, under the names it has.
-      assert {:ok, _} = PullStore.copy_into(context.store, context.repo, 1)
-      assert {:ok, _undo} = Landing.bring(context.repo, 1, pull.head, false)
+      assert {:ok, _} = HandoffStore.copy_into(context.store, context.repo, 1)
+      assert {:ok, _undo} = Accept.bring(context.repo, 1, handoff.head, false)
       assert File.read!(Path.join(context.repo, <<"caf", 0xE9, ".txt">>)) == "latin-1 name\n"
     end
 
@@ -534,11 +535,11 @@ defmodule MDTClient.Sandbox.HostileTextTest do
         String.duplicate("a line of text\n", 200_000)
       )
 
-      assert {:ok, pull} = open(context)
-      assert {:ok, facts} = PullRequest.facts(context.store, pull)
+      assert {:ok, handoff} = open(context)
+      assert {:ok, facts} = Handoff.facts(context.store, handoff)
 
       assert {:ok, %{files: [big], cut?: true}} =
-               PullRequest.diff(context.store, pull, facts.merge_base)
+               Handoff.diff(context.store, handoff, facts.merge_base)
 
       assert big.truncated?
       assert big.hunks |> Enum.map(&length(&1.lines)) |> Enum.sum() <= 6_000
@@ -555,13 +556,13 @@ defmodule MDTClient.Sandbox.HostileTextTest do
       refs = git(context.repo, ["for-each-ref"])
 
       assert open(context, size_limit_mib: 1) == {:error, :too_large}
-      assert PullRequest.explain(:too_large) =~ "more than 1 GiB"
+      assert Handoff.explain(:too_large) =~ "more than 1 GiB"
       assert git(context.repo, ["for-each-ref"]) == refs
       assert Path.wildcard(Path.join(context.store, "objects/**/tmp_*")) == []
 
       # Under the limit, the same branch arrives.
       File.write!(Path.join(context.clone, "note.txt"), "more\n")
-      assert {:ok, _pull} = open(context, size_limit_mib: 16)
+      assert {:ok, _handoff} = open(context, size_limit_mib: 16)
     end
   end
 

@@ -46,12 +46,13 @@ defmodule MDTClient.Sandbox.Server do
   with its output gets a new one.
 
   It also keeps the image's builds (the current one and the two before it),
-  the copies of the VM's Home disk, the pull requests agents opened, and how
+  the copies of the VM's Home disk, the projects, their mirrors and the
+  handoffs agents send, and how
   far the VM's memory was seeded and reviewed.
 
   Slow work (`msb`, podman, copying disks, minting tokens, git) runs outside
   this process, so the pages and the proxy never wait on it. Only
-  `MDTClient.Sandbox`, `Egress`, `Channel`, `Dns` and `PullRequests` call this
+  `MDTClient.Sandbox`, `Egress`, `Channel`, `Dns`, `Projects` and `Handoffs` call this
   module.
   """
 
@@ -76,7 +77,9 @@ defmodule MDTClient.Sandbox.Server do
     Memory,
     Msb,
     Policy,
-    PullRequest,
+    Handoff,
+    Project,
+    Projects,
     Settings,
     Shares,
     VM
@@ -89,7 +92,10 @@ defmodule MDTClient.Sandbox.Server do
   @file_name "sandbox.bin"
   @poll_every 10_000
   @sweep_every 30_000
-  @pulls_kept 100
+  @handoffs_kept 100
+  @mirror_every 2_000
+  # A mirror that failed is tried again this often, unless your branch moves.
+  @mirror_retry_seconds 60
   @max_leaves 64
   @leaf_kept_seconds 7 * 24 * 3_600
   @kill_after_ms 5_000
@@ -176,8 +182,11 @@ defmodule MDTClient.Sandbox.Server do
       builds: builds,
       # A copy whose file is gone can't be brought back: it isn't listed.
       snapshots: Enum.filter(saved[:snapshots] || [], &Disks.snapshot?(folders, &1)),
-      pulls: saved[:pulls] || [],
-      pull_seq: saved[:pull_seq] || 0,
+      projects: saved[:projects] || [],
+      # project name => what its last update did; kept in memory only.
+      mirror: %{},
+      handoffs: saved[:handoffs] || [],
+      handoff_seq: saved[:handoff_seq] || 0,
       memory: saved[:memory] || %{seed_count: nil, seeded_at: nil, reviewed: 0},
       folders: folders,
       approvals: [],
@@ -219,6 +228,7 @@ defmodule MDTClient.Sandbox.Server do
 
     if State.external?() do
       Process.send_after(self(), :poll, @poll_every)
+      Process.send_after(self(), :mirror, @mirror_every)
       {:ok, state, {:continue, :check}}
     else
       {:ok, state}
@@ -251,7 +261,9 @@ defmodule MDTClient.Sandbox.Server do
        builds: state.builds,
        created_ref: state.created_ref,
        snapshots: Enum.sort_by(state.snapshots, & &1.taken_at, {:desc, DateTime}),
-       pulls: state.pulls,
+       projects: state.projects,
+       mirror: state.mirror,
+       handoffs: state.handoffs,
        memory: Map.put(state.memory, :host?, Memory.host_memory?()),
        folders: state.folders,
        proxy: state.proxy,
@@ -593,63 +605,137 @@ defmodule MDTClient.Sandbox.Server do
     end
   end
 
-  ## Pull requests
+  ## Projects and handoffs
   #
   # The records only: the git work runs in the caller's process
-  # (`MDTClient.Sandbox.PullRequests`), never here.
+  # (`MDTClient.Sandbox.Projects`, `MDTClient.Sandbox.Handoffs`), or in a
+  # task for the mirrors, never here.
 
-  def handle_call(:pulls, _from, state) do
+  def handle_call(:projects, _from, state) do
     {:reply,
      %{
-       pulls: state.pulls,
-       vm: %{name: state.vm.name, status: state.vm.status},
+       projects: state.projects,
+       mirror: state.mirror,
+       handoffs: state.handoffs,
+       vm: %{name: state.vm.name, status: state.vm.status, started_at: state.vm.started_at},
        dir: Path.dirname(state.folders.optmem),
        shares: state.settings.shares
      }, state}
   end
 
-  def handle_call(:next_pull_id, _from, state) do
-    id = state.pull_seq + 1
-    {:reply, id, state |> State.change(:pull_seq, fn _ -> id end) |> State.changed()}
+  def handle_call({:add_project, %Project{} = project}, _from, state) do
+    if Enum.any?(state.projects, &(&1.path == project.path or &1.name == project.name)) do
+      {:reply, {:error, :already_added}, state}
+    else
+      {:reply, {:ok, project},
+       state
+       |> State.change(:projects, &(&1.projects ++ [project]))
+       |> State.log(%{outcome: :project, summary: "#{project.name} is a project"})
+       |> State.write_inbox()
+       |> State.changed()}
+    end
   end
 
-  # A pull request, new or updated. Returns those too old to keep, for the
+  def handle_call({:put_project, %Project{name: name} = project, summary}, _from, state) do
+    if Enum.any?(state.projects, &(&1.name == name)) do
+      {:reply, {:ok, project},
+       state
+       |> State.change(:projects, fn state ->
+         Enum.map(state.projects, &if(&1.name == name, do: project, else: &1))
+       end)
+       |> State.log(%{outcome: :project, summary: summary})
+       |> State.changed()}
+    else
+      {:reply, {:error, :not_found}, state}
+    end
+  end
+
+  def handle_call({:remove_project, name}, _from, state) do
+    case Enum.find(state.projects, &(&1.name == name)) do
+      nil ->
+        {:reply, {:error, :not_found}, state}
+
+      project ->
+        {:reply, {:ok, project},
+         state
+         |> State.change(:projects, &Enum.reject(&1.projects, fn p -> p.name == name end))
+         |> State.change(:mirror, &Map.delete(&1.mirror, name))
+         |> State.log(%{outcome: :project, summary: "#{name} is no longer a project"})
+         |> State.write_inbox()
+         |> State.changed()}
+    end
+  end
+
+  # What one update of a mirror did. Logged only when it says something
+  # new: a rescue, a failure, or that it works again.
+  def handle_call({:mirrored, name, entry}, _from, state) do
+    before = Map.get(state.mirror, name, %{})
+
+    summary =
+      cond do
+        entry[:rescued] ->
+          "Edits found in the mirror of #{name}, kept in the VM as #{entry.rescued}"
+
+        entry[:error] && entry.error != before[:error] ->
+          "The mirror of #{name} could not be updated: #{entry.error}"
+
+        is_nil(entry[:error]) && before[:error] ->
+          "The mirror of #{name} is current again"
+
+        true ->
+          nil
+      end
+
+    state =
+      state
+      |> State.change(:mirror, &Map.put(&1.mirror, name, entry))
+      |> then(&if(summary, do: State.log(&1, %{outcome: :project, summary: summary}), else: &1))
+
+    {:reply, :ok, state}
+  end
+
+  def handle_call(:next_handoff_id, _from, state) do
+    id = state.handoff_seq + 1
+    {:reply, id, state |> State.change(:handoff_seq, fn _ -> id end) |> State.changed()}
+  end
+
+  # A handoff, new or updated. Returns those too old to keep, for the
   # caller to let go of what the store holds for them.
-  def handle_call({:put_pull, %PullRequest{id: id} = pull, summary}, _from, state) do
-    others = Enum.reject(state.pulls, &(&1.id == id))
-    {kept, dropped} = Enum.split([pull | others], @pulls_kept)
+  def handle_call({:put_handoff, %Handoff{id: id} = handoff, summary}, _from, state) do
+    others = Enum.reject(state.handoffs, &(&1.id == id))
+    {kept, dropped} = Enum.split([handoff | others], @handoffs_kept)
 
     {:reply, {:ok, dropped},
      state
-     |> State.change(:pulls, fn _ -> kept end)
-     |> State.log(%{outcome: :pull, summary: summary})
+     |> State.change(:handoffs, fn _ -> kept end)
+     |> State.log(%{outcome: :handoff, summary: summary})
      |> State.changed()}
   end
 
   # What the list shows of one, worked out again: nothing to log.
-  def handle_call({:pull_stats, id, stats}, _from, state) do
+  def handle_call({:handoff_stats, id, stats}, _from, state) do
     {:reply, :ok,
      state
-     |> State.change(:pulls, fn state ->
-       Enum.map(state.pulls, &if(&1.id == id, do: %{&1 | stats: stats}, else: &1))
+     |> State.change(:handoffs, fn state ->
+       Enum.map(state.handoffs, &if(&1.id == id, do: %{&1 | stats: stats}, else: &1))
      end)
      |> State.changed()}
   end
 
-  def handle_call({:update_pull, id, fun, summary}, _from, state) do
-    case Enum.find(state.pulls, &(&1.id == id)) do
+  def handle_call({:update_handoff, id, fun, summary}, _from, state) do
+    case Enum.find(state.handoffs, &(&1.id == id)) do
       nil ->
         {:reply, {:error, :not_found}, state}
 
-      pull ->
-        updated = fun.(pull)
+      handoff ->
+        updated = fun.(handoff)
 
         {:reply, {:ok, updated},
          state
-         |> State.change(:pulls, fn state ->
-           Enum.map(state.pulls, &if(&1.id == id, do: updated, else: &1))
+         |> State.change(:handoffs, fn state ->
+           Enum.map(state.handoffs, &if(&1.id == id, do: updated, else: &1))
          end)
-         |> State.log(%{outcome: :pull, summary: summary})
+         |> State.log(%{outcome: :handoff, summary: summary})
          |> State.changed()}
     end
   end
@@ -855,7 +941,26 @@ defmodule MDTClient.Sandbox.Server do
     {:noreply, State.change(state, :proxy, fn _ -> status end)}
   end
 
+  # While the VM runs, each mirror follows your branches: the task looks at
+  # them, and updates the mirrors whose branches moved.
   @impl true
+  def handle_info(:mirror, state) do
+    Process.send_after(self(), :mirror, @mirror_every)
+
+    if state.vm.status == :running and state.projects != [] and
+         :mirror not in Map.values(state.tasks) do
+      %{username: username, projects: projects, mirror: mirror} = state
+      vm = %{name: state.vm.name, status: state.vm.status, started_at: state.vm.started_at}
+
+      {:noreply,
+       State.task(state, :mirror, fn ->
+         Projects.follow(username, projects, mirror, vm, @mirror_retry_seconds)
+       end)}
+    else
+      {:noreply, state}
+    end
+  end
+
   def handle_info(:poll, state) do
     Process.send_after(self(), :poll, @poll_every)
 

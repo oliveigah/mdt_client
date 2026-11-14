@@ -106,7 +106,7 @@ defmodule MDTClient.Sandbox.HostGit do
   is HEAD itself.
 
   `env` goes to every git run, as when the objects it makes go somewhere
-  other than your repository (`MDTClient.Sandbox.PullStore.view/2`).
+  other than your repository (`MDTClient.Sandbox.HandoffStore.view/2`).
   """
   @spec snapshot(Path.t(), [{String.t(), String.t()}]) :: {:ok, String.t()} | {:error, String.t()}
   def snapshot(repo, env \\ []) do

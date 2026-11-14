@@ -15,37 +15,40 @@ Folders the user shared sit at the same path as on their machine, read-only
 unless they chose otherwise. Copy or clone from them into `/work` rather
 than building in them.
 
-## Giving work back: pull requests
+## Projects: the mirror, your worktree, and handoffs
 
-Nothing you do here reaches the user's machine by itself. Work goes back
-as a pull request, which they review whole and bring in, or send back
-with a note.
+A project is a git repository of the user's that MDT mirrors here, at
+`/work/NAME`. `mdt project` says where you are in one and what its rules are.
 
-1. Work in a git repository in `/work`: clone it there (from a shared
-   folder, or from its remote through a grant), on a branch of your own.
-   One piece of work, one branch.
-2. Work, build and test. Commit as you go.
-3. When it is done and its tests pass, open the pull request from that
-   branch, with everything committed:
+- **The mirror, `/work/NAME`, is view only.** It is the user's target
+  branch as they committed it, and MDT keeps it current. Read it, run
+  things in it, but change nothing there: MDT moves anything changed or
+  committed in it to a `rescued/…` branch the next time the user's branch
+  moves. If your thread is in the mirror and you need to change code,
+  stop. Run `mdt worktree new TASK`, give the user the line it prints, and
+  ask them to start your thread again there.
+- **Your worktree, `/work/NAME.wt/TASK`, is yours.** One per thread, on a
+  branch of its own, made by `mdt worktree new TASK`. Work, build and test
+  there, and commit as you go.
+- **`host/BRANCH` is the user's branch, live,** in every worktree of the
+  project; `host` alone is the default target branch. Catch up with it by
+  merging, not rebasing: `git merge host`.
+- **Hand your work off when it is done:** catch up (`git merge host`,
+  resolve, commit), run the tests, then
 
-       mdt pr --title "What this is" --body notes.md
+      mdt handoff --title "What this is" --body notes.md
 
-   MDT works out which repository on the user's machine it is for: a
-   remote that is a path on their machine (as when you cloned from a
-   shared folder), or a remote URL a repository of theirs has. When it
-   can't tell, it says so: name the folder on their machine with
-   `--repo /path/there`, and ask the user when you don't know it. `--base
-   BRANCH` is their branch it goes into; by default, the one they have
-   checked out.
-4. More commits on the same branch, then `mdt pr` again, update it. The
-   pull request is the commit your branch is at when you run it.
-5. `mdt prs` says what they decided: brought in, closed, or sent back with
-   a note. When it conflicts with their branch, they may send it back with
-   that branch: it arrives here as `host/BRANCH`. Merge it (rather than
-   rebase), resolve, commit, and run `mdt pr` again.
+  Everything must be committed. It goes onto the project's default target
+  branch; `--onto BRANCH` names another of its target branches, and you ask
+  the user which when you aren't sure. A handoff that doesn't merge with
+  that branch as it is now is refused: catch up again. More commits and
+  `mdt handoff` again update it.
+- **`mdt handoffs`** says what the user decided: accepted, closed, or sent
+  back with a note. After a note, do what it asks, catch up, and hand off
+  again.
 
-If they ask for a checkpoint of work in progress, open a pull request the
-same way and say in the title that it isn't finished.
+If the user asks for a checkpoint of work in progress, hand it off the same
+way and say in the title that it isn't finished.
 
 ## Access comes only from MDT
 

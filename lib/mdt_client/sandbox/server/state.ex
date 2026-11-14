@@ -230,6 +230,7 @@ defmodule MDTClient.Sandbox.Server.State do
   """
   def write_inbox(state) do
     Inbox.write(inbox_dir(state), state.grants, state.values, ca_pem(state))
+    Inbox.write_mirrors(inbox_dir(state), Enum.map(state.projects, &"/work/#{&1.name}"))
     write_host(state)
   rescue
     error ->
@@ -288,8 +289,9 @@ defmodule MDTClient.Sandbox.Server.State do
         builds: state.builds,
         current: state.image.tag,
         snapshots: state.snapshots,
-        pulls: state.pulls,
-        pull_seq: state.pull_seq,
+        projects: state.projects,
+        handoffs: state.handoffs,
+        handoff_seq: state.handoff_seq,
         memory: state.memory
       })
 

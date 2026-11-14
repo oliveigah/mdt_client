@@ -492,6 +492,9 @@ defmodule MDTClient.Sandbox.Server.Machine do
 
   def finished(state, :env, _result), do: state
 
+  # The mirror task tells the server what it did as it goes.
+  def finished(state, :mirror, _result), do: state
+
   def finished(state, :delete_builds, _result), do: state
 
   defp seeded(state, nil), do: state

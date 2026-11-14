@@ -17,15 +17,17 @@ defmodule MDTClientWeb.SandboxLive do
 
   alias MDTClient.Desktop.Notifications
   alias MDTClient.Sandbox
-  alias MDTClient.Sandbox.{Event, Presets, PullRequests, RequestView, Shares}
+  alias MDTClient.Sandbox.{Event, Handoffs, Presets, Projects, RequestView, Shares}
   alias MDTClient.Tools
   alias MDTClientWeb.SandboxLive.{Activity, Approvals, Dialogs, Grants, Overview, Settings, Setup}
-  alias MDTClientWeb.SandboxLive.Pulls
+  alias MDTClientWeb.SandboxLive.Handoffs, as: HandoffsPage
+  alias MDTClientWeb.SandboxLive.Projects, as: ProjectsPage
 
   @pages [
     {:overview, "Overview", "hero-squares-2x2", "/tools/sandbox"},
     {:approvals, "Approvals", "hero-hand-raised", "/tools/sandbox/approvals"},
-    {:pulls, "Pull requests", "hero-arrow-path-rounded-square", "/tools/sandbox/pulls"},
+    {:projects, "Projects", "hero-code-bracket-square", "/tools/sandbox/projects"},
+    {:handoffs, "Handoffs", "hero-inbox-arrow-down", "/tools/sandbox/handoffs"},
     {:grants, "Grants", "hero-key", "/tools/sandbox/grants"},
     {:activity, "Activity", "hero-queue-list", "/tools/sandbox/activity"},
     {:settings, "Settings", "hero-cog-6-tooth", "/tools/sandbox/settings"},
@@ -62,10 +64,14 @@ defmodule MDTClientWeb.SandboxLive do
      |> assign(:share_form, to_form(%{"path" => "", "mode" => "ro"}, as: :share))
      |> assign(:share_error, nil)
      |> assign(:note_form, note_form())
-     |> assign(:pull_id, nil)
-     |> assign(:pull_tab, "conversation")
-     |> assign(:pull_filter, "open")
-     |> assign(:pull_view, nil)
+     |> assign(:handoff_id, nil)
+     |> assign(:handoff_tab, "conversation")
+     |> assign(:handoff_filter, "open")
+     |> assign(:handoff_view, nil)
+     |> assign(:project_form, to_form(%{"path" => ""}, as: :project))
+     |> assign(:project_error, nil)
+     |> assign(:project_settings, nil)
+     |> assign(:project_worktrees, %{})
      |> assign(:vm_errors, %{})
      |> assign(:focus, nil)
      |> assign(:desktop, nil)
@@ -93,12 +99,15 @@ defmodule MDTClientWeb.SandboxLive do
         :approvals ->
           assign(socket, :focus, params["focus"])
 
-        :pulls ->
+        :handoffs ->
           assign(socket,
-            pull_id: pull_id(params["pr"]),
-            pull_tab: params["tab"] || "conversation",
-            pull_filter: params["filter"] || "open"
+            handoff_id: handoff_id(params["id"]),
+            handoff_tab: params["tab"] || "conversation",
+            handoff_filter: params["filter"] || "open"
           )
+
+        :projects ->
+          assign_worktrees(socket)
 
         :setup ->
           assign(
@@ -117,7 +126,7 @@ defmodule MDTClientWeb.SandboxLive do
           socket
       end
 
-    {:noreply, socket |> refresh() |> assign_pull() |> page_title()}
+    {:noreply, socket |> refresh() |> assign_handoff() |> page_title()}
   end
 
   @impl true
@@ -136,7 +145,7 @@ defmodule MDTClientWeb.SandboxLive do
           page={@page}
           vm={@vm}
           waiting={length(@waiting)}
-          pulls_open={Enum.count(@pulls, &(&1.status == :open))}
+          handoffs_open={Enum.count(@handoffs, &(&1.status == :open))}
           grants_on={Enum.count(@grants, &(&1.state == :on))}
           proxy={@proxy}
           image={@image}
@@ -234,13 +243,25 @@ defmodule MDTClientWeb.SandboxLive do
                   host_error={@host_error}
                   desktop={@desktop}
                 />
-              <% :pulls -> %>
-                <Pulls.page
-                  pulls={@pulls}
-                  filter={@pull_filter}
-                  view={@pull_view}
-                  tab={@pull_tab}
+              <% :handoffs -> %>
+                <HandoffsPage.page
+                  handoffs={@handoffs}
+                  filter={@handoff_filter}
+                  view={@handoff_view}
+                  tab={@handoff_tab}
                   note_form={@note_form}
+                  now={@now}
+                />
+              <% :projects -> %>
+                <ProjectsPage.page
+                  projects={@projects}
+                  mirror={@mirror}
+                  handoffs={@handoffs}
+                  worktrees={@project_worktrees}
+                  settings={@project_settings}
+                  suggestions={suggestions(@projects)}
+                  form={@project_form}
+                  error={@project_error}
                   vm={@vm}
                   now={@now}
                 />
@@ -278,7 +299,7 @@ defmodule MDTClientWeb.SandboxLive do
   attr :page, :atom, required: true
   attr :vm, :any, required: true
   attr :waiting, :integer, required: true
-  attr :pulls_open, :integer, required: true
+  attr :handoffs_open, :integer, required: true
   attr :grants_on, :integer, required: true
   attr :proxy, :map, required: true
   attr :image, :map, required: true
@@ -370,11 +391,11 @@ defmodule MDTClientWeb.SandboxLive do
             {@waiting}
           </span>
           <span
-            :if={id == :pulls and @pulls_open > 0}
-            id="sandbox-nav-pulls-open"
+            :if={id == :handoffs and @handoffs_open > 0}
+            id="sandbox-nav-handoffs-open"
             class="rounded-full bg-accent-soft px-1.5 py-px text-[10px] font-semibold tabular-nums text-accent-strong"
           >
-            {@pulls_open}
+            {@handoffs_open}
           </span>
           <span
             :if={id == :grants and @grants_on > 0}
@@ -983,29 +1004,118 @@ defmodule MDTClientWeb.SandboxLive do
     {:noreply, refresh(socket)}
   end
 
-  ## Pull requests
+  ## Projects
 
-  def handle_event("land_change", %{"land" => params}, socket) do
-    case socket.assigns.pull_view do
-      nil ->
-        {:noreply, socket}
+  def handle_event("open_repository", params, socket) do
+    path = params["path"] || get_in(params, ["project", "path"]) || ""
+    username = socket.assigns.username
 
-      view ->
-        land = land_state(view, params, socket.assigns.username)
-        {:noreply, assign(socket, :pull_view, %{view | land: land})}
+    with {:ok, project} <- Projects.add(username, path),
+         :ok <- Projects.open(username, project.name) do
+      {:noreply,
+       socket
+       |> assign(project_form: to_form(%{"path" => ""}, as: :project), project_error: nil)
+       |> refresh()
+       |> assign_worktrees()
+       |> put_notice(:success, "#{project.name} opened in Zed",
+         body:
+           "Its mirror is /work/#{project.name}, view only. Agents work in worktrees beside it."
+       )}
+    else
+      {:error, reason} ->
+        {:noreply,
+         socket
+         |> refresh()
+         |> assign(
+           project_form: to_form(%{"path" => path}, as: :project),
+           project_error: Projects.explain(reason)
+         )}
     end
   end
 
-  def handle_event("land_pull", params, socket) do
-    with %{land: %{choice: %{} = choice}, pull: pull} <- socket.assigns.pull_view do
-      case PullRequests.land(socket.assigns.username, pull.id, choice, params["anyway"] == "true") do
-        {:ok, pull} ->
+  def handle_event("open_project", %{"name" => name} = params, socket) do
+    case Projects.open(socket.assigns.username, name, params["folder"]) do
+      :ok ->
+        {:noreply,
+         socket
+         |> refresh()
+         |> put_notice(:success, "Opened in Zed", body: params["folder"] || "/work/#{name}")}
+
+      {:error, reason} ->
+        {:noreply,
+         socket
+         |> refresh()
+         |> put_notice(:warning, "Zed didn't open", body: Projects.explain(reason))}
+    end
+  end
+
+  def handle_event("toggle_project_settings", %{"name" => name}, socket) do
+    settings =
+      case socket.assigns.project_settings do
+        %{name: ^name} ->
+          nil
+
+        _ ->
+          case Enum.find(socket.assigns.projects, &(&1.name == name)) do
+            nil -> nil
+            project -> project_settings(project, nil)
+          end
+      end
+
+    {:noreply, assign(socket, :project_settings, settings)}
+  end
+
+  def handle_event("save_project", %{"name" => name} = params, socket) do
+    attrs = Map.put_new(params["project"] || %{}, "targets", [])
+
+    case Projects.update(socket.assigns.username, name, attrs) do
+      {:ok, _project} ->
+        {:noreply,
+         socket
+         |> assign(:project_settings, nil)
+         |> refresh()
+         |> put_notice(:success, "Settings of #{name} saved")}
+
+      {:error, reason} ->
+        project = Enum.find(socket.assigns.projects, &(&1.name == name))
+
+        {:noreply,
+         assign(
+           socket,
+           :project_settings,
+           project && project_settings(project, Projects.explain(reason))
+         )}
+    end
+  end
+
+  def handle_event("remove_project", %{"name" => name}, socket) do
+    Projects.remove(socket.assigns.username, name)
+    {:noreply, socket |> assign(:project_settings, nil) |> refresh()}
+  end
+
+  ## Handoffs
+
+  def handle_event("accept_change", %{"accept" => params}, socket) do
+    case socket.assigns.handoff_view do
+      %{accept: %{}} = view ->
+        accept = accept_state(view, params, socket.assigns.username)
+        {:noreply, assign(socket, :handoff_view, %{view | accept: accept})}
+
+      _ ->
+        {:noreply, socket}
+    end
+  end
+
+  def handle_event("accept_handoff", params, socket) do
+    with %{accept: %{how: how}, handoff: handoff} <- socket.assigns.handoff_view do
+      case Handoffs.accept(socket.assigns.username, handoff.id, how, params["anyway"] == "true") do
+        {:ok, handoff} ->
           {:noreply,
            socket
            |> refresh()
-           |> assign_pull()
-           |> put_notice(:success, "Brought in",
-             body: "\"#{pull.title}\": " <> PullRequests.landing_words(pull.landed) <> "."
+           |> assign_handoff()
+           |> put_notice(:success, "Accepted",
+             body: "\"#{handoff.title}\": " <> Handoffs.accepted_words(handoff.accepted) <> "."
            )}
 
         {:error, reason} ->
@@ -1013,43 +1123,58 @@ defmodule MDTClientWeb.SandboxLive do
           {:noreply,
            socket
            |> refresh()
-           |> assign_pull()
-           |> put_notice(:warning, "Nothing was brought in", body: PullRequests.explain(reason))}
+           |> assign_handoff()
+           |> put_notice(:warning, "Nothing was accepted", body: Handoffs.explain(reason))}
       end
     else
-      _ -> {:noreply, put_notice(socket, :info, "Choose where it goes first")}
+      _ -> {:noreply, socket}
     end
   end
 
-  def handle_event("undo_pull", %{"id" => id}, socket) do
-    pull_action(
+  def handle_event("save_handoff_branch", %{"branch" => %{"name" => branch}}, socket) do
+    with %{handoff: handoff} <- socket.assigns.handoff_view do
+      case Handoffs.save_branch(socket.assigns.username, handoff.id, branch) do
+        {:ok, branch} ->
+          {:noreply,
+           socket
+           |> refresh()
+           |> assign_handoff()
+           |> put_notice(:success, "Saved as #{branch}",
+             body: "Its commits are on that branch, checked out nowhere. The handoff stays open."
+           )}
+
+        {:error, reason} ->
+          {:noreply,
+           put_notice(socket, :warning, "No branch was made", body: Handoffs.explain(reason))}
+      end
+    else
+      _ -> {:noreply, socket}
+    end
+  end
+
+  def handle_event("undo_handoff", %{"id" => id}, socket) do
+    handoff_action(
       socket,
-      PullRequests.undo(socket.assigns.username, pull_id(id)),
+      Handoffs.undo(socket.assigns.username, handoff_id(id)),
       "Taken back out"
     )
   end
 
-  def handle_event("send_back_pull", %{"pull" => id, "send_back" => params}, socket) do
-    result =
-      PullRequests.send_back(
-        socket.assigns.username,
-        pull_id(id),
-        params["note"] || "",
-        params["base"] == "true"
-      )
+  def handle_event("send_back_handoff", %{"handoff" => id, "send_back" => params}, socket) do
+    result = Handoffs.send_back(socket.assigns.username, handoff_id(id), params["note"] || "")
 
     socket =
       if match?({:ok, _}, result), do: assign(socket, :note_form, note_form()), else: socket
 
-    pull_action(socket, result, "Sent back to the agent")
+    handoff_action(socket, result, "Sent back to its thread")
   end
 
-  def handle_event("close_pull", %{"id" => id}, socket) do
-    pull_action(socket, PullRequests.close(socket.assigns.username, pull_id(id)), "Closed")
+  def handle_event("close_handoff", %{"id" => id}, socket) do
+    handoff_action(socket, Handoffs.close(socket.assigns.username, handoff_id(id)), "Closed")
   end
 
-  def handle_event("reopen_pull", %{"id" => id}, socket) do
-    pull_action(socket, PullRequests.reopen(socket.assigns.username, pull_id(id)), "Reopened")
+  def handle_event("reopen_handoff", %{"id" => id}, socket) do
+    handoff_action(socket, Handoffs.reopen(socket.assigns.username, handoff_id(id)), "Reopened")
   end
 
   def handle_event("save_settings", %{"vm" => params}, socket) do
@@ -1222,109 +1347,86 @@ defmodule MDTClientWeb.SandboxLive do
     |> assign(snapshot)
     |> assign(:grant_map, grant_map)
     |> assign(:marks, RequestView.marks(snapshot.grants))
-    |> follow_pull()
+    |> follow_handoff()
     |> assign_page_data(grant_map)
   end
 
-  # The pull request being looked at, with what MDT works out about it
-  # against your repository as it is now: worked out when you open it and
-  # after you act on it, not on every refresh, since it runs git. Its diff
-  # only on the files tab.
-  defp assign_pull(socket) do
+  # The handoff being looked at, with what MDT works out about it against
+  # your repository as it is now: worked out when you open it and after you
+  # act on it, not on every refresh, since it runs git. Its diff only on the
+  # files tab.
+  defp assign_handoff(socket) do
     username = socket.assigns.username
-    id = socket.assigns[:pull_id]
-    pull = id && Enum.find(socket.assigns.pulls, &(&1.id == id))
+    id = socket.assigns[:handoff_id]
+    handoff = id && Enum.find(socket.assigns.handoffs, &(&1.id == id))
 
     view =
-      if socket.assigns[:page] == :pulls and pull do
+      if socket.assigns[:page] == :handoffs and handoff do
         {facts, error} =
-          case PullRequests.facts(username, id) do
+          case Handoffs.facts(username, id) do
             {:ok, facts} -> {facts, nil}
-            {:error, reason} -> {nil, PullRequests.explain(reason)}
+            {:error, reason} -> {nil, Handoffs.explain(reason)}
           end
 
-        open? = pull.status in [:open, :changes_requested]
-
         view = %{
-          pull: pull,
+          handoff: handoff,
           facts: facts,
           error: error,
           diff:
-            if(facts && socket.assigns.pull_tab == "files",
-              do: ok(PullRequests.diff(username, id, facts.merge_base))
+            if(facts && socket.assigns.handoff_tab == "files",
+              do: ok(Handoffs.diff(username, id, facts.merge_base))
             ),
-          destinations:
-            if(open?,
-              do:
-                ok(PullRequests.destinations(username, id)) ||
-                  %{worktrees: [], branch: "", path: ""}
-            ),
-          land: nil
+          accept: nil
         }
 
-        if open? and socket.assigns.pull_tab not in ["commits", "files"],
-          do: %{view | land: land_state(view, %{}, username)},
-          else: view
+        if handoff.status in [:open, :sent_back] and
+             socket.assigns.handoff_tab not in ["commits", "files"],
+           do: %{view | accept: accept_state(view, %{}, username)},
+           else: view
       end
 
-    assign(socket, :pull_view, view)
+    assign(socket, :handoff_view, view)
   end
 
-  # What the merge box has chosen, from the form, and what that would do.
-  defp land_state(%{pull: pull, destinations: dest}, params, username) do
-    how = if params["how"] == "commits", do: :commits, else: :changes
-    where = params["where"] || default_where(pull, dest.worktrees)
-    where = if where == "new_branch" and how == :changes, do: "new_worktree", else: where
-    branch = params["branch"] || dest.branch
-    path = params["path"] || dest.path
+  # How the accept box would accept it, and what that would do. It starts
+  # as the project accepts by default.
+  defp accept_state(%{handoff: handoff} = view, params, username) do
+    how =
+      case params["how"] do
+        "commits" ->
+          :commits
 
-    choice =
-      case where do
-        "wt:" <> index ->
-          with {i, ""} <- Integer.parse(index),
-               %{path: path} <- Enum.at(dest.worktrees, i) do
-            %{how: how, where: {:worktree, path}}
-          else
-            _ -> nil
-          end
-
-        "new_worktree" ->
-          %{how: how, where: {:new_worktree, path, String.trim(branch)}}
-
-        "new_branch" ->
-          %{how: how, where: {:new_branch, String.trim(branch)}}
+        "changes" ->
+          :changes
 
         _ ->
-          nil
+          (view[:accept] && view.accept.how) || project_accept(handoff, socket_projects(username))
       end
 
     preview =
-      case choice && PullRequests.preview(username, pull.id, choice) do
-        nil -> nil
+      case Handoffs.preview(username, handoff.id, how) do
         {:ok, preview} -> {:ok, preview}
-        {:error, reason} -> {:error, PullRequests.explain(reason)}
+        {:error, reason} -> {:error, Handoffs.explain(reason)}
       end
+
+    branch =
+      (view[:accept] && view.accept.branch_form[:name].value) ||
+        Handoffs.default_branch(username, handoff.id)
 
     %{
       how: how,
-      where: where,
-      choice: choice,
       preview: preview,
-      form:
-        to_form(
-          %{"how" => to_string(how), "where" => where, "branch" => branch, "path" => path},
-          as: :land
-        )
+      form: to_form(%{"how" => to_string(how)}, as: :accept),
+      branch_form: to_form(%{"name" => branch}, as: :branch)
     }
   end
 
-  # Your worktree on the base branch, when you have one; else the first.
-  defp default_where(_pull, []), do: "new_worktree"
+  defp socket_projects(username), do: Projects.list(username)
 
-  defp default_where(pull, worktrees) do
-    case Enum.find_index(worktrees, &(&1.branch == pull.base)) do
-      nil -> "wt:0"
-      index -> "wt:#{index}"
+  defp project_accept(handoff, projects) do
+    case Enum.find(projects, &(&1.name == handoff.project)) do
+      nil -> :commits
+      project -> project.accept
     end
   end
 
@@ -1332,44 +1434,79 @@ defmodule MDTClientWeb.SandboxLive do
   defp ok({:error, _reason}), do: nil
 
   # Between those moments the record itself is kept current: an agent may
-  # update the pull request while you look at it.
-  defp follow_pull(%{assigns: %{pull_view: %{pull: %{id: id}} = view}} = socket) do
-    case Enum.find(socket.assigns.pulls, &(&1.id == id)) do
-      nil -> assign(socket, :pull_view, nil)
-      pull -> assign(socket, :pull_view, %{view | pull: pull})
+  # update the handoff while you look at it.
+  defp follow_handoff(%{assigns: %{handoff_view: %{handoff: %{id: id}} = view}} = socket) do
+    case Enum.find(socket.assigns.handoffs, &(&1.id == id)) do
+      nil -> assign(socket, :handoff_view, nil)
+      handoff -> assign(socket, :handoff_view, %{view | handoff: handoff})
     end
   end
 
-  defp follow_pull(socket), do: socket
+  defp follow_handoff(socket), do: socket
 
-  defp pull_action(socket, result, done) do
+  defp handoff_action(socket, result, done) do
     case result do
-      {:ok, pull} ->
+      {:ok, handoff} ->
         {:noreply,
          socket
          |> refresh()
-         |> assign_pull()
-         |> put_notice(:success, done, body: "\"#{pull.title}\"")}
+         |> assign_handoff()
+         |> put_notice(:success, done, body: "\"#{handoff.title}\"")}
 
       {:error, reason} ->
         {:noreply,
          socket
          |> refresh()
-         |> assign_pull()
-         |> put_notice(:warning, "That didn't happen", body: PullRequests.explain(reason))}
+         |> assign_handoff()
+         |> put_notice(:warning, "That didn't happen", body: Handoffs.explain(reason))}
     end
   end
 
-  defp pull_id(nil), do: nil
+  defp handoff_id(nil), do: nil
 
-  defp pull_id(text) do
+  defp handoff_id(text) do
     case Integer.parse(to_string(text)) do
       {id, ""} -> id
       _ -> nil
     end
   end
 
-  defp note_form, do: to_form(%{"note" => "", "base" => "false"}, as: :send_back)
+  defp note_form, do: to_form(%{"note" => ""}, as: :send_back)
+
+  # Each project's agent worktrees, read from the VM when the page opens or
+  # after you act on a project. Not on every refresh: it goes into the VM.
+  defp assign_worktrees(socket) do
+    username = socket.assigns.username
+
+    worktrees =
+      if socket.assigns.vm.status == :running do
+        Map.new(socket.assigns.projects, fn project ->
+          {project.name, ok(Projects.worktrees(username, project.name)) || []}
+        end)
+      else
+        %{}
+      end
+
+    assign(socket, :project_worktrees, worktrees)
+  end
+
+  defp project_settings(project, error) do
+    %{
+      name: project.name,
+      branches: MDTClient.Sandbox.Project.branches(project),
+      form: to_form(%{}, as: :project),
+      error: error
+    }
+  end
+
+  # Repositories open in the Git tool that aren't projects yet.
+  defp suggestions(projects) do
+    known = MapSet.new(projects, & &1.path)
+
+    MDTClientWeb.GitLive.Session.repositories()
+    |> Enum.reject(&MapSet.member?(known, &1))
+    |> Enum.take(8)
+  end
 
   defp assign_page_data(socket, grant_map) do
     username = socket.assigns.username

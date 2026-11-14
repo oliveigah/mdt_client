@@ -16,7 +16,7 @@ defmodule MDTClient.Sandbox.Shown do
   `text/1` is for everything that is shown: what isn't UTF-8 becomes `�`,
   and a character that doesn't show is written out as `\\u{202E}`. It goes
   where the VM's text enters MDT (`MDTClient.Sandbox.Channel`,
-  `MDTClient.Sandbox.Describe`, `MDTClient.Sandbox.PullRequest`), so pages need
+  `MDTClient.Sandbox.Describe`, `MDTClient.Sandbox.Handoff`), so pages need
   not think about it.
 
   A script that will run on this machine is never changed: what runs must be

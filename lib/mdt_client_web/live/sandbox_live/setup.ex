@@ -8,7 +8,7 @@ defmodule MDTClientWeb.SandboxLive.Setup do
 
   import MDTClientWeb.SandboxLive.Components
 
-  @ssh_host "mdt-sandbox"
+  @ssh_host MDTClient.Sandbox.Zed.ssh_host()
 
   @doc "The host name the VM has in your SSH config."
   def ssh_host, do: @ssh_host

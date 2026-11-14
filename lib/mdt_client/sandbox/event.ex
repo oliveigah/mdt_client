@@ -15,8 +15,10 @@ defmodule MDTClient.Sandbox.Event do
     * `:vm` - the VM started, stopped or was recreated
     * `:command` - a command an agent asked to run on the host: run,
       declined, stopped, ended, its output sent or kept. Never its output.
-    * `:pull` - an agent opened or updated a pull request, or you brought
-      it in, sent it back, closed or reopened it
+    * `:project` - a repository became a project or stopped being one, its
+      settings changed, or its mirror kept stray edits or failed
+    * `:handoff` - an agent handed work off or updated it, or you accepted
+      it, saved it as a branch, sent it back, closed or reopened it
   """
 
   @enforce_keys [:id, :at, :outcome, :summary]
@@ -48,7 +50,8 @@ defmodule MDTClient.Sandbox.Event do
           | :grant
           | :vm
           | :command
-          | :pull
+          | :project
+          | :handoff
 
   @type t :: %__MODULE__{
           id: String.t(),

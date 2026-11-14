@@ -2,8 +2,8 @@
 # mdt: ask MDT, the user's control panel, for access. Written by MDT to
 # /mnt/mdt/bin/mdt. It reaches MDT over vsock (socat), and can only read the
 # grants and the host's description, ask the user to turn a grant on, ask
-# them to run a command on their machine, and open pull requests. See
-# MDTClient.Sandbox.Channel.
+# them to run a command on their machine, and work in projects: make a
+# worktree, hand work off. See MDTClient.Sandbox.Channel.
 set -u
 
 channel=${MDT_CHANNEL:-VSOCK-CONNECT:2:5000}
@@ -46,19 +46,26 @@ mdt - ask MDT, the user's control panel, for access
   mdt wait ID [--wait 60]
       Keep waiting for the answer to an earlier ask or run.
 
-  mdt pr --title "what this is" [--body FILE] [--repo PATH] [--base BRANCH]
-      In a git repository here, on a branch with everything committed: offer
-      that branch to the user as a pull request. --repo is the repository on
-      the user's machine it is for; without it MDT works it out from this
-      repository's remotes. --base is their branch it goes into (the one
-      they have checked out, by default). --body takes the description from
-      a file (- for stdin). Run it again on the same branch to update the
-      pull request with new commits.
+  mdt project
+      Where you are in a project: its mirror (view only) or a worktree of
+      your own, its target branches, and the rules.
 
-  mdt prs
-      The pull requests from this repository: open, sent back (with the
-      user's note, and their branch as host/BRANCH when they sent it),
-      brought in, closed; and whether each conflicts with their branch.
+  mdt worktree new TASK [--onto BRANCH]
+      Make a worktree of your own, /work/NAME.wt/TASK, on a new branch TASK
+      from the user's target branch (the default one unless --onto). Prints
+      the line that opens it in Zed: give it to the user, and continue there.
+
+  mdt handoff --title "what this is" [--body FILE] [--onto BRANCH]
+      In your worktree, with everything committed and caught up (git merge
+      host): hand the branch off to the user. It goes onto the project's
+      default target branch unless --onto names another. Refused when it
+      doesn't merge with that branch as it is now. --body takes the
+      description from a file (- for stdin). Run it again on the same branch
+      to hand off new commits.
+
+  mdt handoffs
+      The project's handoffs: open, sent back (with the user's note),
+      accepted, closed; and whether each still merges with its branch.
 
   mdt vm
       Which VM this is, and whether it is the one MDT runs. When the network
@@ -67,7 +74,7 @@ mdt - ask MDT, the user's control panel, for access
 
 Exit status of grants, request and wait on an ask: 0 the grant is on, 1 the
 ask was wrong, 2 still waiting for the user, 3 declined or given up, 4 MDT
-isn't answering (locked or closed). Of pr and prs: 0 done,
+isn't answering (locked or closed). Of project, worktree, handoff and handoffs: 0 done,
 1 not done (the reason is printed), 4 MDT isn't answering. Of vm: 0 this is
 the VM MDT runs, 1 there is no record to compare, 3 this is not the VM MDT
 runs, 4 MDT isn't answering.
@@ -253,7 +260,8 @@ command=${1:-help}
 wrong=1
 [ "$command" = run ] && wrong=122
 
-grant="" need="" reason="" minutes=60 wait=60 id="" dir="" timeout=120 title="" body="" repo="" base=""
+grant="" need="" reason="" minutes=60 wait=60 id="" dir="" timeout=120 title="" body="" onto=""
+positional=()
 words=()
 while [ $# -gt 0 ]; do
   case $1 in
@@ -263,10 +271,8 @@ while [ $# -gt 0 ]; do
     --title=*) title=${1#*=}; shift ;;
     --body) body=${2-}; shift 2 || shift ;;
     --body=*) body=${1#*=}; shift ;;
-    --repo) repo=${2-}; shift 2 || shift ;;
-    --repo=*) repo=${1#*=}; shift ;;
-    --base) base=${2-}; shift 2 || shift ;;
-    --base=*) base=${1#*=}; shift ;;
+    --onto) onto=${2-}; shift 2 || shift ;;
+    --onto=*) onto=${1#*=}; shift ;;
     --need) need=${2-}; shift 2 || shift ;;
     --need=*) need=${1#*=}; shift ;;
     --minutes) minutes=$(number --minutes "${2-}" "$wrong") || exit "$wrong"; shift 2 || shift ;;
@@ -298,6 +304,8 @@ while [ $# -gt 0 ]; do
         grant=$1
       elif [ "$command" = wait ]; then
         id=$1
+      elif [ "$command" = worktree ]; then
+        positional+=("$1")
       else
         grant=$1
       fi
@@ -355,7 +363,17 @@ case $command in
       *) send "{\"command\":\"wait\",\"id\":$(json "$id"),\"wait\":$wait}" ;;
     esac
     ;;
-  pr)
+  project)
+    send "{\"command\":\"project\",\"cwd\":$(json "$(pwd -P)")}"
+    ;;
+  worktree)
+    if [ "${positional[0]:-}" != new ] || [ -z "${positional[1]:-}" ]; then
+      echo "mdt: make a worktree with: mdt worktree new TASK [--onto BRANCH]" >&2
+      exit 1
+    fi
+    send "{\"command\":\"worktree\",\"cwd\":$(json "$(pwd -P)"),\"name\":$(json "${positional[1]}"),\"onto\":$(json "$onto")}"
+    ;;
+  handoff)
     text=""
     if [ "$body" = - ]; then
       text=$(cat)
@@ -363,10 +381,10 @@ case $command in
       text=$(cat -- "$body") || exit 1
     fi
     identify
-    send "{\"command\":\"pr\",\"cwd\":$(json "$(pwd -P)"),\"title\":$(json "$title"),\"body\":$(json "$text"),\"repo\":$(json "$repo"),\"base\":$(json "$base"),$(identity)}"
+    send "{\"command\":\"handoff\",\"cwd\":$(json "$(pwd -P)"),\"title\":$(json "$title"),\"body\":$(json "$text"),\"onto\":$(json "$onto"),$(identity)}"
     ;;
-  prs)
-    send "{\"command\":\"prs\",\"cwd\":$(json "$(pwd -P)")}"
+  handoffs)
+    send "{\"command\":\"handoffs\",\"cwd\":$(json "$(pwd -P)")}"
     ;;
   vm)
     vm_id=""

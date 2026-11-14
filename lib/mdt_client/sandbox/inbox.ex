@@ -103,6 +103,14 @@ defmodule MDTClient.Sandbox.Inbox do
     :ok
   end
 
+  @doc """
+  Writes `mirrors`, the projects' mirrors in the VM, one folder a line, so
+  a shell opened in one says it is view only.
+  """
+  @spec write_mirrors(Path.t(), [Path.t()]) :: :ok
+  def write_mirrors(dir, folders),
+    do: put_changed(dir, "mirrors", Enum.map_join(folders, &(&1 <> "\n")))
+
   @doc "Writes `host.md`, the description of your machine that `mdt host` also prints."
   @spec write_host(Path.t(), String.t()) :: :ok
   def write_host(dir, text), do: put_changed(dir, "host.md", text)
