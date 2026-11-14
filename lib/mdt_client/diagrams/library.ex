@@ -21,6 +21,7 @@ defmodule MDTClient.Diagrams.Library do
 
   alias MDTClient.Accounts
   alias MDTClient.Diagrams.Diagram
+  alias MDTClient.SaveTimer
   alias MDTClient.Vault
   alias MDTClient.Vault.Store
 
@@ -271,11 +272,8 @@ defmodule MDTClient.Diagrams.Library do
   # Coalesced rather than written straight away: dragging a shape around saves
   # on every drop, and that becomes one write, while nothing waits longer than
   # @flush_after to become durable.
-  defp changed(%{flush: nil} = state) do
-    %{state | flush: Process.send_after(self(), :flush, @flush_after)}
-  end
-
-  defp changed(state), do: state
+  # A timer whose :flush got lost counts as none (`MDTClient.SaveTimer`).
+  defp changed(state), do: %{state | flush: SaveTimer.ensure(state.flush, @flush_after)}
 
   # Writes now and drops any pending timer, so a later :flush cannot fire
   # against state that has already been written.

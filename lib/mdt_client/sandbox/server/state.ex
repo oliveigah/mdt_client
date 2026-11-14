@@ -15,6 +15,7 @@ defmodule MDTClient.Sandbox.Server.State do
 
   alias MDTClient.Accounts
   alias MDTClient.Desktop.Notifications
+  alias MDTClient.SaveTimer
   alias MDTClient.Vault
 
   alias MDTClient.Sandbox.{
@@ -265,10 +266,24 @@ defmodule MDTClient.Sandbox.Server.State do
   @doc """
   Marks the state for saving: it is written a moment later, once for every change in between.
   """
-  def changed(%{flush: nil} = state),
-    do: %{state | flush: Process.send_after(self(), :flush, @flush_after)}
+  def changed(state), do: %{state | flush: SaveTimer.ensure(state.flush, @flush_after)}
 
-  def changed(state), do: state
+  @doc """
+  Writes the state now, and drops the write that was to follow. For what
+  must not wait, like a handoff accepted onto your branch: its files are
+  there already, and its record must say so even if MDT stops right after.
+  """
+  def saved(state) do
+    if state.flush, do: Process.cancel_timer(state.flush)
+    :ok = persist(state)
+    %{state | flush: nil}
+  end
+
+  @doc """
+  Marks the state for saving again when its `:flush` was lost
+  (`MDTClient.SaveTimer`), so what changed last gets written anyway.
+  """
+  def resave(state), do: if(SaveTimer.lost?(state.flush), do: changed(state), else: state)
 
   @doc """
   Writes what outlives a lock, sealed with the vault key.

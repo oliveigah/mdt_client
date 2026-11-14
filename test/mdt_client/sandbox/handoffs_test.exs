@@ -9,7 +9,18 @@ defmodule MDTClient.Sandbox.HandoffsTest do
   use ExUnit.Case, async: false
 
   alias MDTClient.Sandbox
-  alias MDTClient.Sandbox.{Channel, Guest, Handoff, Handoffs, Mirror, Project, Projects, Share}
+
+  alias MDTClient.Sandbox.{
+    Channel,
+    Guest,
+    Handoff,
+    Handoffs,
+    Mirror,
+    Project,
+    Projects,
+    Server,
+    Share
+  }
 
   @me [
     {"GIT_AUTHOR_NAME", "Someone"},
@@ -37,7 +48,7 @@ defmodule MDTClient.Sandbox.HandoffsTest do
   defp sha(dir, rev), do: dir |> git(["rev-parse", rev]) |> String.trim()
 
   setup do
-    %{username: username} = MDTClient.VaultHelpers.unlocked_identity("handoffs")
+    %{username: username, key: key} = MDTClient.VaultHelpers.unlocked_identity("handoffs")
     base = Path.join(System.tmp_dir!(), "handoffs-#{System.unique_integer([:positive])}")
     on_exit(fn -> File.rm_rf!(base) end)
 
@@ -59,7 +70,7 @@ defmodule MDTClient.Sandbox.HandoffsTest do
     # Your projects folder, shared read-only: every repository in it is a project.
     {:ok, _} = Sandbox.add_share(username, Path.join(base, "host"), :ro)
 
-    %{username: username, repo: repo, vm: vm, base: base, mirror: Path.join(vm, "app")}
+    %{username: username, key: key, repo: repo, vm: vm, base: base, mirror: Path.join(vm, "app")}
   end
 
   # A project, and a task started in its first worktree slot the way an
@@ -456,6 +467,14 @@ defmodule MDTClient.Sandbox.HandoffsTest do
 
       assert {:ok, _} = Handoffs.undo(username, 1)
       assert git(repo, ["status", "--porcelain"]) == ""
+    end
+
+    # Its files are on your branch from that moment: MDT stopping right
+    # after, with no clean stop to save it, must not show it open again.
+    test "is on disk as accepted when it returns", %{username: username, key: key} do
+      assert {:ok, _} = Handoffs.accept(username, 1, :changes)
+      path = MDTClient.Accounts.store_path(username, "sandbox.bin")
+      assert [%Handoff{status: :accepted}] = Server.State.restore(path, key, username).handoffs
     end
 
     test "or saved as a branch to look at, and it stays open", %{username: username, repo: repo} do

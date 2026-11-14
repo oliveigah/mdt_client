@@ -222,13 +222,17 @@ defmodule MDTClient.Sandbox.Server do
     state = if State.external?(), do: State.probe_host(state), else: state
     if State.external?(), do: Machine.write_launcher(username)
     Enum.each(state.grants, &State.schedule_expiry/1)
+    # The loops run on interval timers rather than each tick setting the
+    # next: in development, a tick can be lost while this module is compiled
+    # again (`MDTClient.SaveTimer`), and a lost tick would end its loop.
     send(self(), :sweep)
+    {:ok, _} = :timer.send_interval(@sweep_every, :sweep)
     # After a restart of this process, the proxy tells it again how it is.
     MDTClient.Sandbox.Egress.report_again(username)
 
     if State.external?() do
-      Process.send_after(self(), :poll, @poll_every)
-      Process.send_after(self(), :mirror, @mirror_every)
+      {:ok, _} = :timer.send_interval(@poll_every, :poll)
+      {:ok, _} = :timer.send_interval(@mirror_every, :mirror)
       {:ok, state, {:continue, :check}}
     else
       {:ok, state}
@@ -700,7 +704,9 @@ defmodule MDTClient.Sandbox.Server do
   end
 
   # A handoff, new or updated. Returns those too old to keep, for the
-  # caller to let go of what the store holds for them.
+  # caller to let go of what the store holds for them. Saved at once, as
+  # every change of a handoff's record: they are few, and accepting one
+  # puts its files on your branch first, which its record must not lose.
   def handle_call({:put_handoff, %Handoff{id: id} = handoff, summary}, _from, state) do
     others = Enum.reject(state.handoffs, &(&1.id == id))
     {kept, dropped} = Enum.split([handoff | others], @handoffs_kept)
@@ -709,7 +715,7 @@ defmodule MDTClient.Sandbox.Server do
      state
      |> State.change(:handoffs, fn _ -> kept end)
      |> State.log(%{outcome: :handoff, summary: summary})
-     |> State.changed()}
+     |> State.saved()}
   end
 
   # What the list shows of one, worked out again: nothing to log.
@@ -736,7 +742,7 @@ defmodule MDTClient.Sandbox.Server do
            Enum.map(state.handoffs, &if(&1.id == id, do: updated, else: &1))
          end)
          |> State.log(%{outcome: :handoff, summary: summary})
-         |> State.changed()}
+         |> State.saved()}
     end
   end
 
@@ -945,8 +951,6 @@ defmodule MDTClient.Sandbox.Server do
   # them, and updates the mirrors whose branches moved.
   @impl true
   def handle_info(:mirror, state) do
-    Process.send_after(self(), :mirror, @mirror_every)
-
     if state.vm.status == :running and state.projects != [] and
          :mirror not in Map.values(state.tasks) do
       %{username: username, projects: projects, mirror: mirror} = state
@@ -963,8 +967,6 @@ defmodule MDTClient.Sandbox.Server do
   end
 
   def handle_info(:poll, state) do
-    Process.send_after(self(), :poll, @poll_every)
-
     if state.vm.busy != nil or Enum.any?(Map.values(state.tasks), &(&1 == :check)),
       do: {:noreply, state},
       else: {:noreply, Machine.check(state)}
@@ -978,11 +980,9 @@ defmodule MDTClient.Sandbox.Server do
     do: {:noreply, Grants.sweep(state)}
 
   # Timers stand still while the machine sleeps, and a wall clock can be set
-  # back: looking again every so often keeps what is shown right.
-  def handle_info(:sweep, state) do
-    Process.send_after(self(), :sweep, @sweep_every)
-    {:noreply, Grants.sweep(state)}
-  end
+  # back: looking again every so often keeps what is shown right. A write
+  # whose :flush got lost is made here too.
+  def handle_info(:sweep, state), do: {:noreply, state |> Grants.sweep() |> State.resave()}
 
   # Each timer names the deadline it was set for: a command waiting a second
   # time, with its output, has a later one, which its first timer must not
